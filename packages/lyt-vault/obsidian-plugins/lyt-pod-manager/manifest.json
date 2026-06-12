@@ -1,0 +1,11 @@
+{
+  "id": "lyt-pod-manager",
+  "name": "Lyt Pod Manager",
+  "version": "0.9.0",
+  "minAppVersion": "1.4.0",
+  "author": "Alexandru Mares",
+  "authorUrl": "https://allemaar.com",
+  "description": "Mesh-boundary coloring + write-permission badges over the Lyt pod-map vault. Activates only on vaults with vault.kind=pod-map in .lyt/vault.yon. Read-only enhancement — the pod-map vault renders fully in stock Obsidian without this plugin (degrade-to-baseline contract).",
+  "isDesktopOnly": false,
+  "_post_alpha": "community-store submission scheduled (the ratified default condition 5; manifest semver synced across wizard-install and community-store distribution surfaces)"
+}

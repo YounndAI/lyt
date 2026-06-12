@@ -1,0 +1,18 @@
+@DOC ver=2.0 | id=lyt-automators-lane-builder | title="Lyt lane-builder automator" | domain=yai.lyt
+
+@SEC name="Search"
+
+@AUTOMATOR rid=automator:lane-builder | name=lane-builder | version=1.0.0
+  | archetype=aggregator | cluster=search
+  | keywords=[lanes,tags,clustering,search-index]
+  | description="Rebuild tag-frequency lanes index per v1.D.1a — clusters notes by frontmatter tag into per-vault search lanes"
+  | source=system | signed_by=system:lyt
+  | runtime=deterministic | transaction_mode=none | idempotent:bool=true | timeout_ms:int=60000
+  | schedule="0 3 * * *" | priority:int=3
+  | machine_lease=none | concurrency=parallel | requires_role=[automator-runner]
+  | scope=vault | reads_scope=[vault] | writes_scope=[vault]
+  | triggers=[write-threshold:50]
+  | as_roles=[automator:system]
+  | llm_capability=none
+  | retention.hot=7d | retention.warm=90d | retention.cold=1y | retention.shred_at=1y
+  | log_level=info

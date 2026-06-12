@@ -1,0 +1,9 @@
+@DOC ver=2.0 | id=pattern:knowledge-capture | title="Knowledge Capture" | domain=yai.lyt@1.0 | kind=cfg | profile=agent
+
+@PATTERN id="knowledge-capture" | name="Knowledge Capture" | version="0.1.0"
+
+@VERB id="capture" | template="capture.md" | path-glob="<vault>/notes/<date>-<slug>.md"
+@VERB id="recall" | template="recall.md" | path-glob="<vault>/notes/recall-<date>-<slug>.md"
+
+@META key=description | value="Capture a Figment into a Lyt vault (Obsidian-flavored markdown with frontmatter); recall surfaces prior captures by keyword."
+@META key=skills | value="/lyt-capture, /lyt-recall"

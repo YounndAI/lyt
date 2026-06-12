@@ -1,0 +1,4 @@
+# Sponsor button — GitHub Sponsors (YounndAI organization).
+# Renders the "Sponsor" button once the org sponsor profile is published at
+# https://github.com/sponsors/YounndAI . Until then it is inert (no harm).
+github: YounndAI

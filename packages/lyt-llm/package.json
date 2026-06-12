@@ -1,0 +1,71 @@
+{
+  "name": "@younndai/lyt-llm",
+  "version": "0.9.0",
+  "description": "Lyt LLM gateway — multi-source LLM routing for AI-assisted vault operations. Composes 4 adapters (ai-relay external / Ollama local / Claude Code-Codex harness / BYOK) behind a single createLlmGateway() surface, with per-automator source preferences, hard constraints, and a per-run cost-budget hard-stop. Registers std:llm.* ops with @younndai/lyt-runner.",
+  "homepage": "https://linkyourthink.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/younndai/lyt",
+    "directory": "packages/lyt-llm"
+  },
+  "author": {
+    "name": "MARLINK TRADING SRL (YounndAI)",
+    "url": "https://younndai.com"
+  },
+  "contributors": [
+    {
+      "name": "Alexandru Mareș",
+      "url": "https://allemaar.com"
+    }
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.9",
+    "npm": ">=10"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "clean": "rimraf --glob dist .turbo *.tsbuildinfo",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
+  },
+  "dependencies": {
+    "@younndai/ai-relay": "^3.0.0"
+  },
+  "devDependencies": {
+    "@lyt/typescript-config": "*",
+    "@types/node": "^22.10.5",
+    "rimraf": "*",
+    "typescript": "*",
+    "vitest": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "lyt",
+    "llm",
+    "ai",
+    "ollama",
+    "byok",
+    "younndai"
+  ]
+}

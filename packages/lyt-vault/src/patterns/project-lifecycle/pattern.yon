@@ -1,0 +1,10 @@
+@DOC ver=2.0 | id=pattern:project-lifecycle | title="Project Lifecycle" | domain=yai.lyt@1.0 | kind=cfg | profile=agent
+
+@PATTERN id="project-lifecycle" | name="Project Lifecycle" | version="0.1.0"
+
+@VERB id="project-init" | template="project-init.md" | path-glob="<vault>/Projects/<project>/<project>.md"
+@VERB id="checkpoint" | template="checkpoint.md" | path-glob="<vault>/Projects/<project>/work/<date>-checkpoint-<slug>.md"
+@VERB id="close" | template="close.md" | path-glob="<vault>/Projects/<project>/work/<date>-close-<slug>.md"
+@VERB id="archive" | template="archive.md" | path-glob="<vault>/Projects/<project>/work/<date>-archive-<slug>.md"
+
+@META key=description | value="Full project lifecycle: init (project MOC), checkpoint (mid-arc review), close (completion summary), archive (long-term storage transition)."

@@ -1,0 +1,65 @@
+{
+  "name": "lyt-monorepo",
+  "private": true,
+  "description": "Lyt — Link Your Think — federated markdown-vault mesh with AI agent integration. Monorepo for @younndai/{lyt-vault,lyt-mesh,lyt-skills,lyt-mcp,lyt-runner,lyt-llm} and the meta @younndai/lyt package.",
+  "homepage": "https://linkyourthink.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/younndai/lyt"
+  },
+  "author": {
+    "name": "MARLINK TRADING SRL (YounndAI)",
+    "url": "https://younndai.com"
+  },
+  "contributors": [
+    {
+      "name": "Alexandru Mareș",
+      "url": "https://allemaar.com"
+    }
+  ],
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20.9",
+    "npm": ">=10"
+  },
+  "packageManager": "npm@11.8.0",
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "dev": "turbo run dev",
+    "clean": "turbo run clean && rimraf node_modules .turbo",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md,yml,yaml}\" --ignore-path .prettierignore",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md,yml,yaml}\" --ignore-path .prettierignore",
+    "syncpack:check": "syncpack list-mismatches",
+    "syncpack:fix": "syncpack fix-mismatches",
+    "manypkg:check": "manypkg check",
+    "manypkg:fix": "manypkg fix",
+    "precheck-publish": "node scripts/check-no-vendored-deps.mjs && node scripts/npm-publish-precheck.mjs",
+    "prepublishOnly": "npm run precheck-publish"
+  },
+  "devDependencies": {
+    "@manypkg/cli": "^0.25.1",
+    "prettier": "^3.7.4",
+    "rimraf": "^6.0.1",
+    "syncpack": "^14.0.1",
+    "tsx": "^4.20.6",
+    "turbo": "^2.7.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "typescript": "*",
+    "@types/node": "*"
+  },
+  "dependencies": {
+    "@younndai/ai-relay": "^3.0.0",
+    "@younndai/domains": "^2.0.0",
+    "@younndai/yon-parser": "^2.0.0",
+    "@younndai/yon-runner": "^2.0.0"
+  }
+}

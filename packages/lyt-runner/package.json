@@ -1,0 +1,74 @@
+{
+  "name": "@younndai/lyt-runner",
+  "version": "0.9.0",
+  "description": "Lyt automation runner — a thin layer on @younndai/yon-runner that expands declarative @AUTOMATOR + @DIRECTIVE records into core YON before execution and registers the vault-aware std:vault.* + std:mesh.* + std:lease.* ops.",
+  "homepage": "https://linkyourthink.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/younndai/lyt",
+    "directory": "packages/lyt-runner"
+  },
+  "author": {
+    "name": "MARLINK TRADING SRL (YounndAI)",
+    "url": "https://younndai.com"
+  },
+  "contributors": [
+    {
+      "name": "Alexandru Mareș",
+      "url": "https://allemaar.com"
+    }
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.9",
+    "npm": ">=10"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "clean": "rimraf --glob dist .turbo *.tsbuildinfo",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
+  },
+  "dependencies": {
+    "@younndai/yon-runner": "^2.0.0",
+    "@younndai/yon-parser": "^2.0.0",
+    "@younndai/lyt-vault": "^0.9.0",
+    "@younndai/lyt-llm": "^0.9.0",
+    "@libsql/client": "^0.15.15"
+  },
+  "devDependencies": {
+    "@lyt/typescript-config": "*",
+    "@types/node": "^22.10.5",
+    "rimraf": "*",
+    "typescript": "*",
+    "vitest": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "lyt",
+    "runner",
+    "yon",
+    "automator",
+    "younndai"
+  ]
+}

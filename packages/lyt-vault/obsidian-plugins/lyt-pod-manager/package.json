@@ -1,0 +1,16 @@
+{
+  "name": "lyt-pod-manager",
+  "version": "0.9.0",
+  "description": "Obsidian community plugin — Pod Manager for Lyt pod-map vaults (mesh-boundary coloring + write-permission badges).",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "build": "esbuild main.ts --bundle --external:obsidian --format=cjs --target=es2020 --outfile=main.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0",
+    "obsidian": "^1.4.0",
+    "typescript": "^5.0.0"
+  },
+  "_isolation": "This package is OUTSIDE the lyt npm workspace graph (the repo-root workspace manifest enumerates packages/*, not this nested folder). The pre-bundled main.js ships alongside main.ts so Obsidian can load directly without an install/build step in the consumer's environment."
+}

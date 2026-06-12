@@ -1,0 +1,60 @@
+# Dependencies
+node_modules/
+
+# Legacy vendored-tarball dir (retired; deps resolve from the npm registry)
+vendor/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Turbo cache
+.turbo/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Temp
+.tmp/
+tmp/
+.scratch/
+
+# Per-vault libSQL derived state (when running locally for tests)
+**/.lyt/lyt.db
+**/.lyt/lyt.db-shm
+**/.lyt/lyt.db-wal
+**/.lyt/outbox.db
+
+# Local lyt home (when tests use ./.lyt-home)
+.lyt-home/
+
+# Local agent state (Claude Code worktrees, settings) — never commit
+.claude/
+
+
+# Release-engineering scratch (packs, staging snapshots, gate artifacts)
+scripts/public-release/.tmp-packed-proof/
+scripts/public-release/.tmp-tarball-scan/
+scripts/public-release/.staging-younndai-lyt/
+.test-gate.log
+.test-gate.exit

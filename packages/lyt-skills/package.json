@@ -1,0 +1,72 @@
+{
+  "name": "@younndai/lyt-skills",
+  "version": "0.9.0",
+  "description": "Lyt harness skills — 15 skills (/lyt-plan, /lyt-progress, /lyt-result, /lyt-retro, /lyt-insight, /lyt-handoff, /lyt-decision, /lyt-pattern, /lyt-capture, /lyt-recall, /lyt-pod, /lyt-mesh-explore, /lyt-primer-context, /lyt-search, /lyt-sync) symlinked tri-runtime into ~/.claude/skills/, ~/.codex/skills/, ~/.agents/skills/. Composed into the `lyt skills install` and `lyt skills list` meta-CLI verbs.",
+  "homepage": "https://linkyourthink.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/younndai/lyt",
+    "directory": "packages/lyt-skills"
+  },
+  "author": {
+    "name": "MARLINK TRADING SRL (YounndAI)",
+    "url": "https://younndai.com"
+  },
+  "contributors": [
+    {
+      "name": "Alexandru Mareș",
+      "url": "https://allemaar.com"
+    }
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.9",
+    "npm": ">=10"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "clean": "rimraf --glob dist .turbo *.tsbuildinfo",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
+  },
+  "dependencies": {
+    "@younndai/lyt-vault": "^0.9.0",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@lyt/typescript-config": "*",
+    "@types/node": "^22.10.5",
+    "rimraf": "*",
+    "typescript": "*",
+    "vitest": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "lyt",
+    "claude-code",
+    "skill",
+    "harness",
+    "younndai"
+  ]
+}

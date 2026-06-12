@@ -1,0 +1,18 @@
+@DOC ver=2.0 | id=lyt-automators-arc-builder | title="Lyt arc-builder automator" | domain=yai.lyt
+
+@SEC name="Search"
+
+@AUTOMATOR rid=automator:arc-builder | name=arc-builder | version=1.0.0
+  | archetype=aggregator | cluster=search
+  | keywords=[arcs,narrative,position-ordered,search-index]
+  | description="Rebuild position-ordered narrative arcs index per v1.D.2a — detects arc membership via frontmatter `arcs:` field + embedded @ARC/@ARC_MEMBER records in markdown bodies"
+  | source=system | signed_by=system:lyt
+  | runtime=deterministic | transaction_mode=none | idempotent:bool=true | timeout_ms:int=60000
+  | schedule="0 3 * * *" | priority:int=3
+  | machine_lease=none | concurrency=parallel | requires_role=[automator-runner]
+  | scope=vault | reads_scope=[vault] | writes_scope=[vault]
+  | triggers=[write-threshold:50]
+  | as_roles=[automator:system]
+  | llm_capability=none
+  | retention.hot=7d | retention.warm=90d | retention.cold=1y | retention.shred_at=1y
+  | log_level=info

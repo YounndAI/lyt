@@ -1,0 +1,13 @@
+@DOC ver=2.0 | id=pattern:work-management | title="Work Management" | domain=yai.lyt@1.0 | kind=cfg | profile=agent
+
+@PATTERN id="work-management" | name="Work Management" | version="0.1.0"
+
+@VERB id="plan" | template="plan.md" | path-glob="<vault>/Projects/<project>/work/<date>-plan-<slug>.md"
+@VERB id="progress" | template="progress.md" | path-glob="<vault>/Projects/<project>/work/<date>-progress-<slug>.md"
+@VERB id="result" | template="result.md" | path-glob="<vault>/Projects/<project>/work/<date>-result-<slug>.md"
+@VERB id="retro" | template="retro.md" | path-glob="<vault>/Projects/<project>/work/<date>-retro-<slug>.md"
+@VERB id="insight" | template="insight.md" | path-glob="<vault>/Projects/<project>/work/<date>-insight-<slug>.md"
+@VERB id="handoff" | template="handoff.md" | path-glob="<vault>/Handoffs/<project>/<date>-<slug>.md"
+
+@META key=description | value="Pre-action design (plan), mid-session status (progress), post-action outcome (result), deliberate retrospective (retro), distilled project learning (insight), inter-session brief (handoff)."
+@META key=mirrors | value="<vault>/Patterns/Work Management/"

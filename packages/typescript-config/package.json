@@ -1,0 +1,14 @@
+{
+  "name": "@lyt/typescript-config",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared TypeScript configurations for the Lyt monorepo. Each package extends one of these bases.",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "files": [
+    "base.json",
+    "node.json"
+  ]
+}

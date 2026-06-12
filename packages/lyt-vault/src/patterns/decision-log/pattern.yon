@@ -1,0 +1,8 @@
+@DOC ver=2.0 | id=pattern:decision-log | title="Decision Log" | domain=yai.lyt@1.0 | kind=cfg | profile=agent
+
+@PATTERN id="decision-log" | name="Decision Log" | version="0.1.0"
+
+@VERB id="decision" | template="decision.md" | path-glob="<vault>/Projects/<project>/work/<date>-decision-<slug>.md"
+@VERB id="rationale" | template="rationale.md" | path-glob="<vault>/Projects/<project>/work/<date>-rationale-<slug>.md"
+
+@META key=description | value="Locked decisions with explicit rationale. A `decision` records the choice; a `rationale` deep-dive supports it. Both are durable artifacts."

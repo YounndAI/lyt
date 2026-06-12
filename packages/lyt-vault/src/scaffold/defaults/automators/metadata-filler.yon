@@ -1,0 +1,19 @@
+@DOC ver=2.0 | id=lyt-automators-housekeeping | title="Lyt housekeeping automators" | domain=yai.lyt
+
+@SEC name="Housekeeping"
+
+@AUTOMATOR rid=automator:metadata-filler | name=metadata-filler | version=0.1.0
+  | archetype=filler | cluster=housekeeping
+  | keywords=[frontmatter,contract,missing-data]
+  | description="Fills missing frontmatter fields for notes not following v1 contract"
+  | source=system | signed_by=system:lyt
+  | runtime=deterministic | transaction_mode=none | idempotent:bool=true | timeout_ms:int=30000
+  | subscribes_to=[vault.note.created,vault.note.modified]
+  | schedule=on-sync | priority:int=3
+  | machine_lease=none | concurrency=parallel | requires_role=[automator-runner]
+  | scope=vault | reads_scope=[vault] | writes_scope=[vault]
+  | field_ownership=[created,modified,links-out-of-vault]
+  | as_roles=[automator:system]
+  | llm_capability=none
+  | retention.hot=7d | retention.warm=90d | retention.cold=1y | retention.shred_at=1y
+  | log_level=info

@@ -1,0 +1,81 @@
+{
+  "name": "@younndai/lyt-vault",
+  "version": "0.9.0",
+  "description": "Lyt vault primitive — CLI verbs to create and manage individual Lyt Vaults (folder + .obsidian + .lyt scaffold).",
+  "homepage": "https://linkyourthink.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/younndai/lyt",
+    "directory": "packages/lyt-vault"
+  },
+  "author": {
+    "name": "MARLINK TRADING SRL (YounndAI)",
+    "url": "https://younndai.com"
+  },
+  "contributors": [
+    {
+      "name": "Alexandru Mareș",
+      "url": "https://allemaar.com"
+    }
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.9",
+    "npm": ">=10"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "lyt-vault": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "obsidian-plugins",
+    "scripts/postinstall.mjs",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc && node ./scripts/copy-help-topics.mjs && node ./scripts/copy-patterns.mjs && node ./scripts/copy-yon-defaults.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "clean": "rimraf --glob dist .turbo *.tsbuildinfo",
+    "postinstall": "node ./scripts/postinstall.mjs",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
+  },
+  "dependencies": {
+    "@libsql/client": "^0.15.15",
+    "commander": "^12.1.0",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@lyt/typescript-config": "*",
+    "@types/node": "^22.10.5",
+    "rimraf": "*",
+    "typescript": "*",
+    "vitest": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "lyt",
+    "vault",
+    "obsidian",
+    "markdown",
+    "cli",
+    "younndai"
+  ]
+}
