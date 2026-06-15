@@ -24,6 +24,25 @@ import { getIdentity } from "../util/identity.js";
 import { getUserPatternsDir } from "../util/pattern-paths.js";
 import { parsePatternYon, type VerbRecord } from "../yon/pattern.js";
 import { captureIndexFlow } from "./capture-index.js";
+import { isPureSubscriberVault } from "./writability.js";
+
+// hardening pass (Cohort-1 fix-pass) — the actionable refusal a pure-subscriber WRITE
+// attempt raises. A read-only subscribed vault has no push rights to its
+// upstream, so ANY figment write into it (capture, decision, plan, AND `recall`
+// — which writes a report Figment) strands a local-only stray that `lyt sync`
+// can never push (the hardening pass sync-jam). Refuse BEFORE the write so nothing lands
+// on disk; name the remedy (write into a home vault, or request write access).
+//
+// Cohort-1 fix-pass release review (Major) — the message is now VERB-AGNOSTIC. The
+// gate fires for every `pattern run` verb, including `recall`; the prior wording
+// ("Capture into one of your home vaults") was wrong for a non-capture verb. A
+// generic "can't write into a subscribed read-only vault" phrasing reads
+// correctly whatever the verb. Exported so the command layer + tests can assert
+// on the message without string-matching.
+export const SUBSCRIBER_CAPTURE_REFUSAL = (vaultName: string): string =>
+  `vault '${vaultName}' is a subscribed read-only vault — you can't write into it ` +
+  `(no push rights to its upstream; a write would strand a commit 'lyt sync' can never push). ` +
+  `Use one of your home vaults instead, or request write access to '${vaultName}'.`;
 
 export interface PatternRunArgs {
   patternName: string;
@@ -92,6 +111,17 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
     // frozen vault. Gate at the shared chokepoint: covers `lyt capture`,
     // `lyt pattern run`, and every /lyt-* skill that wraps them.
     await enforceNotFrozen(row.path, row.name);
+    // hardening pass (Cohort-1 fix-pass) — the SECOND gate at this chokepoint: refuse a
+    // content write into a PURE-SUBSCRIBER read-only vault. Sibling miss to
+    // the freeze gate above (same chokepoint, second gate absent): live S3
+    // repro wrote a figment into a subscribed `writable:false` vault, then
+    // hardening pass turned that stray write into a permanent sync jam. The signal is
+    // CHEAP + LOCAL — `mesh_vaults.role` (pure subscriber = subscribed, not
+    // home), the SAME query deriveVaultWritable runs — so NO gh probe joins
+    // the hot capture path. Refuse BEFORE any write so nothing lands on disk.
+    if (await isPureSubscriberVault(db, row.rid)) {
+      throw new Error(SUBSCRIBER_CAPTURE_REFUSAL(row.name));
+    }
   } finally {
     await closeRegistry(db);
   }

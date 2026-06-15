@@ -111,9 +111,9 @@ function parseOwnerRepoFromGitUrl(gitUrl: string | null): OwnerRepo | null {
   return null;
 }
 
-type RoleSummary = { hasHome: boolean; hasSubscribed: boolean };
+export type RoleSummary = { hasHome: boolean; hasSubscribed: boolean };
 
-async function loadRoleSummary(db: Client, vaultRid: Uint8Array): Promise<RoleSummary> {
+export async function loadRoleSummary(db: Client, vaultRid: Uint8Array): Promise<RoleSummary> {
   const r = await db.execute({
     sql: "SELECT role FROM mesh_vaults WHERE vault_rid = ?",
     args: [vaultRid],
@@ -126,6 +126,21 @@ async function loadRoleSummary(db: Client, vaultRid: Uint8Array): Promise<RoleSu
     else if (role === "subscribed") hasSubscribed = true;
   }
   return { hasHome, hasSubscribed };
+}
+
+// hardening pass (Cohort-1 fix-pass) — the CHEAP, LOCAL read-only signal shared
+// by the capture write-gate and the sync skip-decision. A PURE SUBSCRIBER is a
+// vault registered `subscribed` in some mesh and NOT `home` anywhere: by the
+// MA-1 home-first contract in deriveVaultWritable this is exactly the
+// `writable:false / subscriber-default-false` verdict — derivable with NO gh
+// probe (no network on the hot capture path). This is the SAME mesh_vaults.role
+// query deriveVaultWritable runs; we expose it standalone so write/sync flows
+// can refuse a known-unwritable vault without paying for (or depending on) a
+// live gh round-trip. A `home` vault — even one subscribed elsewhere — is NOT a
+// pure subscriber (home wins), so this never refuses a vault the user owns.
+export async function isPureSubscriberVault(db: Client, vaultRid: Uint8Array): Promise<boolean> {
+  const roles = await loadRoleSummary(db, vaultRid);
+  return !roles.hasHome && roles.hasSubscribed;
 }
 
 export interface DeriveVaultWritableOpts {
@@ -146,8 +161,9 @@ export async function deriveVaultWritable(
 
   // MA-1 home-first: a vault that is `home` anywhere derives via gh
   // probe (home wins over a subscribed-elsewhere row). Pure subscribers
-  // (subscribed without a home row) get false. Orphan vaults (no rows
-  // at all) get "unknown" — intent never declared.
+  // (subscribed without a home row) get false — the same local-only
+  // signal isPureSubscriberVault() exposes to the capture/sync gates.
+  // Orphan vaults (no rows at all) get "unknown" — intent never declared.
   if (!roles.hasHome && roles.hasSubscribed) {
     const v: WritabilityVerdict = {
       writable: false,
@@ -194,18 +210,54 @@ export async function deriveVaultWritable(
     return { writable: "unknown", reason: "no-remote" };
   }
 
-  try {
-    const canPush = await checkPushPermission({
-      owner: ownerRepo.owner,
-      repo: ownerRepo.repo,
-      ...(opts.gh !== undefined ? { gh: opts.gh } : {}),
-    });
-    const v: WritabilityVerdict = canPush
-      ? { writable: true, reason: "gh-viewerCanPush-true" }
-      : { writable: false, reason: "gh-viewerCanPush-false" };
-    cache.set(vault.ridHex, { verdict: v, expiresAt: Date.now() + TTL_MS });
-    return v;
-  } catch {
-    return { writable: "unknown", reason: "gh-unavailable" };
+  // hardening pass (Cohort-1 fix-pass) — RETRY ONCE before classifying gh-unavailable.
+  // ROOT CAUSE (live S5 repro): the SAME session's probe returned DEFINITE
+  // verdicts for two subscribed vaults seconds earlier, yet the user's OWN
+  // freshly-created `personal/main` resolved `writable:"unknown"
+  // /gh-unavailable`. The probe surface works; the home-vault path threw a
+  // ONE-OFF. The likeliest shape on a just-created repo is GitHub's own
+  // eventual consistency: `gh repo view <owner>/<repo>` can briefly 404 /
+  // "could not resolve to a Repository" for a repo created seconds earlier
+  // (the API node hasn't caught up) — checkPushPermission maps that 404 to
+  // `false` (not a throw), so a pure 404 would NOT land here; the throw is the
+  // transient-error shape (rate-limit blip, a momentary auth re-handshake, or
+  // a Windows spawn hiccup distinct from the V-B-9 ENOENT already handled).
+  // A single retry collapses that transient into a definite verdict, so a
+  // vault the user owns + can push resolves `writable:true` on the common
+  // path instead of forcing a needless `[lyt.gate]` "save local-only?" pause
+  // on the user's own vault. If BOTH attempts throw it's genuinely
+  // indeterminate → keep `unknown` (the handler pause is then correct), and
+  // never cache it (a transient outage must not pin the vault for a minute).
+  // Cohort-1 fix-pass release review (Minor) — a ~300ms backoff before attempt 2.
+  // The retry's honest benefit is collapsing a TRANSIENT throw (a rate-limit
+  // blip, a momentary auth re-handshake, a Windows spawn hiccup) into a definite
+  // verdict; the small pause gives such a blip a moment to settle rather than
+  // firing both probes inside the same millisecond. It does NOT fix GitHub's
+  // eventual-consistency on a just-created repo — but that case surfaces as a
+  // 404 that `checkPushPermission` already maps to `false` (not a throw), so it
+  // never reaches this retry loop. The backoff is skipped when a test gh
+  // executor is injected (opts.gh) so unit tests stay fast + deterministic.
+  const RETRY_BACKOFF_MS = 300;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0 && opts.gh === undefined) {
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+    }
+    try {
+      const canPush = await checkPushPermission({
+        owner: ownerRepo.owner,
+        repo: ownerRepo.repo,
+        ...(opts.gh !== undefined ? { gh: opts.gh } : {}),
+      });
+      const v: WritabilityVerdict = canPush
+        ? { writable: true, reason: "gh-viewerCanPush-true" }
+        : { writable: false, reason: "gh-viewerCanPush-false" };
+      cache.set(vault.ridHex, { verdict: v, expiresAt: Date.now() + TTL_MS });
+      return v;
+    } catch (err) {
+      lastErr = err;
+    }
   }
+  void lastErr;
+  return { writable: "unknown", reason: "gh-unavailable" };
 }

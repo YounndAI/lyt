@@ -414,6 +414,28 @@ export type { BackfillFigmentCachesResult } from "./flows/backfill-figment-cache
 // reindex (FTS reconcile + per-vault lanes/arcs; cross-vault rollup deferred).
 export { captureIndexFlow } from "./flows/capture-index.js";
 export type { CaptureIndexArgs, CaptureIndexResult } from "./flows/capture-index.js";
+// v1.G.2 writability derivation + the hardening pass cheap-local read-only
+// signal. `isPureSubscriberVault` is the no-gh-probe pure-subscriber detector
+// the capture write-gate and the sync skip-decision share so a
+// known-unwritable vault is refused/skipped without a network round-trip.
+export {
+  deriveVaultWritable,
+  isPureSubscriberVault,
+  loadRoleSummary,
+  __clearWritabilityCache,
+} from "./flows/writability.js";
+export type {
+  WritabilityVerdict,
+  DeriveVaultWritableOpts,
+  RoleSummary,
+} from "./flows/writability.js";
+// hardening pass / C1 (Cohort-1 fix-pass release review) — the ONE shared `git push`
+// permission-denied classifier. Both push paths (lyt-mesh `sync` + lyt-vault
+// `reconcile-publish`) import THIS copy; the duplicate in-file copies were
+// deleted. Terminal only on a genuine permission/auth co-signal; default
+// non-terminal (retry-safe) so a transient 403 rate-limit / SSH timeout is
+// retried, never dropped from the capless outbox.
+export { isPermissionDeniedPush } from "./util/push-classify.js";
 // V-C-1 Phase B (L2) — reindex-on-inbound: all-tier rebuild + watermark for a
 // brought-in vault (adopt / subscribe). Closes V-B-6 (FTS-only inbound index).
 export { reindexInboundVault } from "./flows/reindex-inbound.js";

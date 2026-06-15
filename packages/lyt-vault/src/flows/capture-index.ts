@@ -56,6 +56,7 @@ import { writeIndexWatermark } from "../util/index-watermark.js";
 import { reconcileFigmentWrite } from "./reconcile-figment-write.js";
 import { rebuildLanesFlow } from "./rebuild-lanes.js";
 import { rebuildArcsFlow } from "./rebuild-arcs.js";
+import { isPureSubscriberVault } from "./writability.js";
 
 export interface CaptureIndexArgs {
   // The figment's VAULT — supply at least one of name/path; the other is
@@ -146,6 +147,31 @@ export async function captureIndexFlow(args: CaptureIndexArgs): Promise<CaptureI
         `not indexed: vault '${vaultName}' is frozen until ${frozenState.frozenUntil ?? "<unknown>"} ` +
         `(${frozenState.remaining ?? "?"}). The figment file is on disk but stays out of the index; ` +
         `run 'lyt vault unfreeze ${vaultName}' then 'lyt capture --index-only ${args.relPath} --vault ${vaultName}'.`,
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  // hardening pass (Cohort-1 fix-pass) — the `--index-only` skill seam reaches here
+  // DIRECTLY (the /lyt-capture skill writes the figment inline with its own
+  // Write tool, then calls `lyt capture --index-only`), bypassing the
+  // patternRunFlow gate. Refuse to index a figment into a PURE-SUBSCRIBER
+  // read-only vault: the same cheap LOCAL `mesh_vaults.role` signal (subscribed,
+  // not home), NO gh probe. Honor this flow's never-throw contract — surface a
+  // not-indexed REFUSAL note naming the remedy (and that the file should be
+  // moved/removed) rather than throwing. The CLI/skill surfaces the note so the
+  // agent learns the write should not have happened; the markdown is the
+  // caller's to relocate. Detect-only when no registry exists (a path-only
+  // wizard call has no mesh rows — never a subscriber).
+  const subscriberNote = await subscriberRefusalNote(args, vaultName, vaultPath);
+  if (subscriberNote !== null) {
+    return {
+      vaultName,
+      vaultPath,
+      relPath: args.relPath,
+      ftsIndexed: false,
+      keywordsIndexed: false,
+      deferred: false,
+      note: subscriberNote,
       durationMs: Date.now() - startedAt,
     };
   }
@@ -295,6 +321,41 @@ async function resolveVaultIdentity(
       throw new Error(`no vault registered with name '${args.vaultName}'.`);
     }
     return { vaultName: row.name, vaultPath: row.path };
+  } finally {
+    if (!callerSupplied) await closeRegistry(db);
+  }
+}
+
+// resolve whether the capture target is a pure-subscriber read-only
+// vault and, if so, return the actionable refusal note (else null). Uses the
+// CHEAP LOCAL `mesh_vaults.role` signal only — NO gh probe. Never CREATES the
+// registry: a path-only wizard call on a machine with no registry has no mesh
+// rows, so it can never be a subscriber → null (proceed). Best-effort: any
+// lookup failure returns null (fail-open to the never-throw contract; the
+// patternRunFlow gate is the primary, hard refusal for the CLI capture path).
+async function subscriberRefusalNote(
+  args: CaptureIndexArgs,
+  vaultName: string,
+  vaultPath: string,
+): Promise<string | null> {
+  const haveRegistry = args.registryDb !== undefined || existsSync(getRegistryPath());
+  if (!haveRegistry) return null;
+  const callerSupplied = args.registryDb !== undefined;
+  const db = args.registryDb ?? (await openRegistry());
+  try {
+    const row =
+      (await getVaultByPath(db, vaultPath)) ??
+      (args.vaultName !== undefined ? await getVaultByName(db, args.vaultName) : null);
+    if (row === null) return null; // unregistered → no mesh role → proceed
+    if (!(await isPureSubscriberVault(db, row.rid))) return null;
+    return (
+      `not indexed: vault '${vaultName}' is a subscribed read-only vault (you can't push to its ` +
+      `upstream), so capturing into it would strand a local-only stray commit that 'lyt sync' can ` +
+      `never push. The figment file is on disk but stays out of the index — move it into one of your ` +
+      `home vaults (or request write access to '${vaultName}'), then re-capture there.`
+    );
+  } catch {
+    return null;
   } finally {
     if (!callerSupplied) await closeRegistry(db);
   }

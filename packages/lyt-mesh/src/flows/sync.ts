@@ -25,6 +25,8 @@ import {
   isConfigPath,
   isFigmentPath,
   isLytDbCorrupt,
+  isPermissionDeniedPush,
+  isPureSubscriberVault,
   listMeshes,
   listSubscriptionsForMesh,
   listVaults,
@@ -53,6 +55,13 @@ export type VaultSyncStatus =
   | "diverged-synced"
   | "conflict"
   | "skipped-frozen"
+  // hardening pass (Cohort-1 fix-pass) — a PURE-SUBSCRIBER read-only vault: sync PULLS
+  // (read-only vaults stay fresh) but skips BOTH commit and push, so a stray
+  // local change never becomes an unpushable outbox op. Mirrors skipped-frozen:
+  // sync makes no write claim on the vault. The recovery rider surfaces
+  // `readonlyDiverged` + a reset-to-origin remedy when the vault already
+  // carries an unpushable local commit (the live-tester wedged state).
+  | "skipped-readonly"
   | "skipped-tombstoned"
   | "skipped-disconnected"
   | "skipped-missing"
@@ -85,6 +94,13 @@ export interface VaultSyncReport {
   // message is suffixed with the `lyt reindex` remedy. Additive; absent when
   // the index is healthy or missing (never-indexed vaults are healthy).
   indexCorrupt?: boolean;
+  // hardening pass recovery rider (Cohort-1 fix-pass) — true on a `skipped-readonly`
+  // vault that ALREADY carries a local commit ahead of (or divergent from) its
+  // upstream that can never be pushed (the live-tester wedged state, created by
+  // the pre-fix hardening pass stray write + hardening pass commit). The `message` then names the
+  // reset-to-origin remedy so the user can un-jam it. Additive; absent when the
+  // read-only vault is clean (the common case).
+  readonlyDiverged?: boolean;
 }
 
 export interface SyncFrictionHint {
@@ -130,6 +146,17 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
   // brief OD-9 default extension path: no meta-CLI edit, no new
   // syncOneVault call — additive discriminator only.
   let subscribedRidHexes = new Set<string>();
+  // hardening pass (Cohort-1 fix-pass) — the rids of PURE-SUBSCRIBER read-only vaults
+  // (subscribed in some mesh, home in none), derived from the SAME cheap LOCAL
+  // `mesh_vaults.role` signal the capture gate and `deriveVaultWritable`
+  // use — NO gh probe in the sync loop. syncOneVault skips commit+push for
+  // these (pull-only). The OUTBOX itself lives in reconcile-publish (the publish
+  // pass), NOT here: sync's job is to skip the local COMMIT that would otherwise
+  // feed an unpushable publish op downstream — reconcile-publish separately
+  // EXCLUDES pure subscribers from its work-set, so no outbox op is ever
+  // enqueued for them. Computed once here while the registry is open, keyed by
+  // rid hex.
+  const readOnlyRidHexes = new Set<string>();
   try {
     const all = await listVaults(db);
     candidates =
@@ -143,20 +170,26 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         subscribedRidHexes.add(uuid7BytesToHex(s.externalVaultRid));
       }
     }
+    for (const v of candidates) {
+      if (await isPureSubscriberVault(db, v.rid)) {
+        readOnlyRidHexes.add(uuid7BytesToHex(v.rid));
+      }
+    }
   } finally {
     await closeRegistry(db);
   }
 
   const reports: VaultSyncReport[] = [];
   for (const v of candidates) {
+    const ridHex = uuid7BytesToHex(v.rid);
     const report = await syncOneVault(
       v,
       runGit,
       now,
       args.resolveMeshContext === true,
       args.message,
+      readOnlyRidHexes.has(ridHex),
     );
-    const ridHex = uuid7BytesToHex(v.rid);
     if (subscribedRidHexes.has(ridHex)) {
       report.subscribed = true;
     }
@@ -282,6 +315,7 @@ async function syncOneVault(
   now: Date,
   resolveMeshContext: boolean,
   messageOverride?: string,
+  readOnly = false,
 ): Promise<VaultSyncReport> {
   const base: VaultSyncReport = {
     name: vault.name,
@@ -352,6 +386,121 @@ async function syncOneVault(
       ahead = Number(parts[0]) || 0;
       behind = Number(parts[1]) || 0;
     }
+  }
+
+  // hardening pass (Cohort-1 fix-pass) — PURE-SUBSCRIBER READ-ONLY vault: PULL-ONLY.
+  // The documented `[lyt.sync]` contract: "read-only/subscriber/orphan/no-remote
+  // vaults pull but skip push." The pre-fix path COMMITTED a stray local change
+  // and push-ATTEMPTED a vault the user can't push to → a permission-denied
+  // push (and, downstream in reconcile-publish, a jammed outbox: "2 publish
+  // op(s) pending … resumable", re-erroring every run). Here we pull to stay
+  // fresh (read-only consumption), reconcile the caches, and SKIP both commit
+  // and push. The outbox is reconcile-publish's; sync's contribution is simply
+  // to never create the local commit that would later feed an unpushable
+  // publish op. A divergent/unpushable local commit (ahead>0) OR an uncommitted
+  // local change (dirtyCount>0) is the recovery case: surface `readonlyDiverged`
+  // + the reset-to-origin remedy so the user can un-jam a vault the pre-fix bug
+  // already wedged. We do NOT auto-reset (it discards local edits — handler's
+  // call), but we name the exact command.
+  if (readOnly) {
+    let pulledMsg = "";
+    if (hasUpstreamFlag && behind > 0 && ahead === 0) {
+      // Clean fast-forwardable subscriber → pull to stay fresh, then reconcile.
+      const pulled = await runGit(["pull", "--rebase", "--quiet"], {
+        cwd: vault.path,
+        allowFailure: true,
+      });
+      if (pulled.code === 0) {
+        await reconcileVaultCaches(vault.path, vault.name);
+        pulledMsg = `pulled ${behind} commit(s) from upstream; `;
+        behind = 0;
+      }
+      // A pull failure on a read-only vault is non-fatal here — we still report
+      // skipped-readonly (no push is attempted regardless); the user's read-only
+      // copy just stays a few commits behind until the divergence is resolved.
+    }
+    // Cohort-1 fix-pass release review (Major) — the recovery remedy must branch on
+    // the ACTUAL state, and must NEVER lead with a destructive `reset --hard`:
+    //
+    // (a) UNTRACKED stray (dirty, NOT ahead) — the canonical hardening pass case: a
+    // stray Figment was written into the read-only vault but never
+    // committed. `git status --porcelain` (no `-uno`) counts these as
+    // untracked (`??`), and `reset --hard @{u}` does NOT remove untracked
+    // files — so the prior remedy did NOTHING for the very case it exists
+    // for. Mirror the hardening pass refusal: tell the user to MOVE/REMOVE the stray
+    // (relocate it to a home vault), not reset.
+    //
+    // (b) COMMITTED local work (ahead>0) — the user committed real edits into a
+    // subscribed vault. The prior `reset --hard @{u}` would DESTROY them.
+    // Lead non-destructive: preserve the commits onto a branch first (or
+    // relocate the content to a home vault); only mention the destructive
+    // discard last, explicitly flagged. Guard the `@{u}` ref on an upstream
+    // actually existing — fall back to `origin/<branch>` (or `git fetch`)
+    // when `@{u}` isn't configured, so the command can't error on a
+    // no-upstream read-only vault.
+    //
+    // Both are `readonlyDiverged: true` (the recovery rider fires); the WORDING
+    // differs so the user runs the right (and safe) command.
+    const untrackedCount = statusLines.filter((l) => l.startsWith("??")).length;
+    const trackedDirtyCount = dirtyCount - untrackedCount;
+    const diverged = ahead > 0 || dirtyCount > 0;
+    if (diverged) {
+      // Resolve the upstream ref for a guarded reset (committed-work case only).
+      const upstreamRef = hasUpstreamFlag
+        ? `'git -C "${vault.path}" reset --hard @{u}'`
+        : `'git -C "${vault.path}" fetch origin && git -C "${vault.path}" reset --hard origin/<branch>'`;
+
+      let remedy: string;
+      if (ahead > 0) {
+        // (b) Committed unpushable work — non-destructive FIRST.
+        const strayBits: string[] = [`${ahead} unpushable local commit(s)`];
+        if (trackedDirtyCount > 0) strayBits.push(`${trackedDirtyCount} modified tracked file(s)`);
+        if (untrackedCount > 0) strayBits.push(`${untrackedCount} untracked file(s)`);
+        remedy =
+          `This vault has ${strayBits.join(" + ")} that can never be pushed (no push rights). ` +
+          `PRESERVE the work first — either move the content into one of your home vaults and ` +
+          `re-capture it there, or stash/branch it: ` +
+          `'git -C "${vault.path}" branch lyt-rescue-${vault.name.replace(/[^A-Za-z0-9._-]/g, "-")}' ` +
+          `(keeps your commits on a side branch). ONLY after the work is safe, discard the ` +
+          `divergence with ${upstreamRef} (this DISCARDS the local commits).`;
+      } else {
+        // (a) Uncommitted stray — untracked and/or tracked-modified, no commit.
+        const strayBits: string[] = [];
+        if (untrackedCount > 0) strayBits.push(`${untrackedCount} stray untracked file(s)`);
+        if (trackedDirtyCount > 0) strayBits.push(`${trackedDirtyCount} modified tracked file(s)`);
+        remedy =
+          `This vault has ${strayBits.join(" + ")} that can't be pushed (read-only). ` +
+          (untrackedCount > 0
+            ? `MOVE or REMOVE the stray file(s) — relocate them into one of your home vaults and ` +
+              `re-capture there ('git -C "${vault.path}" status' lists them; a hard reset would ` +
+              `NOT remove untracked files, so do not reach for one here). `
+            : `Discard the local edits to tracked files with ` +
+              `'git -C "${vault.path}" checkout -- .', or relocate them to a home vault first. `);
+      }
+      return {
+        ...base,
+        status: "skipped-readonly",
+        readonlyDiverged: true,
+        message:
+          `${pulledMsg}read-only subscribed vault — skipped push (you can't push to its upstream). ` +
+          remedy +
+          ` Capture into a home vault instead.`,
+        ahead,
+        behind,
+        dirtyCount,
+      };
+    }
+    return {
+      ...base,
+      status: "skipped-readonly",
+      message:
+        pulledMsg.length > 0
+          ? `${pulledMsg.trimEnd()} read-only subscribed vault — pull-only (skipped push).`
+          : "read-only subscribed vault — pull-only (skipped push).",
+      ahead,
+      behind,
+      dirtyCount,
+    };
   }
 
   // v1.M.0 (P0-b) — single-reconcile guard. Each sync reconciles the .db
@@ -496,6 +645,27 @@ async function syncOneVault(
   if (ahead > 0) {
     const pushed = await runGit(["push"], { cwd: vault.path, allowFailure: true });
     if (pushed.code !== 0) {
+      // hardening pass (Cohort-1 fix-pass) — a permission-denied push is a TERMINAL
+      // failure (a re-run can never succeed). Surface ONE actionable line and
+      // SUPPRESS the raw `fatal: unable to access …` stderr (it leaked
+      // truncated mid-word in the live repro). A non-permission push failure
+      // (rejected-non-fast-forward, transient network) keeps the raw stderr so
+      // the user can act on it. Read-only subscriber vaults never reach here —
+      // they return `skipped-readonly` above — so this is the OWNED-repo
+      // unexpected-403 path (e.g. a transient auth state).
+      if (isPermissionDeniedPush(pushed.stderr)) {
+        return {
+          ...base,
+          status: "error",
+          message:
+            `push denied — you don't have push access to this vault's remote right now. ` +
+            `Check 'gh auth status' and the remote URL; if this is a vault you only subscribe to, ` +
+            `it is read-only (capture into a home vault instead).`,
+          ahead,
+          behind,
+          dirtyCount,
+        };
+      }
       return {
         ...base,
         status: "error",
@@ -536,6 +706,14 @@ async function syncOneVault(
     meshContextResolved,
   };
 }
+
+// hardening pass / C1 (Cohort-1 fix-pass release review) — the permission-denied (terminal)
+// classifier now lives in ONE place, `isPermissionDeniedPush` from
+// @younndai/lyt-vault (util/push-classify.ts), imported above. The former
+// in-file copy here and the byte-identical copy in reconcile-publish.ts were
+// deleted — a single shared definition can't drift. Terminal only on a genuine
+// permission/auth co-signal; a bare 403 (secondary rate-limit) or a bare SSH
+// "access rights" connection failure stays NON-terminal (retry-safe).
 
 function parsePorcelainPath(line: string): string | null {
   // Porcelain v1 lines: "XY <path>" or "XY <orig> -> <new>" (renames).

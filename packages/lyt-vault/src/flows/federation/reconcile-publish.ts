@@ -21,6 +21,7 @@ import type { Client } from "@libsql/client";
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
 import { listVaults, type VaultRow } from "../../registry/repo.js";
+import { isPureSubscriberVault } from "../writability.js";
 import { resolveConfig } from "../../util/config.js";
 import {
   getFederationRepoDir,
@@ -33,6 +34,7 @@ import {
   type FederationRepoVisibility,
 } from "../../util/gh-federation.js";
 import { runGit as defaultRunGit } from "../../util/git-run.js";
+import { isPermissionDeniedPush } from "../../util/push-classify.js";
 import { isValidGhHandle } from "../../util/identity.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { regeneratePodManifestNonFatal } from "./regenerate.js";
@@ -76,7 +78,23 @@ export interface VaultPublishOutcome {
   repoCreated: boolean;
   pushed: boolean;
   message: string;
+  // hardening pass (Cohort-1 fix-pass) — true when the failure is TERMINAL (a re-run can
+  // never succeed): a permission-denied push. The drain loop marks a terminal
+  // failure's outbox item DONE (not failed-and-retained) so it never counts
+  // toward `outboxRemaining` → the "re-run to finish (resumable)" message does
+  // NOT fire for an op that can never complete. Absent/false → the legacy
+  // resumable-retry posture (transient: network blip, rebase-needed, etc.).
+  terminal?: boolean;
 }
+
+// hardening pass / C1 — the permission-denied TERMINAL classifier now lives in ONE place
+// (util/push-classify.ts), imported above. A terminal failure (genuine
+// permission/auth co-signal) will fail identically on every re-run, so it must
+// not be advertised as resumable, and its raw `fatal: unable to access …`
+// stderr must not leak — the user gets one actionable line. A bare 403
+// (secondary rate-limit) or a bare SSH "access rights" connection failure is
+// NON-terminal (retry-safe) — the prior over-match permanently dropped those
+// retryable ops from the capless outbox.
 
 export interface ReconcilePublishArgs {
   handle?: string | undefined;
@@ -163,7 +181,34 @@ export async function reconcilePublishFlow(
     // pod before we commit + push it.
     await regeneratePodManifestNonFatal(db, { handle, nowIso });
 
-    const vaults = (await listVaults(db)).filter((v) => v.status !== "tombstoned");
+    // hardening pass (Cohort-1 fix-pass) — EXCLUDE pure-subscriber read-only vaults from
+    // the publish work-set. The pre-fix engine enqueued a `publish-vault` op for
+    // EVERY non-tombstoned vault, push-attempted a subscribed vault the user
+    // can't push to, the push failed permission-denied → the op was marked
+    // `failed` → `outboxRemaining > 0` → the command printed "N publish op(s)
+    // pending … re-run to finish (resumable)" on EVERY run, a permanent jam (the
+    // op can never succeed). A pure subscriber (subscribed in some mesh, home in
+    // none) is read-only by the MA-1 home-first contract — the same cheap LOCAL
+    // `mesh_vaults.role` signal the capture gate and `syncFlow`
+    // use, NO gh probe. We never enqueue an outbox op for it, so it can never
+    // jam the outbox. Excluded vaults simply aren't part of the outward publish.
+    const allActive = (await listVaults(db)).filter((v) => v.status !== "tombstoned");
+    const vaults: VaultRow[] = [];
+    // Minor (Cohort-1 fix-pass release review) — track the names EXCLUDED as pure
+    // subscribers so a persisted `publish-vault:<subscriber>` outbox row (seeded
+    // by a pre-fix run, before hardening pass excluded subscribers) resolves to a correct
+    // warning ("now a read-only subscriber") instead of the misleading
+    // "unregistered vault" — the vault IS registered, just no longer in the
+    // publish work-set.
+    const excludedSubscribers = new Set<string>();
+    for (const v of allActive) {
+      if (await isPureSubscriberVault(db, v.rid)) {
+        warnings.push(`skipped read-only subscribed vault '${v.name}' (pull-only; no push)`);
+        excludedSubscribers.add(v.name);
+        continue;
+      }
+      vaults.push(v);
+    }
     const vaultByName = new Map<string, VaultRow>(vaults.map((v) => [v.name, v]));
     const podDir = getFederationRepoDir(handle);
 
@@ -208,10 +253,19 @@ export async function reconcilePublishFlow(
       for (const item of vaultItems) {
         const vault = vaultByName.get(item.target);
         if (vault === undefined) {
-          // Stale outbox row (vault forgotten since enqueue) — drop it.
-          // release review: log the drop so a mistakenly-forgotten vault's
+          // Stale outbox row — drop it. release review: log the drop so a
           // vanished publish is auditable, not silent.
-          warnings.push(`dropped stale outbox item for unregistered vault '${item.target}'`);
+          // Minor (Cohort-1 fix-pass release review) — distinguish the two reasons:
+          // a row that resolves to a now-EXCLUDED pure subscriber is REGISTERED
+          // (just read-only, no longer published), not "unregistered". Convergence
+          // path: a pre-fix `publish-vault:<subscriber>` row is cleared here.
+          if (excludedSubscribers.has(item.target)) {
+            warnings.push(
+              `cleared stale publish op for now read-only subscribed vault '${item.target}' (no longer published)`,
+            );
+          } else {
+            warnings.push(`dropped stale outbox item for unregistered vault '${item.target}'`);
+          }
           await markOutboxDone(outbox, "publish-vault", item.target);
           continue;
         }
@@ -230,25 +284,53 @@ export async function reconcilePublishFlow(
         if (
           outcome.status === "published" ||
           outcome.status === "pulled-then-published" ||
-          outcome.status === "skipped"
+          outcome.status === "skipped" ||
+          // a TERMINAL failure (permission-denied push) can never
+          // succeed on a re-run; clear it from the outbox so it does NOT keep
+          // `outboxRemaining > 0` alive and mislabel the round-trip "resumable".
+          // It still surfaces as a `failed` outcome (the user sees the
+          // actionable line + the run reports not-ok), just not as a pending op.
+          outcome.terminal === true
         ) {
           await markOutboxDone(outbox, "publish-vault", item.target);
+          if (outcome.terminal === true) {
+            warnings.push(`${item.target}: ${outcome.message}`);
+          }
         } else {
           await markOutboxFailed(outbox, "publish-vault", item.target, outcome.message, nowIso);
           warnings.push(`${item.target}: ${outcome.status} — ${outcome.message}`);
         }
       }
 
-      // release review — do NOT push the pod manifest while a vault it
-      // advertises (repo + status=active) is in conflict/failed this run: a
-      // pushed pod.yon would point a recovering reader at a repo whose content
-      // was never pushed. Commit the pod locally (so the working tree stays
-      // clean) but HOLD its push + keep the outbox item, so the next run pushes
-      // the pod once the vaults are clean. This preserves the manifest↔remote
+      // release review + C2 (Cohort-1 fix-pass release review) — do NOT push the
+      // pod manifest while a vault it advertises had its CONTENT PUSH FAIL this
+      // run: a pushed pod.yon would point a recovering reader at a repo whose
+      // content was never pushed (`materializeVaultPublishable` created the gh
+      // repo with push:false, then step 3's content push failed → an EMPTY/stale
+      // remote repo). Commit the pod locally (so the working tree stays clean)
+      // but HOLD its push + keep the outbox item, so a later run pushes the pod
+      // once the vault's content lands. This preserves the manifest↔remote
       // contract the recovery loop depends on.
-      const vaultProblem = vaultOutcomes.some(
-        (o) => o.status === "conflict" || o.status === "failed",
-      );
+      //
+      // C2 FIX (release review): the prior `vaultProblem` EXCLUDED terminal
+      // failures (`o.terminal !== true`), so a permission-denied vault whose
+      // repo was created-but-never-content-pushed still let the pod publish —
+      // advertising an EMPTY repo (exactly C1's now-non-terminal class would
+      // also have hit this). A content-unpushed vault (terminal OR not) now
+      // HOLDS the pod. The run already reports ok=false on a terminal failure
+      // and the user has been told to act (fix access, or forget/unsubscribe the
+      // vault — which drops its stale outbox row and frees the pod next run), so
+      // holding the pod is the safe posture: never advertise a vault whose
+      // content didn't land. A "skipped"/"published" vault never blocks the pod.
+      const contentUnpushed = (o: VaultPublishOutcome): boolean =>
+        o.status === "conflict" ||
+        o.status === "failed" ||
+        // Defensive: a non-failed outcome that created a remote repo this run
+        // but never pushed its content (should not occur on the push path, but
+        // if a future outcome shape leaves repoCreated && !pushed, the pod must
+        // still not advertise it).
+        (o.repoCreated && !o.pushed && push);
+      const vaultProblem = vaultOutcomes.some(contentUnpushed);
       if (podItems.length > 0) {
         try {
           const pushPod = push && !vaultProblem;
@@ -259,12 +341,13 @@ export async function reconcilePublishFlow(
           podCommitted = podCommit.committed;
           podPushed = podCommit.pushed;
           if (vaultProblem) {
-            // Pod push deferred until the conflicted/failed vaults publish.
+            // Pod push deferred until the unpushed-content vaults publish (the
+            // user resolves access / a transient clears / they forget the vault).
             await markOutboxFailed(
               outbox,
               "publish-pod",
               "pod",
-              "deferred: a referenced vault is unpublished (conflict/failed) this run",
+              "deferred: a referenced vault's content is unpushed (conflict/failed) this run",
               nowIso,
             );
             warnings.push("pod: push deferred until all vaults publish (re-run `lyt sync`)");
@@ -285,6 +368,13 @@ export async function reconcilePublishFlow(
 
       const outboxRemaining = await countOutbox(outbox);
       const anyConflict = vaultOutcomes.some((o) => o.status === "conflict");
+      // a terminal failure is cleared from the outbox (not resumable),
+      // but the run is still NOT ok: the user must act (it surfaced an
+      // actionable `failed` outcome). Fold it into `ok` explicitly so a
+      // terminal permission-denied doesn't read as a clean publish.
+      const anyTerminalFailure = vaultOutcomes.some(
+        (o) => o.status === "failed" && o.terminal === true,
+      );
       return {
         skipped: false,
         handle,
@@ -293,7 +383,7 @@ export async function reconcilePublishFlow(
         podPushed,
         outboxRemaining,
         warnings,
-        ok: outboxRemaining === 0 && !anyConflict,
+        ok: outboxRemaining === 0 && !anyConflict && !anyTerminalFailure,
       };
     } finally {
       await closeOutbox(outbox);
@@ -396,6 +486,20 @@ async function publishOneVault(
       status: pulled ? "pulled-then-published" : "published",
       pushed: true,
       message: pulled ? "rebased remote changes + pushed" : "pushed",
+    };
+  }
+  // a permission-denied push is TERMINAL: surface ONE actionable line
+  // (suppress the raw `fatal: unable to access …` stderr) and flag terminal so
+  // the drain loop does not retain it as a resumable outbox op.
+  if (isPermissionDeniedPush(pushed.stderr)) {
+    return {
+      ...base,
+      status: "failed",
+      terminal: true,
+      message:
+        `push denied — you don't have push access to ${repoName}. ` +
+        `If this is a vault you subscribed to, it's read-only (pull-only); capture into a home vault instead. ` +
+        `If it's your own repo, check 'gh auth status' and your remote URL.`,
     };
   }
   return {

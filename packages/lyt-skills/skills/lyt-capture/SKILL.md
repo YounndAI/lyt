@@ -86,7 +86,7 @@ meta: {}
 
 If the user provides explicit values for `mesh-visibility` (e.g. "share to parent") or `weight` (e.g. "important — weight 5"), apply them; otherwise use the defaults.
 
-## Phase 3 — Write, index, record metrics, confirm
+## Phase 3 — Write, index, confirm
 
 1. Write the file using your `Write` tool.
 2. **Index it so it's searchable immediately.** The figment you just wrote is on disk but NOT yet in the search/recall/primer caches — index it with:
@@ -95,21 +95,13 @@ If the user provides explicit values for `mesh-visibility` (e.g. "share to paren
 lyt capture --index-only <relative-path-from-vault-root> --vault <vault>
 ```
 
-e.g. `lyt capture --index-only notes/2026-06-10-my-note.md --vault personal/main`. This runs the same index-on-write path the CLI capture uses (FTS + lanes/arcs), so a subsequent `/lyt-recall` or `lyt search` hits with **no** manual `lyt reindex`. It is best-effort: if it reports `index deferred`, the figment is still saved and self-heals on the next search — do not block the capture or re-write the file. 3. **Record the capture metric.** Per arc §9.2 (the v1 ergonomics test), call:
+e.g. `lyt capture --index-only notes/2026-06-10-my-note.md --vault personal/main`. This runs the same index-on-write path the CLI capture uses (FTS + lanes/arcs), so a subsequent `/lyt-recall` or `lyt search` hits with **no** manual `lyt reindex`. It is best-effort: if it reports `index deferred`, the figment is still saved and self-heals on the next search — do not block the capture or re-write the file.
 
-```
-lyt capture-metric record --json '{"time_to_complete_ms":<measured-ms>,"field_values_json":"<json-snapshot>","llm_assist":true}'
-```
-
-where `time_to_complete_ms` is the wall-clock from invocation to write, `field_values_json` is a JSON-encoded snapshot of the 8 fields actually written (so post-hoc analysis can compute fill rates), and `llm_assist` is `true` when this skill helped fill the frontmatter (almost always — set `false` only if the user pre-filled every field manually).
-
-If the `lyt capture-metric` invocation fails (e.g. registry unreachable), do not block the capture — the metric is best-effort.
-
-4. Confirm to the user in one line:
+3. Confirm to the user in one line:
 
 > Captured to `<relative-path-from-vault-root>` in `<vault-path>`.
 
-5. Do **not** run any git operations. Phase 8's sync watcher (when shipped) will handle commits.
+4. Do **not** run any git operations. Phase 8's sync watcher (when shipped) will handle commits.
 
 ## Rules
 
