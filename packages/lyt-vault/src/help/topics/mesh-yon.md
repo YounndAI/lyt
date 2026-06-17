@@ -3,7 +3,7 @@
 A **mesh.yon** is the YON document that defines a [Mesh](#) — its identity,
 its home vaults, its cross-mesh edges, and its cross-mesh subscriptions.
 It lives at `.lyt/mesh.yon` inside the mesh's main vault, and only there.
-Per [federation-design.md §3](.), the main vault's `mesh.yon` is the **only**
+The main vault's `mesh.yon` is the **only**
 source of truth for what the mesh contains; everything else — the per-machine
 `registry.db`, the `★ {mesh}/main` markers in `lyt vault list`, the
 federation primer — is derived state that can be regenerated.
@@ -130,12 +130,10 @@ Run `lyt help doctor` for the full check list.
 
 - `lyt mesh add-edge` — writer for `@MESH_EDGE` (v1.C.1).
 - `lyt mesh subscribe` — writer for `@MESH_SUBSCRIPTION` (v1.C.2).
-- `mesh.yon` auto-heal on sync conflicts — record-level merge per
-  [federation-design.md §9](.) ships in v1.C+.
+- `mesh.yon` auto-heal on sync conflicts — record-level merge ships in v1.C+.
 
 ## See also
 
 - `lyt help mesh` — the mesh CLI verbs.
 - `lyt help multi-mesh` — the multi-mesh conceptual model.
 - `lyt help federation` — Your Pod (federation repo) which lists every mesh.
-- [the LYT design doc `lyt-federation-design.md`](.) — §3 (mesh) + §9 (sync auto-heal).

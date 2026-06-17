@@ -75,7 +75,7 @@ export async function deleteVaultFlow(
         removedKnownPath: false,
       };
     }
-    // D31 (Brief A) — delete mutates the registry's vault set; regenerate the
+    // (Brief A) — delete mutates the registry's vault set; regenerate the
     // derived pod manifest so pod.yon reflects the removal. Non-fatal; reuses
     // the open registry.
     await regeneratePodManifestNonFatal(db);

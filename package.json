@@ -5,7 +5,7 @@
   "homepage": "https://linkyourthink.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/younndai/lyt"
+    "url": "git+https://github.com/YounndAI/lyt.git"
   },
   "author": {
     "name": "MARLINK TRADING SRL (YounndAI)",

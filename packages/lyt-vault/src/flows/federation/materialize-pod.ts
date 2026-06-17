@@ -42,7 +42,7 @@ export interface MaterializePodOptions {
   createRemoteIfMissing?: boolean | undefined;
   // Outward push. B.1 = false (held); B.2 = true. Default false.
   push?: boolean | undefined;
-  // D34 (OD-LOCALFIRST) — wire vault `origin` remotes. Default true. A no-gh
+  // wire vault `origin` remotes. Default true. A no-gh
   // LOCAL init passes false so the provisional handle never reaches a remote
   // URL (connect re-materializes with the real handle + setRemote=true).
   setRemote?: boolean | undefined;

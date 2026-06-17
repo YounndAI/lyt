@@ -17,7 +17,7 @@ Render a handler-facing overview of a single Lyt **mesh** — its metadata, its 
 
 The skill is pure prose around existing CLI verbs — no new CLI verb, no new helper, no lyt-vault change. The CLI does the parsing (mesh.yon → typed `MeshInfoResult`); the skill resolves the user's intent (mesh name + local-or-remote), invokes the verb with `--json`, and formats the deterministic emission into a handler-facing mesh summary.
 
-User-facing language uses **"mesh"** throughout per the LYT vocabulary convention (D1) — "pod" is reserved for the user's _full_ set of meshes (which is `/lyt-pod`'s scope); "mesh" is the individual group of vaults sharing a GitHub push target.
+User-facing language uses **"mesh"** throughout per the LYT vocabulary convention — "pod" is reserved for the user's _full_ set of meshes (which is `/lyt-pod`'s scope); "mesh" is the individual group of vaults sharing a GitHub push target.
 
 ## When to invoke
 

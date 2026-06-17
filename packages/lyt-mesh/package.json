@@ -1,11 +1,11 @@
 {
   "name": "@younndai/lyt-mesh",
-  "version": "0.9.2",
+  "version": "0.9.5",
   "description": "Lyt mesh layer — weave markdown vaults into shared knowledge meshes: multi-vault clone-all, subscriptions, edges and rollups, topology validation, and the sync engine.",
   "homepage": "https://linkyourthink.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/younndai/lyt",
+    "url": "git+https://github.com/YounndAI/lyt.git",
     "directory": "packages/lyt-mesh"
   },
   "author": {
@@ -52,7 +52,7 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
-    "@younndai/lyt-vault": "^0.9.2",
+    "@younndai/lyt-vault": "^0.9.5",
     "chokidar": "^4.0.3",
     "commander": "^12.1.0"
   },

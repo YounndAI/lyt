@@ -38,6 +38,7 @@ import { buildRebuildLanesCommand } from "./commands/rebuild-lanes.js";
 import { buildRebuildRollupCommand } from "./commands/rebuild-rollup.js";
 import { buildRebuildVaultCommand } from "./commands/rebuild-vault.js";
 import { buildReconnectCommand } from "./commands/reconnect.js";
+import { buildRefreshCommand } from "./commands/refresh.js";
 import { buildRegenContextCommand } from "./commands/regen-context.js";
 import { buildRegistryCommand } from "./commands/registry.js";
 import { buildRestoreCommand } from "./commands/restore.js";
@@ -55,6 +56,7 @@ export function buildVaultSubcommand(): Command {
   vault.addCommand(buildCloneCommand());
   vault.addCommand(buildListCommand());
   vault.addCommand(buildInfoCommand());
+  vault.addCommand(buildRefreshCommand());
   vault.addCommand(buildOpenCommand());
   vault.addCommand(buildForgetCommand());
   vault.addCommand(buildDisconnectCommand());

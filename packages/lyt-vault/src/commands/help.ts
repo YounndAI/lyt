@@ -30,8 +30,9 @@ const VERB_GROUPS: VerbGroup[] = [
     name: "vault",
     verbs: [
       {
-        verb: "lyt vault init <name>",
-        summary: "Create a new Lyt vault (folder + .obsidian + .lyt + priming files)",
+        verb: "lyt vault init <mesh>/<name>",
+        summary:
+          "Create a vault (create-if-missing: makes the mesh if absent, stops if the vault exists; --mesh, --push-to)",
       },
       {
         verb: "lyt vault adopt <path>",
@@ -107,6 +108,16 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt vault list-snapshots <name>",
         summary: "Enumerate this vault's snapshot branches",
+      },
+    ],
+  },
+  {
+    name: "addressing",
+    verbs: [
+      {
+        verb: "lyt alias <name> <target>",
+        summary:
+          "Bind a pod-local name to a vault (alias → rid; survives rename + move). --list, --remove",
       },
     ],
   },

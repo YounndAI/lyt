@@ -36,6 +36,7 @@ import {
   setVaultHomeMesh,
   listMeshEdgesByHomeVault,
 } from "../registry/repo.js";
+import { assertVaultHomeMesh, type CommitVerdict } from "../registry/assert-committed.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
@@ -53,7 +54,7 @@ import { hexToUuid7Bytes } from "../util/uuid7.js";
 // mesh_edges updates in one BEGIN/COMMIT; on registry-tx failure both
 // tmp files are cleaned up so disk is unchanged.
 //
-// Branch vs solo (master-plan §v1.B.3:526; brief OD-6):
+// Branch vs solo (master-plan §v1.B.3:526; brief ):
 // - Default `branch` mode (or --branch): the moved vault BRINGS its
 // child @MESH_EDGE rows with it — every edge where
 // home_vault_rid === movingVault.rid gets re-rooted by rewriting
@@ -180,6 +181,12 @@ export interface MoveVaultResult {
   targetMeshYonPath: string;
   vaultYonPath: string;
   durationMs: number;
+  // 0.9.4 (3d) — read-back verdict. `verified` when the post-COMMIT re-read
+  // confirms vaults.home_mesh_rid === target; `unverified` otherwise. The CLI
+  // appends `unverifiedNote` to the success line on an unverified outcome
+  // instead of printing an unconditional "Moved … atomically updated".
+  committed: CommitVerdict;
+  unverifiedNote: string | null;
 }
 
 export async function moveVaultFlow(args: MoveVaultArgs): Promise<MoveVaultResult> {
@@ -439,6 +446,11 @@ export async function moveVaultFlow(args: MoveVaultArgs): Promise<MoveVaultResul
     mkdirSync(dirname(targetMeshYonPath), { recursive: true });
     renameSync(targetTmp, targetMeshYonPath);
 
+    // 0.9.4 (3d) — read-back guard on top of the transaction. Re-read the row
+    // and assert home_mesh_rid actually flipped to the target before claiming
+    // success. Closes the "reported success without effect" class (the move-bug symptom).
+    const committed = await assertVaultHomeMesh(db, vault.rid, targetMesh.rid);
+
     return {
       vaultRidHex: uuid7BytesToHex(vault.rid),
       vaultName: vault.name,
@@ -462,6 +474,8 @@ export async function moveVaultFlow(args: MoveVaultArgs): Promise<MoveVaultResul
       targetMeshYonPath,
       vaultYonPath,
       durationMs: Date.now() - startedAt,
+      committed: committed.verdict,
+      unverifiedNote: committed.unverifiedNote,
     };
   } finally {
     if (!callerSupplied) await closeRegistry(db);

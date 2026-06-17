@@ -16,7 +16,7 @@
 
 // v1.B.4 — `lyt init [--auto | --custom | --discover] [--json]`.
 //
-// Top-level meta-CLI verb per OD-1 default + master-plan §v1.B.4:543.
+// Top-level meta-CLI verb per the ratified default + master-plan §v1.B.4:543.
 // Composes the v1.B.4 initBootstrapFlow with mutually-exclusive flag
 // validation + structured-error contract + readline/promises three-prompt
 // walkthrough under --custom.
@@ -26,10 +26,10 @@
 // commands/move.ts (closest CLI shape — readline/promises + mutually-
 // exclusive flag validation + structured-error contract).
 //
-// Error contract (OD-9 + brief acceptance):
+// Error contract (+ brief acceptance):
 // --auto + --custom together → exit 2 + flag-conflict
 // --custom under non-TTY (incl. --json) → exit 3 + custom-requires-tty
-// re-init with ALL-failed integrity → exit 1 (matches v1.B.2 OD-6)
+// re-init with ALL-failed integrity → exit 1 (matches v1.B.2 )
 // otherwise → exit 0
 
 import { Command } from "commander";
@@ -242,7 +242,7 @@ export function buildLytInitCommand(): Command {
       const mode: InitBootstrapMode =
         opts.discover === true ? "discover" : opts.custom === true ? "custom" : "auto";
 
-      // --custom three-prompt walkthrough (per OD-6 default + federation-
+      // --custom three-prompt walkthrough (per the ratified default + federation-
       // design §5:228-234; main vault name SKIPPED per naming-convention).
       let customOverrides: InitBootstrapCustomOverrides | undefined;
       if (mode === "custom") {
@@ -273,7 +273,7 @@ export function buildLytInitCommand(): Command {
       const spinner: PhaseSpinnerHandle | undefined = useSpinner ? startSpinner() : undefined;
       const flowArgs: InitBootstrapArgs = {
         mode,
-        // W1.2 / OD-4 — heal on every `lyt init` bootstrap. The flow gates
+        // W1.2 heal on every `lyt init` bootstrap. The flow gates
         // this to the fresh + re-init branches (discovery stays read-only),
         // so a single `lyt init` re-aligns skills + agent manual + patterns.
         // Wired ONLY at the command layer so flow/integration unit tests
@@ -286,7 +286,7 @@ export function buildLytInitCommand(): Command {
         // engine's job (B.2), triggered by the staged-HIL prompt (B.3). Wired
         // ONLY here so flow/integration tests stay hermetic (no git subprocesses
         // on temp vault dirs).
-        // D34 (OD-LOCALFIRST) — in a local-first context (no gh / provisional
+        // in a local-first context (no gh provisional
         // identity), hold the remote too (setRemote:false): the provisional
         // handle must never land in a vault `origin` URL. Connect re-materializes
         // with the real handle + setRemote:true.
@@ -329,13 +329,13 @@ export function buildLytInitCommand(): Command {
             emitAdoptPodCard(result);
           }
           // Brief B (B.3) — staged-HIL publish prompt. After the honest
-          // (staged) card, ASK whether to publish now (default-Yes per OD-B2).
+          // (staged) card, ASK whether to publish now (default-Yes per the ratified default).
           // On yes → the consented sync engine pushes pod + vaults. Outward
           // effect ONLY behind this explicit consent.
           await maybePromptAndPublish(result);
         }
-        // Re-init with ALL-failed integrity → exit 1 (matches v1.B.2 OD-6
-        // skip-and-warn precedent + brief OD-4 default).
+        // Re-init with ALL-failed integrity → exit 1 (matches v1.B.2
+        // skip-and-warn precedent + brief default).
         if (
           result.branch === "re-init" &&
           result.integrityIssues !== undefined &&
@@ -404,7 +404,7 @@ async function runCustomPrompts(): Promise<CustomPrompts> {
     const pushAns = (await rl.question(pushPrompt)).trim();
     const pushTarget = pushAns.length === 0 ? pushDefault : pushAns;
 
-    // Main vault name SKIPPED per OD-6 + naming-convention §The main vault
+    // Main vault name SKIPPED per the ratified default + naming-convention §The main vault
     // is locked. Surface the lock as an informational line.
     // eslint-disable-next-line no-console
     console.log("Main vault name: 'main' (locked; cannot be changed)");
@@ -497,7 +497,7 @@ export function emitJsonResult(res: InitBootstrapResult): void {
   // W1.2 release review fix-pass (R1-Minor) — the heal runs its filesystem
   // side-effects under `--json` too; surface its outcome so an automation
   // consumer (e.g. the deferred self-updater) can observe collision/divergent
-  // notes the handler is meant to see (D30.3/D30.4).
+  // notes the handler is meant to see.
   if (res.heal !== undefined) {
     stable["heal"] = {
       runtimes: res.heal.runtimes,
@@ -532,9 +532,9 @@ function emitHumanResult(res: InitBootstrapResult): void {
     // eslint-disable-next-line no-console
     console.log(`Forged mesh '${res.meshAssignment?.meshName}' + scaffolded main vault.`);
     if (res.federation !== undefined) {
-      // WS3 / D25 — bridge pod ↔ federation on first surface in --auto output.
+      // WS3 / bridge pod ↔ federation on first surface in --auto output.
       // Brief C (F3) — honest staged-HIL text: the pod CONTAINER repo was
-      // CREATED on GitHub (remoteCreated) per D31 §4 two-tier consent; CONTENT
+      // CREATED on GitHub (remoteCreated) per two-tier consent; CONTENT
       // is staged (unpushed) until `lyt sync`. "local-only" was misleading and
       // pointed at the retired `lyt federation rebuild --push` verb.
       const fed = res.federation;
@@ -660,7 +660,7 @@ function emitAutoPodCard(res: InitBootstrapResult): void {
     // Brief B (B.3) — init materializes LOCALLY (push held); the card is honest
     // that the pod is staged, not published, and points at `lyt sync`. The HIL
     // publish prompt (maybePromptAndPublish) runs after the card.
-    // D34 (OD-LOCALFIRST) — a no-gh / provisional pod is "local-only" (NOT
+    // a no-gh provisional pod is "local-only" (NOT
     // connected), a stronger honesty than "staged" (which implies gh is wired).
     publishState: isLocalFirstContext() ? "local-only" : "staged",
   };
@@ -707,7 +707,7 @@ function emitAdoptPodCard(res: InitBootstrapResult): void {
 }
 
 // Brief B (B.3) — the staged-HIL publish prompt. Runs after the honest card on
-// the fresh + re-init human paths. Default-Yes ([Y/n]) per OD-B2: publishing is
+// the fresh + re-init human paths. Default-Yes ([Y/n]) per the ratified default: publishing is
 // the expected end-state and the prompt itself is the explicit consent (no
 // surprise push). On yes → the B.2 reconcile engine (push=true) does the outward
 // gh-create + push, resumable via the outbox. Non-interactive (no TTY) leaves
@@ -716,7 +716,7 @@ async function maybePromptAndPublish(res: InitBootstrapResult): Promise<void> {
   const pub = res.publish;
   if (pub === undefined || pub.skipped) return; // no pod / nothing materialized
 
-  // D34 (OD-LOCALFIRST) — a local-first (no-gh / provisional) pod has no gh to
+  // a local-first (no-gh provisional) pod has no gh to
   // publish to; the publish prompt would fail. Connect is `lyt sync`'s job (the
   // self-heal). Nudge there instead of prompting to publish.
   if (isLocalFirstContext()) {
@@ -747,7 +747,7 @@ async function maybePromptAndPublish(res: InitBootstrapResult): Promise<void> {
     )
       .trim()
       .toLowerCase();
-    // OD-B2 default-Yes: empty (Enter) or y/yes → publish.
+    // default-Yes: empty (Enter) or y/yes → publish.
     yes = ans === "" || ans === "y" || ans === "yes";
   } finally {
     rl.close();
@@ -803,7 +803,7 @@ function makeDryRunDefaultsHandler(): IPromptHandler {
   };
 }
 
-// D34 (OD-LOCALFIRST) — true when init should stay LOCAL: no gh handle resolves
+// true when init should stay LOCAL: no gh handle resolves
 // (gh absent/unauthed) OR the cached identity is provisional (a local pod). In
 // both cases the materialize pass holds vault remotes (setRemote:false) so the
 // provisional handle never reaches a remote URL — connect wires the real one.

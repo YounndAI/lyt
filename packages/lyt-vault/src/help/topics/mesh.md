@@ -19,15 +19,13 @@ Run `lyt help multi-mesh` for the underlying vault/mesh/federation model
 and `lyt help mesh-yon` for the `mesh.yon` source-of-truth format. The v0.x
 manifest section below stays as a historical reference.
 
-A **mesh** is a named group of vaults sharing a GitHub push target. Per
-[the LYT design doc `lyt-federation-design.md`](.)
-§3, every vault belongs to exactly one mesh — its **home mesh** — and the
-mesh's source-of-truth lives in the main vault's `.lyt/mesh.yon`.
+A **mesh** is a named group of vaults sharing a GitHub push target. Every
+vault belongs to exactly one mesh — its **home mesh** — and the mesh's
+source-of-truth lives in the main vault's `.lyt/mesh.yon`.
 
 > Mesh names are bare (`alex`, `younndai`, `marlink`). The vault name
-> shape is `{mesh-name}/{vault-name}` per
-> [the LYT design doc `lyt-naming-convention.md`](.).
-> The main vault of every mesh is named `main`, immutable.
+> shape is `{mesh-name}/{vault-name}`. The main vault of every mesh is
+> named `main`, immutable.
 
 ## The shape
 
@@ -89,8 +87,7 @@ clone).
 ### `lyt mesh list [--json]`
 
 Lists the meshes the user participates in. Each mesh's home vaults
-are listed under its name; the main vault gets a `★` marker per
-[the LYT design doc `lyt-naming-convention.md`](.).
+are listed under its name; the main vault gets a `★` marker.
 Ordering is deterministic: `created_at` ascending then `name`.
 
 `--json` mode emits the canonical
@@ -122,6 +119,3 @@ lyt mesh list --json                                    # 4 meshes, 4 home vault
 ## See also
 
 - `lyt help federation` — Your Pod (the per-user federation repo).
-- [the LYT design doc `lyt-federation-design.md`](.) — canonical design (§3 + §6).
-- [the LYT design doc `lyt-naming-convention.md`](.) — the `{mesh-name}/{vault-name}` shape.
-- [the LYT design doc `lyt-master-plan.md`](.) — §5 v1.B.1 entry.

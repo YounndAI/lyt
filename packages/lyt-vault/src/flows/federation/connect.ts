@@ -47,15 +47,15 @@ import {
 } from "../../util/identity-cache.js";
 import { regeneratePodManifestNonFatal } from "./regenerate.js";
 
-// D34 (OD-LOCALFIRST, 2026-06-04) — the CONNECT self-heal.
+// (2026-06-04) — the CONNECT self-heal.
 //
 // A no-gh `lyt init` produces a LOCAL pod under a PROVISIONAL handle (no gh
-// repo, no remote). `lyt sync` self-heals to connect (OD-D1 — ONE verb, no
+// repo, no remote). `lyt sync` self-heals to connect (ONE verb, no
 // `lyt connect`): guide gh-auth → resolve the REAL gh handle → reconcile
 // provisional→real (remap federation_state PRESERVING the fed_rid, rewrite
 // identity.yon source=gh, re-derive pod.yon, create the pod gh repo + wire the
 // remote under the real handle) → then the caller's reconcile-publish pass does
-// the outward push. OD-D2: when provisional ≠ real the real handle is
+// the outward push. When provisional ≠ real the real handle is
 // AUTO-ADOPTED (it is authoritative) with a one-line notice — no prompt.
 //
 // D.3-GUARD (lean — DETECT + HIL, NOT a merge): before any outward step, probe
@@ -258,7 +258,7 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       warnings.push(`pod topic-set failed non-fatally: ${errMsg(err)}`);
     }
 
-    // 7. The pod repo exists now → reconcile (OD-D2 auto-adopt the real handle).
+    // 7. The pod repo exists now → reconcile (auto-adopt the real handle).
     // Identity flips to gh-cli ONLY at this point, so a deferred create above
     // keeps the pod re-connectable.
     // (a) Remap federation_state PRESERVING the fed_rid (no rid churn). Atomic.

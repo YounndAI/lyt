@@ -2,8 +2,7 @@
 
 Lyt models knowledge in three layers. Understanding the boundary between them
 is the difference between _"I have a folder of notes"_ and _"I have a
-queryable, federated graph my agent can ground in."_ Per
-[federation-design.md §1](.), the three layers are:
+queryable, federated graph my agent can ground in."_ The three layers are:
 
 | Concept        | Cardinality        | Shared between users?         | Source of truth                          |
 | -------------- | ------------------ | ----------------------------- | ---------------------------------------- |
@@ -43,7 +42,7 @@ in a dedicated `{handle}/lyt-pod` GitHub repo — see
 ## Naming — `{mesh-name}/{vault-name}`
 
 Every vault has a name with the shape `{mesh-name}/{vault-name}`, slug-safe
-on both sides. Per [the LYT design doc `lyt-naming-convention.md`](.):
+on both sides:
 
 ```text
 personal/main         ★ main vault of personal mesh
@@ -52,24 +51,57 @@ younndai/lyt          org subtree
 marlink/handbook      another org subtree
 ```
 
-The `★` marker in `lyt vault list` points at the mesh's main vault.
+The `★` marker in `lyt vault list` points at the mesh's main vault. That
+`{mesh}/{vault}` name is **computed** from the vault's home mesh + leaf (0.9.4)
+— a `lyt vault move` re-homes the vault and the displayed name follows
+automatically, with no stale-name bug.
 
-### Bare-name auto-normalize (v1.B.3)
+### Addressing — the `rid` is identity (0.9.4)
 
-A bare name like `lyt vault init notes` is not rejected — it auto-normalizes
-to `personal/notes`, auto-creating the `personal` mesh if it doesn't exist:
+A vault's **`rid` (UUIDv7) is its identity**; names are a resolution layer over
+it. Every verb that takes a vault accepts ANY of these (resolved at one
+chokepoint — no verb does its own resolution):
+
+- **`{mesh}/{vault}`** — the canonical qualified address (`company/handbook`).
+- **bare leaf** — `handbook` tries `personal/handbook`, then the UNIQUE leaf
+  across all meshes. A colliding leaf is an **error** that lists the qualified
+  candidates — Lyt never guesses a target.
+- **pod-local alias** — see [Aliases](#aliases-pod-local) below.
+- **origin coordinate** — `lyt:vault:<host>/<owner>/<repo>` (from the git URL)
+  for cross-pod references.
+
+For replayable / stored references (e.g. an agent persisting a vault handle),
+prefer the qualified `{mesh}/{vault}` or the origin coordinate — both are stable
+across pod growth + rename.
+
+### Create-if-missing (0.9.4)
+
+`lyt vault init {mesh}/{vault}` creates the mesh if missing, the vault if
+missing, and **stops + notifies if the vault already exists**:
 
 ```bash
-lyt vault init notes
-# Created vault `personal/notes` in mesh `personal` (auto-created).
+lyt vault init notes              # bare → personal/notes (personal mesh auto-created)
+lyt vault init company/handbook   # creates the `company` mesh if absent, then the vault
+lyt vault init handbook --mesh company           # same, via the flag
+lyt vault init company/handbook --push-to allemaar   # auto-created mesh is a SHARING mesh
 ```
 
-This preserves the friction-free new-user happy path while keeping the
-structural invariant — every vault belongs to a mesh.
+Without `--push-to`, an auto-created mesh is **local-only** (the personal
+default). This is uniform — there is no longer a `personal`-only special-case
+and no `home-mesh-not-found` refusal.
 
-For namespaced inputs (`<owner>/<name>`), the `<owner>` mesh must already
-exist; Lyt refuses with `home-mesh-not-found` rather than guess push-target
-semantics. Run `lyt mesh init <owner>` first.
+### Aliases (pod-local)
+
+```bash
+lyt alias ro company/company-ro   # bind `ro` → the vault's rid
+lyt capture --vault ro            # use it anywhere a vault is taken
+lyt alias --list
+lyt alias --remove ro
+```
+
+An alias keys on the vault's **rid**, so it survives `rename` and `move`.
+Aliases are **pod-local**: synced across your own pod's machines, never to
+subscribers.
 
 ### Main vault locked to `main`
 
@@ -120,7 +152,12 @@ lyt vault move <name> --to-mesh <target-mesh> --solo     # leave children behind
 The vault's UUIDv7 **rid is stable** across the move — only its membership
 changes. The source mesh.yon loses its `@MESH_HOME`; the target gains one;
 child `@MESH_EDGE` rows re-root onto the new home. Atomic via tmp+rename on
-both mesh.yon files plus a single registry transaction.
+both mesh.yon files plus a single registry transaction. After committing, the
+move **reads back** the registry row and only reports a clean success when the
+home-mesh assignment actually landed; an unverified outcome is flagged
+`(unverified — run lyt vault list)` (0.9.4 — success must reflect committed
+state). Because the displayed `{mesh}/{vault}` name is computed from the home
+mesh, `lyt vault list` reflects the move immediately.
 
 ## Cloning into another mesh — `lyt vault clone --to-mesh` (v1.B.3)
 
@@ -156,5 +193,3 @@ starter content; the main vault name is locked to `main`).
 - `lyt help mesh-yon` — the `mesh.yon` SoT format + round-trip contract.
 - `lyt help federation` — Your Pod (federation repo) + cross-mesh aggregation.
 - `lyt help public-mesh` — federating community vaults.
-- [the LYT design doc `lyt-federation-design.md`](.) — §3 + §4 + §5 + §8 (canonical design).
-- [the LYT design doc `lyt-naming-convention.md`](.) — the `{mesh}/{vault}` shape.

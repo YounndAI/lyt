@@ -58,7 +58,7 @@ export function listPatternNames(dir: string): string[] {
     .sort();
 }
 
-// D27(f) — POD-level patterns bootstrap. Mirrors the mechanism of
+// POD-level patterns bootstrap. Mirrors the mechanism of
 // scaffold/init.ts copyBundledAutomators (find source dir → copy each →
 // additive / skip-existing), but at pod scope: copies the bundled patterns
 // (getBundledPatternsDir → dist/patterns built, src/patterns dev) into the
@@ -91,7 +91,7 @@ export function copyBundledPatterns(): string[] {
   return copied;
 }
 
-// D30.3 / OD-2 (2026-06-03) — version-gated, additive-safe pattern heal.
+// (2026-06-03) — version-gated, additive-safe pattern heal.
 //
 // Extends copyBundledPatterns' additive-only model with version awareness via
 // the bundled manifest (manifest.yon). Per-pattern decision:
@@ -159,7 +159,16 @@ export function healPatterns(opts: HealPatternsOptions = {}): PatternHealResult 
     const bundled = join(sourceDir, name);
     const installed = join(targetRoot, name);
 
-    if (!existsSync(installed)) {
+    // 0.9.4 — a HOLLOW installed dir (exists but missing pattern.yon)
+    // is BROKEN, not a handler customization. Treat it exactly like a missing
+    // dir and (re)seed it. Without this, the version-gated arms below hashed a
+    // hollow dir, never matched, and left it "divergent" — so `lyt capture`/
+    // `recall` stayed dead pod-wide on an init-heal over a hollow pod (the
+    // init-heal twin of the postinstall hollow-dir fix in postinstall.mjs).
+    const installedHollow =
+      existsSync(installed) && !existsSync(join(installed, "pattern.yon"));
+
+    if (!existsSync(installed) || installedHollow) {
       cpSync(bundled, installed, { recursive: true });
       entries.push({ id: name, action: "added" });
       continue;

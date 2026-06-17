@@ -26,6 +26,7 @@ import {
   moveVaultFlow,
   type MoveVaultMode,
 } from "../flows/move.js";
+import { vaultLeaf } from "../registry/vault-addressing.js";
 
 // v1.B.3 Commit 2 — `lyt vault move <name> --to-mesh <mesh> [--solo|--branch] [--json]`.
 //
@@ -91,8 +92,16 @@ export function buildMoveCommand(): Command {
           console.log(JSON.stringify(result, null, 2));
           return;
         }
+        // 0.9.4 (3d) — only claim a clean success when the read-back verified
+        // the committed state; otherwise append the unverified note.
+        const moveSuffix =
+          result.committed === "verified" ? "" : ` ${result.unverifiedNote ?? "(unverified)"}`;
+        // 0.9.4 nit — print the COMPUTED display name (`{newMesh}/{leaf}`),
+        // matching `vault list`, NOT the stale stored name (whose prefix still
+        // carries the old mesh until the next reconcile).
+        const displayName = `${result.toMeshName}/${vaultLeaf(result.vaultName)}`;
         // eslint-disable-next-line no-console
-        console.log(`Moved vault '${result.vaultName}' to mesh '${result.toMeshName}'`);
+        console.log(`Moved vault '${displayName}' to mesh '${result.toMeshName}'${moveSuffix}`);
         // eslint-disable-next-line no-console
         console.log(`  rid:     vault:${result.vaultRidHex} (stable)`);
         // eslint-disable-next-line no-console

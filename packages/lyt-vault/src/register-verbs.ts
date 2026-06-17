@@ -16,6 +16,7 @@
 
 import type { Command } from "commander";
 
+import { buildAliasCommand } from "./commands/alias.js";
 import { buildAuditCommand } from "./commands/audit.js";
 import { buildAutomatorCommand } from "./commands/automator.js";
 import { buildCaptureMetricCommand } from "./commands/capture-metric.js";
@@ -52,4 +53,5 @@ export function registerVaultVerbs(program: Command): void {
   program.addCommand(buildHelpCommand());
   program.addCommand(buildDoctorCommand());
   program.addCommand(buildPatternCommand());
+  program.addCommand(buildAliasCommand());
 }

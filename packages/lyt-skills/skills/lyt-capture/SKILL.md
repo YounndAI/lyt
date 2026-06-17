@@ -39,7 +39,9 @@ Do **not** guess from cwd. If `--vault` / env var / home convention all miss, as
 
 If the resolved path **does not exist or is not a Lyt vault** (no `.lyt/vault.yon` inside), do **not** create files in it. Stop and tell the user:
 
-> The target vault `<path>` doesn't exist (or isn't a Lyt vault — no `.lyt/vault.yon`). Create it with `lyt vault init <name>`, or pass `--vault <existing-path>`.
+> The target vault `<path>` doesn't exist (or isn't a Lyt vault — no `.lyt/vault.yon`). Create it with `lyt vault init <mesh>/<vault>` (create-if-missing — makes the mesh if absent; bare names land in `personal/`), or pass `--vault <existing-name-or-path>`.
+
+A `--vault` argument may be a `{mesh}/{vault}` name, a bare leaf (resolved to a unique vault; the CLI errors and lists candidates on a collision), or a pod-local alias (`lyt alias <name> <target>`) — all resolve to the same vault. Resolve names via `lyt vault list --json` rather than guessing.
 
 ## Phase 2 — Build the Figment under the v1 8-field contract
 

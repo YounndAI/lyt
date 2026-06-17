@@ -59,7 +59,7 @@ export function buildInfoCommand(): Command {
       // eslint-disable-next-line no-console
       console.log(`  status:            ${v.status}`);
       // eslint-disable-next-line no-console
-      console.log(`  Writable:          ${formatWritable(v.writable, v.writableDetermination)}`);
+      console.log(`  writable:          ${formatWritable(v.writable, v.writableDetermination)}`);
       // eslint-disable-next-line no-console
       console.log(`  memscope:          ${v.memscopeRid ?? "-"}`);
       // eslint-disable-next-line no-console

@@ -1,6 +1,6 @@
 // Regenerate src/patterns/manifest.yon from the bundled pattern dirs.
 //
-// D30.3 / OD-2 — the manifest records each pattern's id → version → content
+// The manifest records each pattern's id → version → content
 // hash (+ prior shipped hashes). `healPatterns` uses it to tell a pristine
 // install (safe to backup-then-replace) from a user fork (leave untouched).
 //

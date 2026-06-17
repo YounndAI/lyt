@@ -346,7 +346,7 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
 
     // Track C Wave 3 F8 (+ release review/a review finding) — detach ONLY on caller
     // intent: a standalone fresh-rid clone pushes to its SOURCE otherwise
-    // (live incident: writable:true on your own source + D49 self-heal
+    // (live incident: writable:true on your own source + self-heal
     // persisting the source URL → automator push landed one vault's tree on
     // another vault's remote). Subscribe/adopt clones pass detachOrigin:false
     // — they NEED origin to pull upstream. A real removal failure throws

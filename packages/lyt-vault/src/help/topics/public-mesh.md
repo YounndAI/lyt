@@ -21,8 +21,7 @@ Static documentation sites are read-only HTML. A Lyt public mesh is a
 - `@STAMP` provenance survives extraction — you can always trace
   _"this Figment came from `acme-public/handbook` at commit Y."_
 
-Per [the LYT design doc `lyt-public-mesh.md`](.) §0:
-the publisher's existential risk is zero (markdown-in-Git survives anything);
+The publisher's existential risk is zero (markdown-in-Git survives anything);
 the subscriber's grounding is rich (federated graph, not scraped HTML).
 
 ## Discovering a public mesh (v1)
@@ -82,8 +81,7 @@ scalability moat: 10,000 subscribers do not bloat the publisher's SoT.
 - **Secret leakage.** A misconfigured public mesh containing `.secret`,
   `credentials`, `.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*` files
   is publicly readable. Publishers should run a hygiene check before going
-  public; consumers should never assume the publisher did. See "Sharp edges"
-  in [the LYT design doc `lyt-public-mesh.md`](.) §6.
+  public; consumers should never assume the publisher did.
 - **Drift.** Standard `lyt sync` model — Git pulls from origin; your local
   index regenerates. Pinned subscriptions (`--pin-commit <sha>`, v1.5) skip
   drift entirely; useful for regulatory or academic citations.
@@ -122,5 +120,3 @@ share the URL.
 - `lyt help mesh` — mesh CLI verbs.
 - `lyt help mesh-yon` — the `mesh.yon` SoT.
 - `lyt help federation` — Your Pod (per-user federation repo).
-- [the LYT design doc `lyt-public-mesh.md`](.) — canonical specification (§1 + §2 + §4 + §6).
-- [the LYT design doc `lyt-federation-design.md`](.) §8.5 — public meshes as the demanding test of asymmetric awareness.

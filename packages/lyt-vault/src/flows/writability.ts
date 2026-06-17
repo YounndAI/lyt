@@ -17,6 +17,7 @@
 import type { Client } from "@libsql/client";
 
 import { checkPushPermission, type GhExecutor } from "../util/gh-discover.js";
+import { getMeshByRid } from "../registry/meshes-repo.js";
 import { setVaultGitUrl, type VaultRow } from "../registry/repo.js";
 import { readGitRemoteOriginUrl } from "../util/git.js";
 
@@ -28,7 +29,7 @@ import { readGitRemoteOriginUrl } from "../util/git.js";
 // unrecognised gitUrl shape); handler should pause and ask
 // before any write op.
 //
-// Path C constraint (OD-PATH ratified 2026-06-01 by Alex): NO schema
+// Path C constraint (ratified 2026-06-01 by Alex): NO schema
 // migration. The vaults table at registry/migrations.ts:38-55 stays
 // shape-stable. Writability is derived on-demand from
 // (mesh_vaults.role, gh probe) and cached in-process only.
@@ -143,10 +144,110 @@ export async function isPureSubscriberVault(db: Client, vaultRid: Uint8Array): P
   return !roles.hasHome && roles.hasSubscribed;
 }
 
+// 0.9.3 — the LOCAL, no-network "this vault might be a read-only
+// subscription" pre-filter. A vault is a subscription target when its rid
+// appears in `mesh_subscriptions.external_vault_rid` (the row `lyt mesh
+// subscribe` actually writes) OR it carries a legacy `mesh_vaults` 'subscribed'
+// role.
+//
+// WHY the union (and why isPureSubscriberVault was the hardening pass bug): the real
+// subscribe-to-a-foreign-mesh flow registers the cloned vault with a `home`
+// role in the auto-registered external mesh — NOT a 'subscribed' role —
+// so `isPureSubscriberVault = !hasHome && hasSubscribed` returned FALSE for
+// exactly the live cohort vault (younndai/lyt-docs) and the gate was skipped.
+// In fact NO production path writes a 'subscribed' mesh_vaults role at all
+// (every addVaultToMesh call uses 'home'); the 'subscribed' role exists only in
+// legacy fixtures. Keying on mesh_subscriptions catches the real foreign-home
+// case; the role arm keeps those legacy pure-subscriber fixtures covered.
+//
+// This is a PRE-FILTER, not a verdict: a subscription the user was GRANTED push
+// access to (the S6 cross-identity write feature, e.g. alpha-feedback) is ALSO
+// a subscription here and is locally INDISTINGUISHABLE from a read-only one —
+// only the live gh verdict separates them, so subscriptions fall through to
+// deriveVaultWritable in deriveWriteGate. A vault with NEITHER signal is the
+// user's own (home/orphan) vault and is allowed with NO gh probe.
+export async function hasSubscriptionSignal(db: Client, vaultRid: Uint8Array): Promise<boolean> {
+  const sub = await db.execute({
+    sql: "SELECT 1 FROM mesh_subscriptions WHERE external_vault_rid = ? LIMIT 1",
+    args: [vaultRid],
+  });
+  if (sub.rows.length > 0) return true;
+  const roles = await loadRoleSummary(db, vaultRid);
+  return roles.hasSubscribed;
+}
+
+export type WriteGate =
+  | { blocked: false; verdict: WritabilityVerdict | null }
+  | { blocked: true; verdict: WritabilityVerdict };
+
+// 0.9.3 — the SHARED write-gate decision, keyed on the LIVE
+// writability verdict (what `vault info` reports), NOT the static role. Replaces
+// the too-narrow `isPureSubscriberVault` predicate at all four gate sites
+// (capture, capture-index, sync skip-push, publish exclude) so they refuse on
+// the real invariant ("not writable") instead of a proxy that missed
+// foreign-mesh subscriptions.
+//
+// HOT-PATH CONTRACT (the hardening pass author's no-probe-on-capture constraint, kept):
+// a vault with NO subscription signal is the user's own (home/orphan) vault — by
+// far the dominant capture target — and is allowed with NO gh probe. This is
+// what keeps capture network-free AND offline-safe (capturing into your own
+// vault must never depend on `gh`). Only a SUBSCRIPTION pays for a verdict, and
+// even then:
+// - a pure subscriber short-circuits to false in deriveVaultWritable (no probe)
+// - a foreign-home subscription incurs ONE gh probe, then caches it (60s TTL),
+// so rapid captures into the same subscribed vault don't re-probe per keystroke.
+// Verdict → gate: true → proceed (a granted-write subscription — hardening pass gain
+// access); false → block (read-only); "unknown" → block (can't verify: gh
+// offline/down — the [lyt.gate] pause-and-ask, in flow form: refuse a write we
+// can't confirm is safe rather than strand an unpushable commit).
+export async function deriveWriteGate(
+  vault: VaultRow,
+  db: Client,
+  opts: DeriveVaultWritableOpts = {},
+): Promise<WriteGate> {
+  if (!(await hasSubscriptionSignal(db, vault.rid))) {
+    return { blocked: false, verdict: null };
+  }
+  const verdict = await deriveVaultWritable(vault, db, opts);
+  if (verdict.writable === true) return { blocked: false, verdict };
+  if (verdict.writable === false) return { blocked: true, verdict };
+  // verdict.writable === "unknown" (gh offline / unavailable). Block — UNLESS
+  // this is the user's OWN vault that a local mesh also subscribes to: an own
+  // home vault (home in a LOCALLY-OWNED mesh — one with a main vault, the same
+  // `mainVaultRid !== null` signal subscribe.ts uses for "one of YOUR meshes")
+  // must NOT be refused just because `gh` is down (capturing into your own vault
+  // stays offline-safe — the hot-path contract). A FOREIGN subscription's home
+  // is an auto-registered external mesh (mainVaultRid NULL) → still blocked, so
+  // an unverifiable foreign subscription never strands a write.
+  if (await isHomeInLocallyOwnedMesh(db, vault)) {
+    return { blocked: false, verdict };
+  }
+  return { blocked: true, verdict };
+}
+
+// True when the vault is `home` in a LOCALLY-OWNED mesh — a mesh carrying a main
+// vault (`mainVaultRid !== null`). External meshes auto-registered for a foreign
+// subscription have `mainVaultRid` NULL, so this is false for them. This
+// is the SAME ownership signal `flows/subscribe.ts` uses to mean "one of YOUR
+// meshes". Used only on the `unknown` (gh-down) write-gate branch to keep an own
+// vault writable offline while still blocking an unverifiable foreign sub.
+async function isHomeInLocallyOwnedMesh(db: Client, vault: VaultRow): Promise<boolean> {
+  if (vault.homeMeshRid === null) return false;
+  const mesh = await getMeshByRid(db, vault.homeMeshRid);
+  return mesh !== null && mesh.mainVaultRid !== null;
+}
+
 export interface DeriveVaultWritableOpts {
   // Injectable for tests — defaults to the real `gh` CLI invocation
   // via util/gh-discover.ts's defaultGh executor.
   gh?: GhExecutor;
+  // 0.9.3 — force a live gh re-probe: IGNORE the cached verdict AND
+  // SKIP the `subscriber-default-false` short-circuit, so a pure subscriber who
+  // was later GRANTED push access can detect the upgrade (`lyt vault refresh`).
+  // The role is a hint; the gh probe is the source of truth. The fresh verdict
+  // is still written to the cache. No-remote / orphan still short-circuit to
+  // "unknown" (a probe is meaningless with no resolvable repo).
+  forceProbe?: boolean;
 }
 
 export async function deriveVaultWritable(
@@ -155,7 +256,7 @@ export async function deriveVaultWritable(
   opts: DeriveVaultWritableOpts = {},
 ): Promise<WritabilityVerdict> {
   const cached = cache.get(vault.ridHex);
-  if (cached && cached.expiresAt > Date.now()) return cached.verdict;
+  if (cached && cached.expiresAt > Date.now() && opts.forceProbe !== true) return cached.verdict;
 
   const roles = await loadRoleSummary(db, vault.rid);
 
@@ -164,7 +265,10 @@ export async function deriveVaultWritable(
   // (subscribed without a home row) get false — the same local-only
   // signal isPureSubscriberVault() exposes to the capture/sync gates.
   // Orphan vaults (no rows at all) get "unknown" — intent never declared.
-  if (!roles.hasHome && roles.hasSubscribed) {
+  // 0.9.3 : forceProbe SKIPS this short-circuit so `lyt vault refresh`
+  // can detect a pure subscriber that was later granted push access (gh probe
+  // = source of truth, role = hint).
+  if (opts.forceProbe !== true && !roles.hasHome && roles.hasSubscribed) {
     const v: WritabilityVerdict = {
       writable: false,
       reason: "subscriber-default-false",

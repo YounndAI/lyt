@@ -21,7 +21,7 @@ import { isUuidv7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js
 // Per-machine row tracking the locally-cached federation repo. v1.A.0 ships
 // one row per machine (multi-handle support is a future concern; the PK
 // allows it without schema change). SoT for federation contents lives in
-// the {handle}/lyt-pod GH repo (D26 repo name) cloned to ~/lyt/pod/ — this
+// the {handle}/lyt-pod GH repo (repo name) cloned to ~/lyt/pod/ — this
 // table is a thin pointer so `lyt init` can probe "did this machine
 // already adopt the federation repo?" cheaply.
 export interface FederationStateRow {
@@ -120,7 +120,7 @@ export async function deleteFederationState(db: Client, handle: string): Promise
   });
 }
 
-// D34 (OD-LOCALFIRST, 2026-06-04) — remap the pod's handle from a PROVISIONAL
+// (2026-06-04) — remap the pod's handle from a PROVISIONAL
 // handle (minted at a no-gh `lyt init`) to the REAL gh handle, at connect. The
 // `fed_rid` is PRESERVED (rids are stable forever per the global UUIDv7
 // directive) — a naive re-forge under the real handle would mint a NEW rid and

@@ -32,7 +32,7 @@ import {
 // row is inserted in the same transaction; on cache insert failure the
 // tmp+rename is abandoned and disk is pristine.
 //
-// Structured error contract (per OD-5):
+// Structured error contract (per the ratified default):
 // exit 0 edge written OR edge-already-present (idempotent re-emit)
 // exit 1 vault-not-found (--child or --parent), vault-no-home-mesh
 // exit 4 main-vault-missing (parent's home mesh's main vault not in registry)

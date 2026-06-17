@@ -73,7 +73,7 @@ export function buildListCommand(): Command {
           return;
         }
         // eslint-disable-next-line no-console
-        console.log(formatHumanTable(result.vaults, result.rollupTombstones));
+        console.log(formatHumanTable(result.vaults, result.rollupTombstones, result.displayNames));
       },
     );
   return cmd;

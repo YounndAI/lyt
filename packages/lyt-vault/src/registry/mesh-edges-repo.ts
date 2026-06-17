@@ -32,7 +32,7 @@ import {
 // `insertMeshEdge` is re-exported from `repo.ts` for backwards
 // compatibility (it was added there by v1.A.1b alongside the empty
 // container schema; pulling it forward to a dedicated repo module
-// honours the OD-2 default symmetry with `mesh-subscriptions-repo` +
+// honours the default symmetry with `mesh-subscriptions-repo` +
 // `mesh-vaults-repo` + `meshes-repo` without breaking the existing
 // callers that import from `repo.js`).
 //

@@ -29,9 +29,9 @@ import { uuid7BytesToDashedString, uuid7BytesToHex } from "../util/uuid7.js";
 // MeshDoc.publicMeta is defined) and @UPDATE_CADENCE (zero-or-more per
 // mesh; one per home vault with publisher-declared sync rhythm). The
 // existing @MESH header gains an optional `default_vault_update_cadence`
-// cron-string field. Determinism per OD-2: @MESH_PUBLIC trivially sorted
+// cron-string field. Determinism per the ratified default: @MESH_PUBLIC trivially sorted
 // (one record); @UPDATE_CADENCE sorted by vault_rid ASC (hex-lex). Per
-// OD-19 no new yai.lyt parser primitives — CSV-string for topics and
+// no new yai.lyt parser primitives — CSV-string for topics and
 // peak_hours rather than array (reconciles lyt-public-mesh.md §2.3 example
 // which showed array syntax; v1.B.6 ships CSV to fit the existing
 // readQuotedField primitive).

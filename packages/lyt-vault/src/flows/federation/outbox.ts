@@ -22,7 +22,7 @@ import { createClient, type Client } from "@libsql/client";
 import { getLytHome } from "../../util/paths.js";
 import { newUuidv7Bytes } from "../../util/uuid7.js";
 
-// Brief B (D31 §3, B.2) — the resumable publish OUTBOX.
+// Brief B (B.2) — the resumable publish OUTBOX.
 //
 // The reconcile engine enqueues one durable work-item per outward op
 // (publish-vault:<name>, publish-pod) BEFORE attempting it, and DELETES it on

@@ -7,7 +7,11 @@ vaults.
 ## Vault lifecycle
 
 - `lyt vault init <name>` — scaffold a fresh vault under `~/lyt/vaults/<name>`.
-  Supports `--description`, `--ask-description`, `--topic <name>` (repeatable),
+  Accepts `{mesh}/{vault}` (create-if-missing: creates the mesh if absent, the
+  vault if absent, **stops if the vault exists**) or a bare name (→ `personal/`).
+  Supports `--mesh <mesh>` (sugar for `<mesh>/<name>`), `--push-to <handle>`
+  (make an auto-created mesh a sharing mesh; default local-only),
+  `--description`, `--ask-description`, `--topic <name>` (repeatable),
   `--no-starter-figment`, `--path <dir>`, `--parent <rid>`, `--tier-hint`,
   `--template empty|obsidian-default`, `--no-git`, `--commit-initial`.
 - `lyt vault adopt <path>` — upgrade an existing Obsidian vault to Lyt-aware
@@ -17,7 +21,12 @@ vaults.
 - `lyt vault clone <url>` — `git clone` + `lyt vault join` in one step.
 - `lyt vault list [--no-tombstones] [--json]` — show every registered vault. A
   `★` prefixes roots (vaults with no `parent_vault` edge).
-- `lyt vault info <name>` — vault metadata: path, edges, memscope, status.
+- `lyt vault info <name>` — vault metadata: path, edges, memscope, status,
+  computed `{mesh}/{vault}` display name, and origin coordinate.
+- `lyt alias <name> <target>` — bind a pod-local name to a vault (alias → rid;
+  survives rename + move). `--list`, `--remove <name>`. Pod-local: synced across
+  your own pod, never to subscribers. Any verb taking a vault accepts the alias,
+  a `{mesh}/{vault}`, or a bare leaf (unique-leaf resolution; errors on collision).
 - `lyt vault open <name>` — launch the configured editor with this vault.
 - `lyt vault forget <name> [--tombstone]` — remove from registry; files untouched.
 - `lyt vault disconnect <name>` — stop syncing; local copy preserved.

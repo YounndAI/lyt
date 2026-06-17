@@ -21,7 +21,7 @@ export type { AdoptOptions, AdoptResult } from "./scaffold/adopt.js";
 export { deleteVaultDerivedState } from "./scaffold/delete.js";
 export type { DeleteScaffoldResult } from "./scaffold/delete.js";
 
-export { initVaultFlow, HomeMeshNotFoundError } from "./flows/init.js";
+export { initVaultFlow, HomeMeshNotFoundError, VaultAlreadyExistsError } from "./flows/init.js";
 export type { InitFlowOptions, InitFlowResult, MeshSelfHealOptions } from "./flows/init.js";
 export {
   appendMeshHomeToFile,
@@ -414,21 +414,29 @@ export type { BackfillFigmentCachesResult } from "./flows/backfill-figment-cache
 // reindex (FTS reconcile + per-vault lanes/arcs; cross-vault rollup deferred).
 export { captureIndexFlow } from "./flows/capture-index.js";
 export type { CaptureIndexArgs, CaptureIndexResult } from "./flows/capture-index.js";
-// v1.G.2 writability derivation + the hardening pass cheap-local read-only
-// signal. `isPureSubscriberVault` is the no-gh-probe pure-subscriber detector
-// the capture write-gate and the sync skip-decision share so a
-// known-unwritable vault is refused/skipped without a network round-trip.
+// v1.G.2 writability derivation + the 0.9.3 write-gate. `deriveWriteGate`
+// is the shared capture/sync/publish refusal decision, keyed on the LIVE
+// writability verdict (it replaced the too-narrow `isPureSubscriberVault`, which
+// missed foreign-mesh subscriptions). `hasSubscriptionSignal` is the local,
+// no-network pre-filter that keeps the capture hot path (own vaults) probe-free.
+// `isPureSubscriberVault` remains exported as a (now legacy) helper.
 export {
   deriveVaultWritable,
+  deriveWriteGate,
+  hasSubscriptionSignal,
   isPureSubscriberVault,
   loadRoleSummary,
   __clearWritabilityCache,
 } from "./flows/writability.js";
 export type {
   WritabilityVerdict,
+  WriteGate,
   DeriveVaultWritableOpts,
   RoleSummary,
 } from "./flows/writability.js";
+// 0.9.3 — `lyt vault refresh`: force a live gh re-probe of write access.
+export { refreshVaultWritableFlow } from "./flows/vault-refresh.js";
+export type { RefreshWritabilityResult } from "./flows/vault-refresh.js";
 // hardening pass / C1 (Cohort-1 fix-pass release review) — the ONE shared `git push`
 // permission-denied classifier. Both push paths (lyt-mesh `sync` + lyt-vault
 // `reconcile-publish`) import THIS copy; the duplicate in-file copies were
@@ -679,6 +687,7 @@ export {
   insertVault,
   upsertVault,
   getVaultByName,
+  getVaultByExactName,
   getVaultByRid,
   getVaultByPath,
   listVaults,
@@ -702,6 +711,34 @@ export type {
   InsertVaultArgs,
   InsertMeshEdgeArgs,
 } from "./registry/repo.js";
+export {
+  resolveVault,
+  computeDisplayName,
+  computeDisplayNameSync,
+  vaultLeaf,
+  vaultOriginCoordinate,
+  gitUrlToCoordinate,
+  formatTypedId,
+  parseTypedId,
+  AmbiguousVaultLeafError,
+} from "./registry/vault-addressing.js";
+export type { LytEntityType, TypedId } from "./registry/vault-addressing.js";
+export {
+  setAlias,
+  getAlias,
+  getAliasTargetRid,
+  listAliases,
+  listAliasesForVault,
+  deleteAlias,
+} from "./registry/aliases-repo.js";
+export type { AliasRow } from "./registry/aliases-repo.js";
+export {
+  setAliasFlow,
+  listAliasesFlow,
+  removeAliasFlow,
+  AliasTargetNotFoundError,
+  AliasNameInvalidError,
+} from "./flows/alias.js";
 export {
   insertMesh,
   getMeshByRid,
@@ -736,7 +773,7 @@ export {
 // landed in v1.B.2 (S1) for the same cross-package consumption reason.
 export { federationInitFlow } from "./flows/federation/init.js";
 export { adoptAndPrimeFlow } from "./flows/adopt-and-prime.js";
-// D31 (Brief A) — the derived pod manifest (`pod.yon`) regen surface. The meta
+// (Brief A) — the derived pod manifest (`pod.yon`) regen surface. The meta
 // package's init-bootstrap composes regeneratePodManifestNonFatal at the end of
 // the fresh/re-init branches so `lyt init` leaves a POPULATED pod.yon.
 export {
@@ -773,7 +810,7 @@ export type {
   VaultPublishOutcome,
   VaultPublishStatus,
 } from "./flows/federation/reconcile-publish.js";
-// Brief D (D.3, OD-D1) — the connect self-heal: `lyt sync` reconciles a
+// Brief D (D.3) — the connect self-heal: `lyt sync` reconciles a
 // local-first (provisional) pod to the real gh handle + D.3-GUARD. The lyt-mesh
 // `lyt sync` command calls connectPodFlow before the publish pass; podNeedsConnect
 // is the cheap (no-gh-call) gate.
@@ -826,7 +863,7 @@ export type { SpawnInvocation } from "./util/gh-federation.js";
 export { getHandleFromIdentity } from "./util/identity.js";
 export { validateMeshName, validateVaultName } from "./util/identity.js";
 export { getFederationRepoDir, getFederationYonPath } from "./util/federation-paths.js";
-// Brief B (D31 §3-§6) — minimal config seam (publish/visibility/conflict
+// Brief B (§3-§6) — minimal config seam (publish/visibility/conflict
 // defaults). The full config.yon layer is deferred (flagged for oversight).
 export {
   resolveConfig,
@@ -836,7 +873,7 @@ export {
   type ConflictPosture,
   type ResolveConfigOptions,
 } from "./util/config.js";
-// Brief B (OD-B1 scheme D) — vault repo-name chokepoint family + the pod repo
+// Brief B (scheme D) — vault repo-name chokepoint family + the pod repo
 // name, exported so the lyt-mesh sync/reconcile engine and recovery loop route
 // every repo-name computation through one place (vaultRepoName + parse inverse).
 export {
@@ -865,7 +902,7 @@ export {
   listFederationStates,
   upsertFederationState,
   deleteFederationState,
-  // D34 (OD-LOCALFIRST) — provisional→real handle remap (preserves fed_rid).
+  // provisional→real handle remap (preserves fed_rid).
   remapFederationHandle,
 } from "./registry/federation-state.js";
 export type { FederationStateRow, UpsertFederationStateArgs } from "./registry/federation-state.js";
@@ -1107,7 +1144,7 @@ export {
   slugifyVaultName,
   realIdentityRunner,
   isValidGhHandle,
-  // D34 (OD-LOCALFIRST) — provisional-handle derivation (default OS username).
+  // provisional-handle derivation (default OS username).
   deriveProvisionalHandle,
   IDENTITY_CACHE_TTL_MS,
 } from "./util/identity.js";
@@ -1127,7 +1164,7 @@ export {
   writePodIdentity,
   resolvePodIdentity,
   reconcileIdentity,
-  // D34 (OD-LOCALFIRST) — provisional identity surface (local-first init +
+  // provisional identity surface (local-first init +
   // connect self-heal): write/detect a provisional identity + the source consts.
   writeProvisionalIdentity,
   isProvisionalIdentity,

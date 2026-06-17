@@ -33,7 +33,7 @@ import { DiscoverGhUnavailableError } from "../flows/discover.js";
 // freshly-created mesh.yon (via cloneVaultFlow's appendMeshHomeToFile
 // path).
 //
-// Structured error contract (per OD-13):
+// Structured error contract (per the ratified default):
 // exit 0 cluster adopted
 // exit 1 gh-unavailable / vault-yon-fetch-failed / adopt-cluster-not-found
 // exit 2 push-permission-denied OR cluster-already-registered

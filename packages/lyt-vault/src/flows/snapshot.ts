@@ -54,7 +54,7 @@ export interface SnapshotFlowResult {
 // file; `lyt sync` commits later), so the FRESHEST figments — exactly what
 // a user snapshots to protect — were silently excluded, and restore could
 // not bring back an accidentally-deleted uncommitted note (demonstrated
-// live: one fixture note permanently lost). Violates the D46 never-
+// live: one fixture note permanently lost). Violates the never-
 // silently-lose floor.
 //
 // Now: when the working tree is dirty (tracked edits OR untracked files),

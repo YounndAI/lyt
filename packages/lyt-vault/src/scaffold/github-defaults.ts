@@ -17,7 +17,7 @@
 // Brand defaults injected on every Lyt-driven GitHub repo create/edit.
 // Single source of truth: change here = change everywhere.
 
-// D26 (2026-06-02) — vault-repo topics. `younndai` dropped per the
+// (2026-06-02) — vault-repo topics. `younndai` dropped per the
 // dogfooding handler-ask (topic set is now lyt + lyt-vault + linkyourthink;
 // the org tag was noise on per-user vaults). Order is the emission order
 // used by gh `--add-topic`.
@@ -26,12 +26,12 @@
 // considered but parked; revisit when the public-discovery surface opens.
 export const BRAND_TOPICS: readonly string[] = ["lyt", "lyt-vault", "linkyourthink"];
 
-// D26 — pod-repo (`{handle}/lyt-pod`) topics. The pod repo is the
+// pod-repo (`{handle}/lyt-pod`) topics. The pod repo is the
 // federation/identity layer, NOT a vault, so it carries `lyt-pod` (not
 // `lyt-vault`). Same PARKED set as BRAND_TOPICS applies.
 export const POD_TOPICS: readonly string[] = ["lyt", "lyt-pod", "linkyourthink"];
 
-// D26 — exact pod-repo description (handler-locked verbatim string).
+// exact pod-repo description (handler-locked verbatim string).
 export const POD_REPO_DESCRIPTION = "LYT Pod — Link Your Think — linkyourthink.com";
 
 export const DESCRIPTION_PREFIX = "LYT Vault";

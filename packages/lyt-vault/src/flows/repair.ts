@@ -70,14 +70,14 @@ import {
 // Git history. `--from-revision <sha>` forces the candidate; default
 // picks the most-recent revision that parses successfully.
 //
-// Default mode is `--dry-run` per OD-5 — safer for a write verb. The
+// Default mode is `--dry-run` per the ratified default — safer for a write verb. The
 // caller must explicitly opt into `--apply`.
 //
 // Composition over `validateMeshEdgesFlow` (extended in v1.C.4 to also
 // surface `mesh-yon-parse-error` MeshFileFinding rows): the repair walk
 // reuses validate's finding-collection then layers orphan-vault detection
 // on top of it (validate stays scoped to mesh.yon row resolution; orphan
-// vaults are a registry-level concern per OD-8).
+// vaults are a registry-level concern per the ratified default).
 //
 // Open-once seam (v1.A.5 CR-B1 — 17th vindication): callers may pass
 // `registryDb`; the flow opens its own client only when omitted.
@@ -125,13 +125,13 @@ export interface RepairAction {
 
 export interface RepairArgs {
   // Restrict the walk to a single finding by target id (rid hex OR vault
-  // name OR mesh name — resolution try-rid-first per OD-9). Omit to walk
+  // name OR mesh name — resolution try-rid-first per the ratified default). Omit to walk
   // every finding.
   target?: string | undefined;
   // The mesh to re-attach an orphan vault to (required when class
   // 'orphan-vault' is the target under `--apply`). Ignored otherwise.
   mesh?: string | undefined;
-  // Mode is 'dry-run' by default per OD-5. Pass 'apply' to perform writes.
+  // Mode is 'dry-run' by default per the ratified default. Pass 'apply' to perform writes.
   mode?: RepairMode | undefined;
   // Force a specific revision for restore-from-Git (only meaningful for
   // mesh-yon-parse-error). When omitted, the flow picks the most-recent
@@ -309,7 +309,7 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
 
     // 1b. Detect orphan vaults — `vaults.home_mesh_rid IS NULL`. Scoped
     // to active (status='active') vaults only; tombstones + missing
-    // vaults are out per OD-8.
+    // vaults are out per the ratified default.
     const allVaults = await listVaults(db);
     for (const v of allVaults) {
       if (v.homeMeshRid !== null) continue;
@@ -347,7 +347,7 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
         reason: "mesh-side-links-missing",
         // Self-targeting form so the heal always works regardless of total
         // finding count: `lyt repair --apply` with NO --target is refused by the
-        // OD-10 batch guard (commands/repair.ts) once total findings > 5; scoping
+        // batch guard (commands/repair.ts) once total findings > 5; scoping
         // to this finding's targetId bypasses that. No --mesh needed (the vault
         // already declares its home mesh).
         remediation: `Run: lyt repair --target mesh-link:${drift.meshName} --apply`,
@@ -382,7 +382,7 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
         targetId: `index:${v.ridHex}`,
         reason: "lyt-db-corrupt",
         // Self-targeting form (mirrors mesh-link-drift) so the heal bypasses
-        // the OD-10 batch guard regardless of total finding count.
+        // the batch guard regardless of total finding count.
         remediation: `Run: lyt repair --target index:${v.ridHex} --apply (quarantines the corrupt lyt.db + rebuilds it; equivalent: lyt reindex --vault '${v.name}')`,
         details: {
           vault_rid: v.ridHex,
@@ -892,7 +892,7 @@ async function mainVaultPathForMesh(db: Client, mesh: MeshRow): Promise<string |
 
 // Atomic write helper — tmp+rename inside the same dir, with a registry
 // tx wrapper so cache mutations + the mesh.yon publish happen as a unit
-// per OD-7. Mirrors flows/add-mesh-edge.ts:243-294 atomicity contract.
+// per the ratified default. Mirrors flows/add-mesh-edge.ts:243-294 atomicity contract.
 async function atomicReplaceWithTx(
   db: Client,
   targetPath: string,

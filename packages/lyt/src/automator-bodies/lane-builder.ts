@@ -30,7 +30,7 @@
 // dispatch when ≥50 vault writes accumulate since last lanes build).
 // - Manual: `lyt automator run lane-builder --run-now` (this code path).
 //
-// OD-3 default: this automator wrapper co-exists with the manual
+// default: this automator wrapper co-exists with the manual
 // `lyt vault rebuild-lanes` verb shipped in v1.D.1a — the verb stays as
 // evidence-of-life for the underlying flow; this wrapper adds scheduling
 // + provenance routing through the 5-step protocol.

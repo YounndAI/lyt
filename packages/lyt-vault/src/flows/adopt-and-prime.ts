@@ -65,7 +65,7 @@ import { healPatterns } from "../util/pattern-paths.js";
 // surfaced note rather than aborting the adopt. A complete `~/lyt` is the
 // invariant on every branch — no partial state, no halt.
 //
-// pod.yon now LISTS the local registry's meshes + vaults (D31, derived), but it
+// pod.yon now LISTS the local registry's meshes + vaults (derived), but it
 // reflects what's ALREADY registered locally — not the remote repos to acquire.
 // Acquisition therefore still goes through the gh-walk (discoverFlow); the
 // end-of-flow regen below then refreshes pod.yon from the post-acquisition
@@ -344,7 +344,7 @@ export async function adoptAndPrimeFlow(
       .filter((o) => o.status === "adopted" || o.status === "external")
       .reduce((n, o) => n + o.membersProcessed, 0);
 
-    // D31 (Brief A) — regenerate the derived pod manifest from the now-populated
+    // (Brief A) — regenerate the derived pod manifest from the now-populated
     // registry so the adopt leaves a POPULATED pod.yon (federationInitFlow at
     // step 2 wrote only the skeleton, BEFORE vaults were acquired/scaffolded —
     // the root cause of the empty-manifest dogfood symptom). Non-fatal; reuses

@@ -17,7 +17,7 @@
 // v1.D.2a — `lyt vault rebuild-arcs` flow.
 //
 // Walks `<vault>/notes/**/*.md`, harvests arc membership from TWO
-// detection mechanisms (per master-plan §v1.D.2a + brief OD-9):
+// detection mechanisms (per master-plan §v1.D.2a + brief ):
 //
 // 1. Frontmatter `arcs: [name1, name2, ...]` — each figment declares
 // which named arcs it belongs to. Frontmatter-derived members are
@@ -39,7 +39,7 @@
 // rebuild-lanes.ts. Applies to BOTH the manual `lyt vault
 // rebuild-arcs` CLI verb AND the v1.D.2c arc-builder automator body.
 //
-// Position resolution (OD-5 default — manual wins; frontmatter
+// Position resolution (default — manual wins; frontmatter
 // auto-assigned skipping reserved slots):
 // - Manual @ARC_MEMBER records reserve their explicit position
 // - Frontmatter-derived members get positions 1, 2, ... in
@@ -48,17 +48,17 @@
 // @ARC_MEMBER for the same arc → manual wins (frontmatter
 // suppressed for that arc)
 //
-// Position collision (OD-7 default — fatal error): two MANUAL records
+// Position collision (default — fatal error): two MANUAL records
 // claiming the same `(arc, position)` pair throw
 // `ArcPositionCollisionError`; the CLI surfaces this as a structured
 // `--json` error and exits non-zero.
 //
-// Category conflict (OD-6 default — warn-not-error): when multiple
+// Category conflict (default — warn-not-error): when multiple
 // `@ARC` records declare different categories for the same arc, last-
 // by-deterministic-file-path-order wins; a warning is collected and
 // surfaced via `--json` output.
 //
-// last_touched (OD-8 default): max(mtime) across all members + any
+// last_touched (default): max(mtime) across all members + any
 // figment that declared the @ARC. When the arc has no members and no
 // declarations, falls back to flow-entry timestamp.
 
@@ -119,7 +119,7 @@ export interface RebuildArcsResult {
   membersWritten: number;
   arcsYonPath: string;
   // Non-fatal warnings surfaced during the build (e.g. category
-  // conflicts per OD-6). The CLI's `--json` mode includes these so
+  // conflicts per the ratified default). The CLI's `--json` mode includes these so
   // handlers can audit the vault state without re-running.
   warnings: readonly string[];
   durationMs: number;
@@ -240,7 +240,7 @@ export async function rebuildArcsFlow(args: RebuildArcsArgs): Promise<RebuildArc
   for (const slug of sortedSlugs) {
     const acc = arcAcc.get(slug)!;
 
-    // Category resolution per OD-6: last-by-deterministic-file-path
+    // Category resolution per the ratified default: last-by-deterministic-file-path
     // wins + warn on conflict.
     let category = "uncategorized";
     if (acc.categories.length > 0) {
@@ -257,7 +257,7 @@ export async function rebuildArcsFlow(args: RebuildArcsArgs): Promise<RebuildArc
       category = sorted[sorted.length - 1]!.value;
     }
 
-    // Position resolution per OD-5:
+    // Position resolution per the ratified default:
     // - Manual records reserve their explicit positions
     // - Manual collision (two distinct figments same position) → fatal
     // - Same figment reusing same position is idempotent (deduped)
@@ -302,7 +302,7 @@ export async function rebuildArcsFlow(args: RebuildArcsArgs): Promise<RebuildArc
       nextPos++;
     }
 
-    // last_touched per OD-8: max(mtime) across members + declarers.
+    // last_touched per the ratified default: max(mtime) across members + declarers.
     const allMtimes: number[] = [
       ...acc.frontmatter.map((f) => f.mtimeMs),
       ...acc.manual.map((m) => m.mtimeMs),

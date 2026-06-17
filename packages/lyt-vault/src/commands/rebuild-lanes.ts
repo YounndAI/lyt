@@ -31,7 +31,7 @@ interface RebuildLanesCliOpts {
 // becomes a lane), writes `.lyt/indexes/lanes.yon` (YON SoT) + upserts the
 // cache rows in lyt.db (v1.D.1b wires the cache half).
 //
-// OD-3 default: this verb stays alongside the v1.D.1c automator wrapper
+// default: this verb stays alongside the v1.D.1c automator wrapper
 // (`lyt automator run lane-builder --run-now`) so the underlying flow has
 // an evidence-of-life path independent of the automator runtime + so
 // handlers can rebuild lanes synchronously when triaging.

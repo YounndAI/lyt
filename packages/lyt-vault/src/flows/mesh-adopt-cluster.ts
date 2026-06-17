@@ -32,24 +32,24 @@ import { meshInitFlow, type MeshInitOptions } from "./mesh-init.js";
 // §11:501-529 + master-plan §v1.C.3:632-651:
 // 1. Resolve the cluster (caller-supplied or via discoverFlow walk).
 // 2. Refuse if the cluster's main vault is already registered locally
-// (ClusterAlreadyRegisteredError → exit 2 per OD-13).
+// (ClusterAlreadyRegisteredError → exit 2 per the ratified default).
 // 3. Refuse if the user lacks push permission to `{owner}/main`
 // (PushPermissionDeniedError → exit 2). Falls back to a live probe
 // when the cluster's pushPermitted flag is null (e.g. caller
 // supplied a Cluster from a non-probing source).
-// 4. Scaffold the missing main vault via meshInitFlow per OD-9 default
+// 4. Scaffold the missing main vault via meshInitFlow per the ratified default
 // (v1.B.1 mesh-init primitive — composition over write-side machinery).
 // 5. For each non-main cluster member, clone via cloneVaultFlow with
-// `--to-mesh <cluster>` per OD-7 default (registers + appends
+// `--to-mesh <cluster>` per the ratified default (registers + appends
 // @MESH_HOME via the v1.B.3 path).
 //
 // Composition over primitives — no new write-side machinery. The cluster
 // owner is the cluster's mesh_name per naming-convention §"The shape"
 // (vault names are `{owner}/{leaf}` where {owner} == mesh_name). The push
 // target on meshInitFlow uses `pushTo: owner, pushKind: 'handle'` per
-// OD-9 default (org detection deferred to v1.C.4 / v1.E.*).
+// default (org detection deferred to v1.C.4 v1.E.*).
 //
-// Atomicity (OD-7 — brief intent vs implementation cleanest path):
+// Atomicity (brief intent vs implementation cleanest path):
 // meshInitFlow opens + commits its own libSQL connection in a single
 // transaction; cloneVaultFlow uses the caller-supplied db. We do NOT wrap
 // both inside a single outer tx because meshInitFlow's signature predates
@@ -92,10 +92,10 @@ export interface AdoptClusterArgs {
   meshGhClient?: MeshGhClient | undefined;
   // Test seam for cluster member clones.
   cloneFn?: AdoptCloneFn | undefined;
-  // pushKind for meshInitFlow (default 'handle' per OD-9).
+  // pushKind for meshInitFlow (default 'handle' per the ratified default).
   pushKind?: MeshPushKind | undefined;
   // Skip push on the freshly-scaffolded main vault. Default false (push
-  // by virtue of OD-9). Tests pass true to keep meshInitFlow network-free
+  // by virtue of this). Tests pass true to keep meshInitFlow network-free
   // even with a fake gh client.
   noPush?: boolean | undefined;
 }

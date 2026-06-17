@@ -12,8 +12,8 @@ in. It ships the repo, the local cache, the `pod.yon` manifest (a DERIVED
 view of your local registry — see below), and three verbs.
 
 > CLI verbs are plain (`init`, `list`, `rebuild`). Status messages use
-> the warm voice — "Forging Your Pod…", "Your Pod spans 0 meshes" — per
-> [brand voice §1 + §2](https://github.com/younndai/lyt). Errors stay plain.
+> the warm voice — "Forging Your Pod…", "Your Pod spans 0 meshes". Errors
+> stay plain.
 
 ## The shape
 
@@ -81,11 +81,30 @@ Your Pod spans 0 meshes:
 
 Re-derives `pod.yon` from registry state. **Deterministic** —
 running it twice in a row produces byte-identical output modulo the
-`last_synced_at` stamp (master plan §5 v1.A.0 acceptance item 4).
+`last_synced_at` stamp.
 
 `--push` commits + pushes when content actually changed (not when only
 the stamp drifted). Rebuild emits one `@FED_MESH` per registered mesh
 and one `@FED_VAULT` per registered vault.
+
+## Cross-pod identity — the origin coordinate (0.9.4)
+
+Locally, a vault's identity is its `rid` (a UUIDv7, minted on this machine). But
+a `rid` is *local* — two pods that both clone the same shared vault mint
+**different** rids for it. The cross-pod identity is therefore derived from the
+one globally-unique, stable property a shared vault has: its git origin.
+
+- **Origin coordinate** — `lyt:vault:<host>/<owner>/<repo>`, normalized from the
+  vault's `git_url` (the purl / Go-modules pattern). A subscriber's clone has its
+  own local `rid` but the **same** origin coordinate — that's what makes "the
+  same vault" the same across pods.
+- The typed-id scheme is `lyt:<type>:<id>` for every entity
+  (`vault` · `mesh` · `pod` · `user` · `figment` · `pattern`).
+- `commit-SHA` identifies the *bytes at a point*, not the entity (a vault is
+  mutable) — it is a version/freshness marker, not identity.
+
+`lyt vault info <name>` surfaces a vault's origin coordinate (or `null` when the
+vault is local-only). Use the coordinate for replayable cross-pod references.
 
 ## Not yet shipped
 
@@ -103,10 +122,3 @@ and one `@FED_VAULT` per registered vault.
 
 - `lyt help machine` — machine roles drive automator dispatch (block-B
   consumer).
-- [the LYT design doc `lyt-federation-design.md`](.) —
-  canonical design (§3 mesh.yon precedent · §4 federation · §7 persistence).
-- [the LYT design doc `lyt-brand-voice.md`](.) —
-  the locked verb lexicon (forge / mint / weave / divine / trace / crystallize).
-- [the LYT design doc `lyt-public-mesh.md`](.) —
-  `--public` semantics on meshes (federation repos always stay
-  private by design).

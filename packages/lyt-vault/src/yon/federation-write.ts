@@ -22,7 +22,7 @@
 //
 // Determinism contract: identical input → byte-identical output. Required for
 // the v1.A.0 acceptance item "rebuild is deterministic" (plan §3 + master-plan
-// §5 v1.A.0) AND for D31's one-SoT invariant (regen from the registry must be
+// §5 v1.A.0) AND for 's one-SoT invariant (regen from the registry must be
 // stable). The `last_synced_at` stamp is the ONLY field allowed to drift.
 //
 // Sorting rules:
@@ -33,14 +33,14 @@
 // Emits @FEDERATION + @FED_MESH + @FED_VAULT. @FED_AUTOMATOR / @FED_PRIMER /
 // @FED_CANVAS are reserved for later phases (v1.E.5, v1.D.4, v1.D.5).
 //
-// ── OD-A2 (Brief A, 2026-06-04) — INTERNAL-TECHNICAL identifiers, INTENTIONALLY
-// retained (NOT a missed rename site for release review R3): per D1, "federation"
-// stays the internal-technical term. D5 renamed only the on-disk FILE
+// ── (Brief A, 2026-06-04) — INTERNAL-TECHNICAL identifiers, INTENTIONALLY
+// retained (NOT a missed rename site for release review R3): "federation"
+// stays the internal-technical term. renamed only the on-disk FILE
 // (federation.yon → pod.yon) + user-facing prose. The `@DOC id=federation:`
 // record id and the `@FEDERATION` / `@FED_MESH` / `@FED_VAULT` YON tags are the
 // internal schema vocabulary (yai.lyt domain) and are DELIBERATELY left as-is —
 // renaming them would (a) cascade into the hand-rolled parser + canvas node-id
-// scheme (`fed:<rid>`), and (b) violate D1. The user opens a file named
+// scheme (`fed:<rid>`), and (b) violate that convention. The user opens a file named
 // `pod.yon`; the schema tags inside it are the technical layer.
 
 import { escapeQuoted } from "./_helpers.js";
@@ -66,8 +66,8 @@ export interface FedMeshRecord {
   addedAt: string;
 }
 
-// D31 (Brief A) — @FED_VAULT record: the pod manifest now LISTS the registry's
-// vaults so `pod.yon` reflects the actual pod (dissolving the D28 empty-manifest
+// (Brief A) — @FED_VAULT record: the pod manifest now LISTS the registry's
+// vaults so `pod.yon` reflects the actual pod (dissolving the empty-manifest
 // limitation + the 2-SoT divergence). Built from `registry.db` VaultRow on regen.
 // `homeMeshRidHex` is null for an orphan vault (registered but in no mesh).
 export type FedVaultStatus = "active" | "disconnected" | "missing" | "tombstoned" | "access_lost";
@@ -76,13 +76,13 @@ export interface FedVaultRecord {
   vaultRidHex: string;
   vaultName: string;
   homeMeshRidHex: string | null; // null → orphan (no mesh membership)
-  // Brief B (OD-B1 scheme D) — the GitHub repo that holds this vault
+  // Brief B (scheme D) — the GitHub repo that holds this vault
   // (lyt-vault-<mesh>--<vault>). Computed via the vaultRepoName chokepoint at
   // regen time and materialized here so pod.yon is SELF-DESCRIBING: the
   // recovery loop (B.5) reads the repo directly from the manifest, and a human
   // can see which repo holds each vault without running code.
   repo: string;
-  // Brief B (OD-B4) — per-vault repo visibility. Default "private"; making a
+  // Brief B — per-vault repo visibility. Default "private"; making a
   // vault public is a conscious, explicit per-vault action (a deferred seam),
   // never a default. Modeled per-vault (NOT per-mesh) because meshes hold mixed
   // private/semi-public/public vaults (handler 2026-06-04).

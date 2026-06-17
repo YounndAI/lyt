@@ -36,7 +36,7 @@
 // dispatch when ≥50 vault writes accumulate since last arcs build).
 // - Manual: `lyt automator run arc-builder --run-now` (this code path).
 //
-// OD-3 default (mirrors v1.D.1c): this automator wrapper co-exists with
+// default (mirrors v1.D.1c): this automator wrapper co-exists with
 // the manual `lyt vault rebuild-arcs` verb shipped in v1.D.2a Commit 1
 // — the verb stays as evidence-of-life for the underlying flow; this
 // wrapper adds scheduling + provenance routing through the 5-step

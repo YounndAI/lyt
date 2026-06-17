@@ -73,7 +73,7 @@ function printHuman(result: ReturnType<typeof symlinkSkillsTriRuntime>): void {
     // eslint-disable-next-line no-console
     console.log(`  ${r.runtime}/${r.skill}\t${r.status}${msg}`);
   }
-  // D30.4 / OD-1 — surface collision renames prominently. The install
+  // surface collision renames prominently. The install
   // SUCCEEDED (exit 0, heal never halts), but the handler must know a dir of
   // theirs was set aside so they can recover it if they want.
   const collisions = result.results.filter((r) => r.status === "renamed-collision");
@@ -96,7 +96,7 @@ function pickExitCode(result: ReturnType<typeof symlinkSkillsTriRuntime>): numbe
     // `divergent-symlink` is a warn (a symlink points somewhere unexpected and
     // we did NOT touch it without --force). `renamed-collision` is NOT a warn
     // exit: it is a successful, collision-safe install — heal must stay exit 0
-    // so a re-aligning `lyt init` never reports failure (D30 never-fail).
+    // so a re-aligning `lyt init` never reports failure (never-fail).
     if (r.status === "divergent-symlink") exit = 2;
   }
   return exit;

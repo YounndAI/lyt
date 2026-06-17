@@ -45,7 +45,7 @@ export function parseArcsFile(content: string): ArcsDoc {
 // walker just looks for `@`-prefixed lines, so the YAML frontmatter
 // lines don't match and are walked past). Used by rebuild-arcs.ts's
 // detection of two-source records (frontmatter `arcs:` array OR
-// embedded YON block — per master-plan §v1.D.2a + brief OD-9).
+// embedded YON block — per master-plan §v1.D.2a + brief ).
 export function extractArcRecordsFromMarkdownBody(body: string): {
   arcs: ArcRecord[];
   members: ArcMemberRecord[];

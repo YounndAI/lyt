@@ -29,9 +29,9 @@ import {
 // ref/home vault registrations + reachable home-mesh main vault on disk.
 // Surfaces broken edges as `status='warn'` CheckResult rows. Cache-drift
 // (mesh.yon ↔ mesh_edges disagreement) is surfaced as a separate warn-row
-// per OD-15 default.
+// per the ratified default.
 //
-// Exit-code mapping (per OD-9; matches v1.B.5 doctor `2 = warnings only`
+// Exit-code mapping (per the ratified default; matches v1.B.5 doctor `2 = warnings only`
 // posture):
 // 0 — every edge resolves OR no edges to check
 // 2 — one or more warn-rows present (never fail; diagnostic only)

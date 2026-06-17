@@ -133,7 +133,7 @@ behalf. Update by written notice to YounndAI at any time.
 For Entity CLA questions or to submit a signed Entity CLA:
 
 - **Email:** office@younndai.com
-- **Web:** https://github.com/younndai/lyt
+- **Web:** https://github.com/YounndAI/lyt
 
 **YounndAI**
 MARLINK TRADING SRL
@@ -149,7 +149,7 @@ _Effective Date: February 18, 2026_
 
 | | |
 | ----------- | --------------------------------------------------------- |
-| **Project** | [Lyt](https://github.com/younndai/lyt)                    |
+| **Project** | [Lyt](https://github.com/YounndAI/lyt)                    |
 | **Author**  | [Alexandru Mareș](https://allemaar.com)                   |
 | **Company** | [MARLINK TRADING SRL](https://younndai.com) · YounndAI      |
 | **License** | [Apache 2.0](LICENSE) — © 2026 MARLINK TRADING SRL |

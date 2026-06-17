@@ -32,14 +32,14 @@ import {
 import { BRAND_TOPICS, formatRepoDescription } from "../../scaffold/github-defaults.js";
 import type { VaultRow } from "../../registry/repo.js";
 
-// Brief B (D31 §3-§6) — the SHARED vault-publish materialization, used by both
+// Brief B (§3-§6) — the SHARED vault-publish materialization, used by both
 // init/adopt (B.1, LOCAL only — push + gh-create held) and `lyt sync` (B.2,
 // post-consent — gh-create + push). One definition of "make this vault
 // publishable", so init and sync can never diverge.
 //
 // DELTA from the brief's literal B.1 (documented in the retro): B.1's text lists
 // `gh repo create` as part of the un-consented init materialize. That is an
-// OUTWARD GitHub mutation; D31 §4 + B.3 (the staged-HIL gate) + the handler's
+// OUTWARD GitHub mutation; + B.3 (the staged-HIL gate) + the handler's
 // "outward = explicit consent" stance require NO outward effect until the
 // handler answers the publish prompt. So init does LOCAL materialize
 // (createRemote=false, push=false); the consented sync engine does gh-create +
@@ -55,14 +55,14 @@ export interface MaterializeVaultOptions {
   createRemoteIfMissing?: boolean | undefined;
   // Outward push. B.1 = false (held); B.2 = true (post-consent). Default false.
   push?: boolean | undefined;
-  // D34 (OD-LOCALFIRST, 2026-06-04) — wire the `origin` remote. Default true
+  // (2026-06-04) — wire the `origin` remote. Default true
   // (existing init/sync behavior: the remote URL is a LOCAL git config write,
   // safe to set before the repo exists). A no-gh LOCAL init passes false so the
   // provisional handle never reaches a remote URL — connect adds `origin` under
   // the REAL handle (materialize is called again at connect with setRemote=true,
   // and step 4 below only adds origin when absent, so it wires cleanly then).
   setRemote?: boolean | undefined;
-  // OD-B4 — default "private" (per-vault visibility seam). The conscious-public
+  // default "private" (per-vault visibility seam). The conscious-public
   // flip overrides this; never defaults public.
   visibility?: FederationRepoVisibility | undefined;
   ghClient?: FederationGhClient | undefined;
@@ -195,7 +195,7 @@ export async function materializeVaultPublishable(
   // write (not outward) — safe at init even before the repo exists, so the
   // remote is wired the moment the handler consents to publish. Never clobber
   // an existing origin (a handler may have set a custom remote).
-  // D34 — a no-gh LOCAL init passes setRemote=false so the provisional handle
+  // a no-gh LOCAL init passes setRemote=false so the provisional handle
   // never lands in a remote URL; connect re-materializes with setRemote=true.
   if (setRemote) {
     const originUrl = `https://github.com/${handle}/${repoName}.git`;
@@ -285,7 +285,7 @@ export async function commitPodRepo(
       allowFailure: true,
     });
     // release review — the pod is the cross-machine convergence point (most
-    // likely to be behind); give it the SAME OD-B3 pull-rebase-if-behind the
+    // likely to be behind); give it the SAME pull-rebase-if-behind the
     // vaults get, so a non-fast-forward doesn't wedge the outbox forever. On
     // conflict: abort + surface, do NOT push (no overwrite). a review finding — the behind
     // parse fails SAFE: an unreadable rev-list (code != 0) is treated as

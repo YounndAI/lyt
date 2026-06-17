@@ -104,7 +104,7 @@ export interface MeshInitResult {
 export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResult> {
   validateMeshName(opts.name);
 
-  // D27(f) — POD-level pattern resolution. mesh-init is the single sub-flow
+  // POD-level pattern resolution. mesh-init is the single sub-flow
   // BOTH fresh-pod entry points converge on (wizard P8
   // phase6_createPersonalMesh AND `lyt init --auto/--custom` doFreshBranch),
   // and it's where the pod's `~/lyt/` tree is first materialised — so it is
@@ -261,7 +261,7 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
       pushed = await commitAndPushMain(scaffoldResult.vaultPath, pushPlan.target, ghClient);
     }
 
-    // D31 (Brief A) — when mesh-init is the STANDALONE entry (`lyt mesh init`,
+    // (Brief A) — when mesh-init is the STANDALONE entry (`lyt mesh init`,
     // ownDb), regenerate the derived pod manifest so a new mesh+vault shows up
     // in pod.yon. When a parent flow threaded its db (init/adopt), SKIP — the
     // parent regenerates once at the end of its own lifecycle (avoids redundant

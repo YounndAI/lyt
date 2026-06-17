@@ -54,13 +54,13 @@ import { reindexInboundVault } from "./reindex-inbound.js";
 // "main vault locked to main").
 // 2. Resolve the subscribed vault. If already registered locally, use
 // its row. If not, invoke cloneFn (defaults to cloneVaultFlow with a
-// name-derived GH URL per OD-15) to clone it into the home mesh
+// name-derived GH URL per the ratified default) to clone it into the home mesh
 // identified by the {owner}/{vault} prefix.
 // 3. Read + parse the subscribing mesh's `.lyt/mesh.yon`.
 // 4. Idempotent re-emit guard: if MeshDoc.subscriptions already
 // contains a row with the same (mesh_rid, external_vault_rid),
 // return `subscription-already-present` without mutating disk or
-// cache (per OD-6 + v1.B.2 Lock 0.3 byte-stability + v1.C.1 OD-6
+// cache (per the ratified default + v1.B.2 Lock 0.3 byte-stability + v1.C.1
 // precedent).
 // 5. Render the updated MeshDoc → tmp file (no disk mutation yet).
 // 6. BEGIN tx → addSubscription into `mesh_subscriptions` cache
@@ -109,7 +109,7 @@ export interface SubscribeCloneResult {
 // Injectable clone seam: tests provide a function that materialises the
 // subscribed vault locally without touching the network. The default
 // implementation calls cloneVaultFlow with a GH URL built from the
-// vault's `{owner}/{vault}` shape per OD-15 (lyt-naming-convention).
+// vault's `{owner}/{vault}` shape per the ratified default (lyt-naming-convention).
 export type SubscribeCloneFn = (args: SubscribeCloneArgs) => Promise<SubscribeCloneResult>;
 
 export type SubscribeResultStatus = "subscription-written" | "subscription-already-present";
@@ -147,7 +147,7 @@ export interface SubscribeResult {
 }
 
 // v1.C.2 — structured errors. CLI maps these to per-command exit codes
-// per OD-5 (1 vault-not-found / clone-failed; 4 main-vault-missing).
+// per the ratified default (1 vault-not-found clone-failed; 4 main-vault-missing).
 
 export class SubscribeMainVaultMissingError extends Error {
   readonly errorCode = "main-vault-missing";
@@ -171,7 +171,7 @@ export class SubscribeVaultNotFoundError extends Error {
   }
 }
 
-// Name-based URL construction per OD-15 + lyt-naming-convention. hardening pass
+// Name-based URL construction per the ratified default + lyt-naming-convention. Hardening pass
 // (subscriber-onboarding fix-pass, 2026-06-11): the URL now routes through
 // the repo-name convention SoT (util/federation-paths.ts) — a vault NAMED
 // `younndai/pub-test` lives at the repo `younndai/lyt-vault-younndai--pub-test`,
@@ -239,7 +239,7 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
     }
 
     // 2. Resolve the subscribed vault — already-present or clone-on-
-    // subscribe (OD-7). the handler-supplied ref is first
+    // subscribe. The handler-supplied ref is first
     // normalized through the repo-name convention (resolveVaultRef), so
     // `{mesh}/{vault}` AND `{owner}/lyt-vault-<mesh>--<leaf>` both resolve
     // to the same canonical vault name. Registry lookup tries the

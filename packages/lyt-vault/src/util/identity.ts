@@ -40,7 +40,7 @@ export function isValidGhHandle(handle: string): boolean {
   return GH_HANDLE_REGEX.test(handle);
 }
 
-// D34 (OD-LOCALFIRST, 2026-06-04) — derive the DEFAULT provisional handle for a
+// (2026-06-04) — derive the DEFAULT provisional handle for a
 // no-gh `lyt init`: the OS username, sanitized toward a valid GitHub handle
 // (lowercase, `[a-z0-9-]`, collapse + trim hyphens, cap 39). The result is
 // validated against isValidGhHandle so a poisoned/odd OS username can never
@@ -244,7 +244,7 @@ const WINDOWS_RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]|CONIN\$|CONOUT\$)(
 //
 // Distinct from `validateVaultName` which accepts `owner/repo` (single slash)
 // and bare names. The mesh-name slot rejects `/` entirely — a mesh name
-// CANNOT contain a slash. This is the OD-1 resolution from the v1.B.1
+// CANNOT contain a slash. This is the resolution from the v1.B.1
 // brief: `alex/main` is a full vault name; the corresponding mesh name is
 // `alex`. Per naming-convention.md §`Joining and leaving organizations`
 // example `lyt mesh join younndai --from gh-org younndai`, bare mesh names

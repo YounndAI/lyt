@@ -56,7 +56,7 @@ import { ridsEqual } from "../util/uuid7.js";
 // (one-home-mesh-per-vault) partial unique index and THROWS — the ON CONFLICT on
 // the (mesh,vault) PK doesn't catch a different-mesh collision. This tool IS the
 // corruption-repair surface, so it must survive ingesting that state:
-// reconcileMeshLinks isolates the throw PER-MESH (OD-7 — one bad mesh can't abort
+// reconcileMeshLinks isolates the throw PER-MESH (one bad mesh can't abort
 // healing the others), and repair surfaces it as a per-finding error.
 
 // The `<mesh>/main` naming convention (lyt-naming-convention.md): the main vault
@@ -223,7 +223,7 @@ export async function reconcileMeshLinks(db: Client): Promise<MeshLinkReconcileO
     try {
       out.push(await reconcileOneMesh(db, mesh, { vaults }));
     } catch (err) {
-      // Per-mesh isolation (OD-7): a corrupt mesh (e.g. a cross-mesh `home` row
+      // Per-mesh isolation: a corrupt mesh (e.g. a cross-mesh `home` row
       // tripping the one-home-per-vault index) must NOT abort healing the other
       // meshes. Capture the error into the outcome and continue the pass.
       out.push({

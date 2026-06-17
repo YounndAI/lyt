@@ -343,7 +343,7 @@ function globToRegex(glob: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-// Helper for D13: traverse mesh graph from a root vault via parent_vault FK,
+// Helper for traverse mesh graph from a root vault via parent_vault FK,
 // depth-bounded, returning the set of vault names encountered (including the
 // root). v1.A.1b: share_with semantic collapsed to mesh subscriptions (v1.C.1);
 // only parent_vault FK is walked here. The mesh-aware traversal lands in v1.B.1.

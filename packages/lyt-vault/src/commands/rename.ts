@@ -48,8 +48,12 @@ export function buildRenameCommand(): Command {
           console.log(JSON.stringify(result, null, 2));
           return;
         }
+        // 0.9.4 (3d) — only claim a clean success when the read-back verified
+        // the committed name; otherwise append the unverified note.
+        const renameSuffix =
+          result.committed === "verified" ? "" : ` ${result.unverifiedNote ?? "(unverified)"}`;
         // eslint-disable-next-line no-console
-        console.log(`Renamed vault '${result.oldName}' → '${result.newName}'`);
+        console.log(`Renamed vault '${result.oldName}' → '${result.newName}'${renameSuffix}`);
         // eslint-disable-next-line no-console
         console.log(`  rid:        vault:${result.vaultRidHex} (stable)`);
         // eslint-disable-next-line no-console

@@ -23,7 +23,7 @@
 // a parent vault transitively pulls its descendants' keywords per the
 // per-vault flow.
 //
-// Subscriptions are NOT walked (per OD-6 + master-plan §v1.E.2:897):
+// Subscriptions are NOT walked (per the ratified default + master-plan §v1.E.2:897):
 // `@MESH_SUBSCRIPTION` is a flat reference, not a parent-child edge.
 //
 // Open-once seam (v1.A.5 CR-B1): the mesh wrapper opens the registry

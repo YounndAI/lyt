@@ -14,8 +14,7 @@ Default scope: every active vault in the registry × every known ledger.
 The known-ledger list is registry-driven: it reads from
 `packages/lyt-vault/src/registry/ledger-registry.ts:LEDGER_REGISTRY`
 (`LEDGER_NAMES` since v1.A.3). The current registry ships `audit` +
-`provenance`. Friction stays libSQL-only this phase (deferred to v1.5
-per the master plan DQ-new-3); appending it to `LEDGER_REGISTRY` post-v1.5
+`provenance`. Friction stays libSQL-only this phase (deferred to v1.5); appending it to `LEDGER_REGISTRY` post-v1.5
 brings housekeep along automatically.
 
 ## Rotation algorithm

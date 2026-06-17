@@ -21,9 +21,9 @@
 // (lyt-search v1.G.6, lyt-primer-context v1.G.7, lyt-mesh-explore
 // v1.G.9) and the Wave 4 Pod Manager plugin (v1.G.10).
 //
-// Naming follows D1 (2026-06-01): the public-facing alias for
+// Naming follows (2026-06-01): the public-facing alias for
 // scope=federation is `searchPod` — internal SearchCascadeScope keeps
-// scope="federation" since it is the technical-API context per D1.
+// scope="federation" since it is the technical-API context.
 //
 // Two shapes:
 // - Free functions (searchVault / searchMesh / searchPod) for

@@ -33,7 +33,7 @@
 // refuses to re-enter the visited vault and surfaces a warning in the
 // result.
 //
-// Source-path encoding (OD-5): each rollup row records the chain of vault
+// Source-path encoding: each rollup row records the chain of vault
 // rids from the descendant up to the target ancestor:
 // target vault A self-contribution: "vault:<A-hex>"
 // direct child B: "vault:<B-hex>>vault:<A-hex>"
@@ -215,7 +215,7 @@ export async function rebuildRollupFlow(args: RebuildRollupArgs): Promise<Rebuil
           continue;
         }
 
-        // Deterministic emit (Lock 0.3 / OD-12): sort keywords ASC before
+        // Deterministic emit (Lock 0.3 ): sort keywords ASC before
         // INSERT so the per-rebuild row order is byte-stable across
         // invocations on the same input.
         const sortedKeywords = [...keywords].sort();

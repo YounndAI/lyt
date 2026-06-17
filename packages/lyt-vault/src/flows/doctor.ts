@@ -49,6 +49,11 @@ import {
 } from "../util/identity-cache.js";
 import { isValidGhHandle } from "../util/identity.js";
 import { getLytHome } from "../util/paths.js";
+import {
+  getBundledPatternsDir,
+  getUserPatternsDir,
+  listPatternNames,
+} from "../util/pattern-paths.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
 import {
   closeVaultDb,
@@ -193,6 +198,7 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
 
   checks.push(checkLytHomeShape());
   checks.push(checkLytHomeWritable());
+  checks.push(checkPatternsHealth());
   checks.push(checkRegistryOpenable());
   checks.push(checkIdentityConsistency(podRoot, { apply, migrated }));
   checks.push(checkRecentInitFailures());
@@ -237,14 +243,14 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
   // v1.B.5 — open-once seam for the federation/mesh/ledger/marker checks.
   // The new checks all probe state derived from the registry; opening once
   // here + threading the client through avoids 4× open/close cycles on a
-  // hot doctor run. Per OD-11 they fire AFTER checkRegistry (logical
+  // hot doctor run. They fire AFTER checkRegistry (logical
   // grouping: federation/mesh/ledger checks are downstream of the registry
   // probe). If registry.db is missing the new checks emit `info` rows so
-  // the JSON shape stays stable per OD-5 (additive checks[]).
+  // the JSON shape stays stable per the ratified default (additive checks[]).
   //
   // v1.B.6 — extended with checkPublicMeshHygiene (5th threaded check).
   // Auto-folded into the doctorFlow when ANY mesh has @MESH_PUBLIC
-  // declared per OD-11 default; if no mesh is public, emits a single info
+  // declared per the ratified default; if no mesh is public, emits a single info
   // row so the JSON shape stays stable.
   const registryDbPath = join(getLytHome(), "registry.db");
   if (existsSync(registryDbPath)) {
@@ -453,6 +459,94 @@ function checkLytHomeWritable(): CheckResult {
       remediation: "Ensure the user has full control over the lyt home directory.",
     };
   }
+}
+
+// 0.9.4 — capture-loop / hollow-pattern check. `lyt capture`/`recall`
+// run a pattern (knowledge-capture) out of `~/lyt/patterns/<name>/`. A hollow
+// pod (the patterns dir missing, empty, or any bundled pattern present but
+// missing its `pattern.yon`) means the capture loop is DEAD pod-wide — the exact
+// hollow-pod upgrade failure this check guards. doctor must FAIL on it (not warn)
+// so a hollow pod is machine-detectable, and point at the heal path. On a truly
+// fresh machine (no `~/lyt/`) it's `info` (nothing installed yet — first init seeds it).
+function checkPatternsHealth(): CheckResult {
+  const id = "patterns.capture-loop";
+  const group = "patterns";
+  const label = "capture-loop patterns installed (not hollow)";
+  const home = getLytHome();
+  if (!existsSync(home)) {
+    return {
+      id,
+      group,
+      label,
+      status: "info",
+      message: "skipped (~/lyt/ does not exist yet — patterns seed on first init)",
+    };
+  }
+  const bundledDir = getBundledPatternsDir();
+  const userDir = getUserPatternsDir();
+
+  // The patterns dir being ENTIRELY ABSENT is not, by itself, a hollow-pod
+  // failure: a fresh machine (or an isolated test env) simply hasn't installed
+  // patterns yet — the first `init`/postinstall seeds them. The hollow-pod
+  // failure mode is specifically a patterns dir that EXISTS but is hollow/incomplete
+  // (the broken pre-upgrade state the postinstall + init-heal now repair). So
+  // only an EXISTING patterns dir is graded; an absent one is `info`.
+  if (!existsSync(userDir)) {
+    return {
+      id,
+      group,
+      label,
+      status: "info",
+      message: "skipped (~/lyt/patterns not present yet — seeds on first init/postinstall)",
+    };
+  }
+
+  const expected = existsSync(bundledDir) ? listPatternNames(bundledDir) : [];
+  const installed = new Set(listPatternNames(userDir));
+
+  // The patterns dir exists but holds ZERO valid patterns → hollow pod.
+  if (installed.size === 0) {
+    return {
+      id,
+      group,
+      label,
+      status: "fail",
+      message: `~/lyt/patterns exists but holds no valid pattern (no pattern.yon) — the capture loop is dead pod-wide.`,
+      remediation:
+        "Reinstall @younndai/lyt-vault (postinstall re-seeds) or run `lyt mesh init` / `lyt vault init` to trigger init-heal (healPatterns).",
+    };
+  }
+
+  // A bundled default present-but-hollow (dir exists, no pattern.yon) is broken.
+  const hollow: string[] = [];
+  for (const name of expected) {
+    if (installed.has(name)) continue;
+    const dir = join(userDir, name);
+    if (existsSync(dir)) hollow.push(name);
+    // A bundled default entirely ABSENT from an otherwise-populated user dir is
+    // not graded as a failure here (the user may have removed a default they
+    // don't want); only HOLLOW dirs are the hollow-pod trap.
+  }
+
+  if (hollow.length > 0) {
+    return {
+      id,
+      group,
+      label,
+      status: "fail",
+      message: `hollow capture-loop pattern(s): ${hollow.join(", ")} — \`lyt capture\`/\`recall\` will fail.`,
+      remediation:
+        "Reinstall @younndai/lyt-vault or run a `lyt mesh init`/`lyt vault init` to trigger init-heal (re-seeds hollow pattern dirs).",
+    };
+  }
+
+  return {
+    id,
+    group,
+    label,
+    status: "pass",
+    message: `${installed.size} pattern${installed.size === 1 ? "" : "s"} installed; none hollow`,
+  };
 }
 
 function checkRegistryOpenable(): CheckResult {
@@ -846,9 +940,9 @@ export function _listForTests(dir: string): string[] {
 
 // v1.B.5 — federation_state ↔ ~/lyt/pod/ symmetry probe.
 //
-// D27(b): the pod dir is FLAT — a single `~/lyt/pod/` holds `pod.yon`
+// the pod dir is FLAT — a single `~/lyt/pod/` holds `pod.yon`
 // directly (no per-handle subdir). The disk side is therefore the presence of
-// `~/lyt/pod/pod.yon` (D5/D31 renamed it from federation.yon), NOT a set of
+// `~/lyt/pod/pod.yon` (renamed it from federation.yon), NOT a set of
 // per-handle subdirectories. v1 is
 // single-pod / single-handle, so the symmetry is binary: a `federation_state`
 // row (any handle) should agree with the materialised pod on disk. Drift:
@@ -866,9 +960,9 @@ export function _listForTests(dir: string): string[] {
 // - rows present + no pod on disk → warn (orphan row → re-forge)
 // - 0 rows + pod on disk → warn (orphan dir → rebuild)
 export async function checkFederationRepoState(db: Client): Promise<CheckResult> {
-  // D26 WS3 + D27(b): route through the federation-paths chokepoint so the
+  // WS3 + route through the federation-paths chokepoint so the
   // dir ("pod", flat) can never drift from getFederationRepoDir /
-  // getFederationYonPath. Disk presence = the flat pod's pod.yon (D5/D31).
+  // getFederationYonPath. Disk presence = the flat pod's pod.yon.
   const fedRoot = getFederationRoot();
   const fedYonPath = join(fedRoot, "pod.yon");
   const rows = await listFederationStates(db);
@@ -926,7 +1020,7 @@ export async function checkFederationRepoState(db: Client): Promise<CheckResult>
 // v1.B.5 — per-mesh `parseMeshYon` probe. Iterates every registered mesh;
 // resolves its main vault path; attempts to read + parse `.lyt/mesh.yon`.
 //
-// Per OD-3 one CheckResult row per mesh — gives precise remediation
+// Per one CheckResult row per mesh — gives precise remediation
 // guidance ("rebuild THIS mesh's registry") rather than an aggregate.
 //
 // Status mapping:
@@ -1027,7 +1121,7 @@ export async function checkMeshYonParses(db: Client): Promise<CheckResult[]> {
   return out;
 }
 
-// v1.B.5 — ledger YON ↔ DB pair sanity probe. Per OD-4: fast sanity probe
+// v1.B.5 — ledger YON ↔ DB pair sanity probe. Fast sanity probe
 // reading only the most-recent month's ledger. Cross-month integrity (every
 // archived YON has matching DB rows) is a slower probe deferred to v1.B.6d.
 //
@@ -1243,10 +1337,10 @@ export async function checkMarkersRender(
 // v1.B.6 — public-mesh hygiene scan. Walks every mesh that has a
 // @MESH_PUBLIC declaration in its mesh.yon; scans the content of each
 // home vault for filenames matching the configurable suspicious-content
-// pattern set; emits ONE CheckResult per matched file (per OD-14 default —
+// pattern set; emits ONE CheckResult per matched file (per the ratified default —
 // per-file granularity gives precise remediation guidance).
 //
-// Default pattern set per DQ-new-21 + brief OD-12:
+// Default pattern set per DQ-new-21 + brief
 // `.secret`, `credentials`, `.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
 // `id_rsa*`
 //
@@ -1255,7 +1349,7 @@ export async function checkMarkersRender(
 // when the v1.E.6 `~/lyt/config.yon` reader surface ships — for v1.B.6 the
 // flag-only override is enough).
 //
-// Modes (per OD-13):
+// Modes (per the ratified default):
 // - default (strict=false): status='warn' per match → exitCode 2 unless
 // other checks fail
 // - --strict (strict=true): status='fail' per match → exitCode 1 on the

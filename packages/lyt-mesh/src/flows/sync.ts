@@ -21,12 +21,12 @@ import {
   buildVaultCommitMessage,
   classifyPorcelainLine,
   closeRegistry,
+  deriveWriteGate,
   getHandleFromIdentity,
   isConfigPath,
   isFigmentPath,
   isLytDbCorrupt,
   isPermissionDeniedPush,
-  isPureSubscriberVault,
   listMeshes,
   listSubscriptionsForMesh,
   listVaults,
@@ -42,6 +42,7 @@ import {
   uuid7BytesToHex,
   writeIndexWatermark,
   type ChangedFigment,
+  type GhExecutor,
   type GitRunOptions,
   type GitRunResult,
   type VaultRow,
@@ -83,7 +84,7 @@ export interface VaultSyncReport {
   // @MESH_SUBSCRIPTION row in some registered mesh's mesh.yon (i.e. the
   // vault is BOTH home in its own mesh AND a subscription target from
   // another). Additive discriminator; absent on reports for vaults with
-  // no subscription references — preserves backward-compat per OD-9
+  // no subscription references — preserves backward-compat per the ratified default
   // default extension path.
   subscribed?: boolean;
   // hardening pass (hardening fix-pass) — true when the vault's per-vault search
@@ -128,6 +129,11 @@ export interface SyncFlowArgs {
   // absent, each vault gets the deterministic metadata-driven message. The CLI
   // NEVER calls an LLM — the override is the caller's responsibility.
   message?: string;
+  // 0.9.3 — injectable gh executor for the read-only skip-push verdict
+  // (deriveWriteGate). Defaults to the real `gh` CLI; tests inject a fake to
+  // exercise the foreign-mesh subscription skip deterministically. Only
+  // consulted for SUBSCRIPTION vaults — own vaults never probe in the loop.
+  gh?: GhExecutor;
 }
 
 const MESH_CONTEXT_PATH = ".lyt/mesh-context.md";
@@ -143,19 +149,22 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
   // already registered locally (clone-on-subscribe lands them in the
   // vaults table), so no double-dispatch is needed; the cross-mesh
   // subscription view is purely classificatory at sync time. Per
-  // brief OD-9 default extension path: no meta-CLI edit, no new
+  // brief default extension path: no meta-CLI edit, no new
   // syncOneVault call — additive discriminator only.
   let subscribedRidHexes = new Set<string>();
-  // hardening pass (Cohort-1 fix-pass) — the rids of PURE-SUBSCRIBER read-only vaults
-  // (subscribed in some mesh, home in none), derived from the SAME cheap LOCAL
-  // `mesh_vaults.role` signal the capture gate and `deriveVaultWritable`
-  // use — NO gh probe in the sync loop. syncOneVault skips commit+push for
-  // these (pull-only). The OUTBOX itself lives in reconcile-publish (the publish
-  // pass), NOT here: sync's job is to skip the local COMMIT that would otherwise
-  // feed an unpushable publish op downstream — reconcile-publish separately
-  // EXCLUDES pure subscribers from its work-set, so no outbox op is ever
-  // enqueued for them. Computed once here while the registry is open, keyed by
-  // rid hex.
+  // 0.9.3 — the rids of read-only vaults the user can't push to, keyed
+  // on the LIVE writability verdict (deriveWriteGate), NOT the static role. The
+  // prior fix used `isPureSubscriberVault` (subscribed, not home), which a
+  // subscribe-to-a-foreign-mesh vault does NOT satisfy (it gets a local `home`
+  // role), so the cohort's younndai/lyt-docs was push-attempted and jammed the
+  // outbox. deriveWriteGate keeps the loop cheap: an OWN vault (no subscription
+  // signal) is never read-only here with NO gh probe; only a SUBSCRIPTION
+  // consults the (cached) verdict — a pure subscriber short-circuits with no
+  // probe, a foreign-home subscription pays one cached probe. syncOneVault skips
+  // commit+push for these (pull-only); reconcile-publish separately EXCLUDES
+  // them from its publish work-set, so no outbox op is ever enqueued. A
+  // subscription the user was granted write access to (verdict true) is NOT
+  // read-only and syncs normally. Computed once here, keyed by rid hex.
   const readOnlyRidHexes = new Set<string>();
   try {
     const all = await listVaults(db);
@@ -171,7 +180,8 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       }
     }
     for (const v of candidates) {
-      if (await isPureSubscriberVault(db, v.rid)) {
+      const gate = await deriveWriteGate(v, db, args.gh !== undefined ? { gh: args.gh } : {});
+      if (gate.blocked) {
         readOnlyRidHexes.add(uuid7BytesToHex(v.rid));
       }
     }

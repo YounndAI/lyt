@@ -1,7 +1,7 @@
 {
   "id": "lyt-pod-manager",
   "name": "Lyt Pod Manager",
-  "version": "0.9.2",
+  "version": "0.9.5",
   "minAppVersion": "1.4.0",
   "author": "Alexandru Mares",
   "authorUrl": "https://allemaar.com",

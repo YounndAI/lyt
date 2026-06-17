@@ -19,7 +19,7 @@
 // federation: federation group at the top, mesh groups in the middle
 // row, vault nodes below each mesh.
 //
-// Two write modes per OD-5 default:
+// Two write modes per the ratified default:
 // POPULATED — pod.yon exists for the handle. Canvas writes
 // to `<getFederationRepoDir(handle)>/canvases/federation-graph.canvas`
 // and renders federation + meshes (from pod.yon)
@@ -30,9 +30,9 @@
 // with an explicit `> [!warning]` callout (text node)
 // noting "Federation-repo not shipped yet (v1.A.0
 // pending); this canvas is a vault-local snapshot."
-// Mirrors v1.D.4 OD-4 federation-primer stub pattern.
+// Mirrors v1.D.4 federation-primer stub pattern.
 //
-// Layout (OD-8 default — grid-by-tier):
+// Layout (default — grid-by-tier):
 // y=0 federation group (w=FEDERATION_WIDTH, h=FEDERATION_HEIGHT, x=0)
 // y=200 mesh group i at (x = i*MESH_STRIDE, w=MESH_WIDTH, h=MESH_HEIGHT)
 // y=400 vaults of mesh i at (x = i*MESH_STRIDE + j*VAULT_STRIDE, w=VAULT_WIDTH, h=VAULT_HEIGHT)
@@ -44,7 +44,7 @@
 // "5" cyan — mesh → vault (membership)
 // "6" purple — vault → vault (cross-mesh subscription; rare at federation scope)
 //
-// Determinism (Lock 0.3 per OD-9): meshes are sorted by name ASC; vaults
+// Determinism (Lock 0.3 per the ratified default): meshes are sorted by name ASC; vaults
 // under each mesh are sorted by name ASC; nodes are sorted by id ASC
 // in the final array; edges are sorted by (fromNode ASC, toNode ASC).
 // Same federation/mesh state + same `--now-iso` → byte-identical

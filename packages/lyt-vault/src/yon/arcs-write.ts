@@ -30,8 +30,8 @@
 // Arc shape:
 // @ARC rid=arc:<slug> | name="..." | category="..." | last_touched:ts=<iso>
 // @ARC_MEMBER arc_rid=arc:<slug>
-//  | figment_rid="<vault-relative-posix-path>"
-//  | position:int=N
+// | figment_rid="<vault-relative-posix-path>"
+// | position:int=N
 //
 // Note on figment_rid: v1.D.2a stores figment_rid as a vault-relative
 // POSIX path string (figments do NOT carry UUIDv7 rids in v1; the rid
@@ -39,7 +39,7 @@
 // surfaces). The column type adjusts to TEXT in the cache schema (see
 // vault-db-migrations.ts arc_members) — when v1.5 ships figment rids,
 // both YON shape and cache type evolve together with a clean migration.
-// Same posture as v1.D.1a `@LANE_MEMBER.figment_rid` (v1.D.1 D4).
+// Same posture as v1.D.1a `@LANE_MEMBER.figment_rid` (v1.D.1 ).
 
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -64,11 +64,11 @@ export interface ArcRecord {
   name: string;
   // Arc category. v1.D.2a default "uncategorized" when no manual @ARC
   // declaration provides a category; the rebuild flow surfaces a warning
-  // (NOT a fatal error per OD-6 default) when multiple figments declare
+  // (NOT a fatal error per the ratified default) when multiple figments declare
   // the same arc with different categories.
   category: string;
   // ISO 8601 timestamp of the most-recently-touched member figment
-  // (max(mtime) across members per OD-8 default). Caller-controlled to
+  // (max(mtime) across members per the ratified default). Caller-controlled to
   // preserve byte-stable round-trips in tests.
   lastTouched: string;
 }
@@ -82,7 +82,7 @@ export interface ArcMemberRecord {
   // 1-based position within the arc. Manual @ARC_MEMBER records may
   // declare an explicit position; frontmatter-derived members get
   // auto-assigned positions in deterministic file-path lexical order
-  // (skipping reserved-manual slots) per OD-5 default.
+  // (skipping reserved-manual slots) per the ratified default.
   position: number;
 }
 

@@ -47,6 +47,13 @@ This scaffolds `~/lyt/vaults/alex/main/` with:
 A `git init` runs by default; `--no-git` skips it. `--commit-initial` makes a
 single conventional commit with the scaffold files.
 
+`lyt vault init alex/main` is **create-if-missing**: it creates the `alex` mesh
+if it doesn't exist, then the vault. A bare `lyt vault init notes` lands in your
+`personal` mesh. Re-running `init` on a vault that already exists stops and tells
+you (it never silently re-scaffolds). Once created, every verb can address the
+vault by `alex/main`, by the bare leaf `main` (when unambiguous), or by an alias
+(`lyt alias <name> alex/main`).
+
 ## 3. Open in Obsidian
 
 ```bash

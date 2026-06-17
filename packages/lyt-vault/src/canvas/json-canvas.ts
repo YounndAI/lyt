@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// v1.D.5 — JSON Canvas builder primitive (OD-2 default: hand-written, no
+// v1.D.5 — JSON Canvas builder primitive (default: hand-written, no
 // library dep). Spec: https://jsoncanvas.org/spec/1.0/ (Obsidian Canvas
 // .canvas format).
 //

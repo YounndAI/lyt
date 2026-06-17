@@ -4,6 +4,7 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "removeComments": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "target": "ES2022",

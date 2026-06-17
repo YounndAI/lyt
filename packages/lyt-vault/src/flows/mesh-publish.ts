@@ -33,18 +33,18 @@ import { realPublishGhClient, type PublishGhClient } from "../util/gh-mesh-publi
 // per lyt-public-mesh §2.1:
 // (a) Set GH topic `lyt-public` on the mesh main vault repo (via gh
 // repo edit --add-topic). Skipped under --no-set-topic. Logs +
-// continues on gh-unavail per OD-4 default (--strict converts to hard fail).
+// continues on gh-unavail per the ratified default (--strict converts to hard fail).
 // (b) Validate LICENSE file presence at the mesh main vault root.
-// Warns on missing per OD-5 default; --strict hard-fails.
+// Warns on missing per the ratified default; --strict hard-fails.
 // (c) Run public_mesh_hygiene scan via checkPublicMeshHygiene. --strict
 // converts warns→fails inside the check.
-// (d) Compose + emit the canonical discovery URL (OD-6) +
+// (d) Compose + emit the canonical discovery URL +
 // brand-voice status message.
 //
 // Also writes @MESH_PUBLIC into the mesh's mesh.yon if it doesn't already
 // exist (initial publish provisions the record with publisher-supplied
 // description; subsequent re-publishes leave the existing record alone so
-// human-edited metadata isn't blown away). Per OD-1 the schema is in place
+// human-edited metadata isn't blown away). The schema is in place
 // from Commit 1; the writer is here.
 
 export class PublishMeshNotFoundError extends Error {
@@ -182,7 +182,7 @@ export async function publishMeshFlow(args: PublishMeshArgs): Promise<PublishMes
             : `--no-set-topic`,
       });
     } else {
-      // Brief B (OD-B1 scheme D) — the mesh main vault's repo name now routes
+      // Brief B (scheme D) — the mesh main vault's repo name now routes
       // through the vaultRepoName chokepoint (lyt-vault-<mesh>--main), not the
       // former prefix-less `${meshName}-main`. SEE ALSO federation-paths.ts
       // vaultRepoNameFromParts + mesh-info.ts (same reconciliation).

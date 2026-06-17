@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 // curated whitelist (the lyt-vault CLI registers ~50 verbs; the manual
 // surfaces the 8 the agent should reach for first).
 //
-// the ratified default (Path B1 = D9 update-path primitive, RATIFIED by Alex 2026-06-01):
+// the ratified default (Path B1 = update-path primitive, RATIFIED by Alex 2026-06-01):
 // marker pattern `<!-- lyt-manual v<lyt-version> BEGIN -->...
 // <!-- lyt-manual v<lyt-version> END -->`. Uppercase BEGIN/END for
 // grep-distinctness; version interpolated at install time. Treat the
@@ -126,7 +126,7 @@ export function parseAgentManualRuntime(value: unknown): AgentManualRuntime {
   throw new AgentManualUnsafeRuntimeError(String(value));
 }
 
-// Marker pattern per the ratified default + D9. Uppercase BEGIN/END for
+// Marker pattern per the ratified default. Uppercase BEGIN/END for
 // grep-distinctness. Version is interpolated at install time so the
 // post-alpha update path (0.4.0 → 0.5.0 → 1.0.0) can replace the prior
 // block by anchoring on the marker string regardless of version.
@@ -156,12 +156,12 @@ interface MarkerBlockResult {
 }
 
 // v1.GP F5 — opt-in malformed-marker repair. The default (force=false)
-// preserves the Cor-C1 / D9 REFUSE contract: malformed markers throw
+// preserves the REFUSE contract: malformed markers throw
 // AgentManualMalformedMarkersError, never silently mutate a hand-edited
 // file. With force=true, instead of refusing, we APPEND a fresh well-formed
 // block at the end of the file (preserving the malformed region verbatim so
 // no handler content is lost) and flag forcedRepair so the caller warns.
-// The marker SHAPE is unchanged (D9 stability contract) — `--force` only
+// The marker SHAPE is unchanged (stability contract) — `--force` only
 // changes the ACTION on malformed input, not the marker grammar.
 export function replaceMarkerBlock(
   existingFile: string,
@@ -202,7 +202,7 @@ export function replaceMarkerBlock(
   // single END BEFORE a single BEGIN passes the 1/1 count gate, gets
   // mis-spliced (before=slice(0, beginIdx) excludes the END; after=
   // slice(endIdx) re-includes the BEGIN), and silently corrupts the
-  // handler's CLAUDE.md. D9 was elevated to prevent exactly this
+  // handler's CLAUDE.md. was elevated to prevent exactly this
   // failure mode.
   const beginRe = /<!-- lyt-manual v[0-9][0-9A-Za-z.\-+]* BEGIN -->/;
   const endRe = /<!-- lyt-manual v[0-9][0-9A-Za-z.\-+]* END -->/;
@@ -430,11 +430,11 @@ function buildProactiveSection(): string {
   ].join("\n");
 }
 
-// Enabler session (2026-06-11, D51 never-phone-home lock) — the alpha feedback
+// Enabler session (2026-06-11, never-phone-home lock) — the alpha feedback
 // channel is this directive, not telemetry. Feedback is user-initiated, the
 // payload is an inspectable markdown Figment in the user's own pod, and
 // nothing leaves the machine until the user explicitly syncs. Zero passive
-// telemetry in alpha; any future metrics feature must pass through D51's
+// telemetry in alpha; any future metrics feature must pass through 's
 // shape (a local figment the user reads and chooses to share), not around it.
 function buildFeedbackSection(): string {
   return [
@@ -450,6 +450,32 @@ function buildFeedbackSection(): string {
   ].join("\n");
 }
 
+function buildAddressingSection(): string {
+  return [
+    "## `[lyt.address]` Addressing — the `rid` is identity; names resolve to it",
+    "",
+    "A vault's **`rid` (UUIDv7) is its identity**; `{mesh}/{vault}` names, bare leaves, and",
+    "aliases are a RESOLUTION layer over it (git's model: a stable SHA with human refs). The",
+    "canonical display name `{mesh}/{vault}` is COMPUTED from the vault's home mesh + leaf — so",
+    "`vault move` updates the home mesh and the name follows automatically.",
+    "",
+    "Every verb taking a vault accepts ANY of these (one resolver chokepoint; never per-verb):",
+    "- **`{mesh}/{vault}`** — the canonical qualified address (e.g. `company/handbook`).",
+    "- **bare leaf** — `handbook` → tries `personal/handbook`, then the UNIQUE leaf across meshes.",
+    "  A colliding leaf ERRORS and lists the qualified candidates — it never guesses.",
+    "- **pod-local alias** — `lyt alias ro company/company-ro` binds `ro` → the vault's rid",
+    "  (survives rename + move). Pod-local: synced across YOUR pod, never to subscribers.",
+    "- **origin coordinate** — `lyt:vault:<host>/<owner>/<repo>` (from git_url) for cross-pod refs.",
+    "",
+    "**For replayable/stored references, prefer the qualified `{mesh}/{vault}` or the origin",
+    "coordinate** (stable across pod growth + rename); bare/alias are interactive convenience.",
+    "",
+    "**Create-if-missing:** `lyt vault init company/handbook` (or `--mesh company`) creates the",
+    "`company` mesh if absent, the vault if absent, and STOPS + notifies if the vault already",
+    "exists. Add `--push-to <handle>` to make an auto-created mesh a sharing mesh (else local-only).",
+  ].join("\n");
+}
+
 function buildVerbsSection(): string {
   return [
     "## `[lyt.verbs]` CLI verbs that exist today (all take `--json`; `lyt help <topic>`)",
@@ -459,9 +485,10 @@ function buildVerbsSection(): string {
     "",
     "To drive Lyt, the high-value verbs grouped by intent (all shipped + unit/E2E-tested —",
     'they exist and do what\'s described; live-validation is ongoing, not "flawless"):',
-    "- *vault lifecycle:* `vault clone <url>` (copy+register a vault; `--to-mesh <name>` assigns",
-    "  the clone to a mesh), `vault move` (mesh-hop a vault), `vault rename`,",
-    "  `vault forget|disconnect|delete` (deregister / unlink / remove).",
+    "- *vault lifecycle:* `vault init <mesh>/<vault>` (create-if-missing; `--mesh`/`--push-to`),",
+    "  `vault clone <url>` (copy+register a vault; `--to-mesh <name>` assigns the clone to a",
+    "  mesh), `vault move` (mesh-hop a vault), `vault rename`, `alias <name> <target>` (pod-local",
+    "  name → rid), `vault forget|disconnect|delete` (deregister / unlink / remove).",
     "- *federation:* `mesh subscribe` (clone-on-subscribe a vault into a mesh), `mesh add-edge`",
     "  (parent/child rollup edge), `mesh publish` (make a mesh public), `mesh info --remote`",
     "  (peek a published `mesh.yon` via `gh api`, no clone).",
@@ -620,6 +647,8 @@ export async function generateAgentManual(args: AgentManualArgs): Promise<AgentM
     buildWorksetSection(),
     "",
     buildGateSection(),
+    "",
+    buildAddressingSection(),
     "",
     buildSyncSection(),
     "",

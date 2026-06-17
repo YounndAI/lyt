@@ -27,7 +27,7 @@
 // rebuild-arcs produces identical inserts.
 //
 // `arc_members.figment_rid` is TEXT (vault-relative posix path) because
-// figments do not have UUIDv7 rids in v1 (v1.D.1 D4 lesson — the rid
+// figments do not have UUIDv7 rids in v1 (v1.D.1 lesson — the rid
 // system for individual notes lands in v1.5 alongside @TASK / @MARK).
 // Both YON shape and cache type evolve together when v1.5 ships.
 //

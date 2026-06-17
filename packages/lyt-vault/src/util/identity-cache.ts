@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 
 import { getLytHome } from "./paths.js";
 
-// W2.3 (OD-3, 2026-06-03) — the pod repo is the DURABLE identity SoT (the
+// W2.3 (2026-06-03) — the pod repo is the DURABLE identity SoT (the
 // recovery path). `<podRepoDir>/identity.yon` carries the same @IDENTITY shape
 // as the machine cache. SoT precedence is pod > local `~/lyt/machine.yon` >
 // derive-from-gh (see resolvePodIdentity). Persisting identity into the pod
@@ -46,7 +46,7 @@ export interface CachedIdentity {
   source: string;
 }
 
-// D34 (OD-LOCALFIRST, 2026-06-04) — identity `source` values for the
+// (2026-06-04) — identity `source` values for the
 // local-first init. A PROVISIONAL identity is minted at a no-gh `lyt init`
 // (handle prompted, default OS username) and carries no GitHub verification;
 // it is reconciled to the real gh handle (`source=gh-cli`) at connect
@@ -64,7 +64,7 @@ export function isProvisionalIdentity(id: CachedIdentity): boolean {
   return id.source === IDENTITY_SOURCE_PROVISIONAL || id.source === "local";
 }
 
-// D34 — write a PROVISIONAL identity to the local cache (no pod, no gh). The
+// write a PROVISIONAL identity to the local cache (no pod, no gh). The
 // handle is the prompted value (default OS username via deriveProvisionalHandle
 // in identity.ts); the caller validates it with isValidGhHandle before this.
 export function writeProvisionalIdentity(
@@ -197,7 +197,7 @@ export function resolvePodIdentity(opts: ResolvePodIdentityOptions = {}): Cached
 // (Brief F — machine cache + pod SoT carry DISTINCT @DOC ids):
 // @DOC ver=2.0 | id=<docId> | domain=yai.lyt
 // @IDENTITY rid=identity:local | type=user | provider=<p> | handle=<h>
-//  | verified_at:ts=<iso> | source=<src>
+// | verified_at:ts=<iso> | source=<src>
 function renderIdentity(id: CachedIdentity, docId: string): string {
   const verifiedIso = new Date(id.verifiedAtMs).toISOString();
   return (

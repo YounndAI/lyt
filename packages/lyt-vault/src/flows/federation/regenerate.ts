@@ -37,12 +37,12 @@ import {
   type FederationVisibility,
 } from "../../yon/federation-write.js";
 
-// D31 (Brief A) — the pod manifest (`pod.yon`) is a DERIVED view of the local
+// (Brief A) — the pod manifest (`pod.yon`) is a DERIVED view of the local
 // registry, regenerated from `registry.db` exactly like the pod-map vault
 // (pod-map-generate.ts). This is the SINGLE derivation path: both the lifecycle
 // regen hooks (init / adopt / forget) and `lyt federation rebuild` route through
 // `derivePodManifestDoc` so there is exactly one definition of "what the manifest
-// should contain given the registry". Dissolves the D28 empty-manifest
+// should contain given the registry". Dissolves the empty-manifest
 // limitation + the 2-SoT divergence (registry knew the vault; manifest didn't).
 //
 // The registry is the SoT; `pod.yon` is never hand-edited as truth. Anything a
@@ -58,7 +58,7 @@ export interface DerivePodManifestOptions {
   createdAt: string;
   // The `last_synced_at` stamp value (the one drifting field).
   nowIso: string;
-  // Brief B (OD-B4) — per-vault visibility is preserved across regens from the
+  // Brief B — per-vault visibility is preserved across regens from the
   // prior pod.yon (like the federation-level visibility/createdAt above — NOT
   // derivable from the registry, which has no per-vault visibility column).
   // Keyed by vaultRidHex. A vault absent from the map defaults to
@@ -118,7 +118,7 @@ export async function derivePodManifestDoc(
   }));
 
   // @FED_VAULT: every registry vault, with its home-mesh membership (null →
-  // orphan). This is the list that was missing before D31 — the live dogfood
+  // orphan). This is the list that was missing before the live dogfood
   // showed the registry holding `personal/main` while the manifest was empty.
   //
   // Brief B: `repo` is computed via the vaultRepoName chokepoint (scheme D) so
@@ -205,7 +205,7 @@ export interface RegeneratePodManifestResult {
   changed: boolean;
   meshCount: number;
   vaultCount: number;
-  // True when a stale legacy `federation.yon` sibling was removed (OD-A1
+  // True when a stale legacy `federation.yon` sibling was removed (
   // clean-slate: pod.yon is the single manifest; the old name is not orphaned).
   legacyRemoved: boolean;
 }
@@ -236,7 +236,7 @@ export async function regeneratePodManifestFlow(
   }
 
   // Preserve federation-level fields not derivable from the registry, plus
-  // per-vault visibility (Brief B OD-B4 — same not-derivable-from-registry
+  // per-vault visibility (Brief B same not-derivable-from-registry
   // category as federation visibility/createdAt).
   let visibility: FederationVisibility = "private";
   let createdAt = nowIso;
@@ -269,7 +269,7 @@ export async function regeneratePodManifestFlow(
   mkdirSync(dirname(podYonPath), { recursive: true });
   writeFileSync(podYonPath, renderFederationYon(doc), "utf8");
 
-  // OD-A1 (clean-slate, dev mode): remove any legacy `federation.yon` sibling so
+  // (clean-slate, dev mode): remove any legacy `federation.yon` sibling so
   // pod.yon is the single on-disk manifest. No migration — pod.yon is fully
   // derived from the registry, so the legacy file holds no unique truth.
   let legacyRemoved = false;

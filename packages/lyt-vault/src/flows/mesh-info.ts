@@ -33,7 +33,7 @@ import { realPublishGhClient, type PublishGhClient } from "../util/gh-mesh-publi
 // mesh.yon WITHOUT cloning, via gh api repos/<owner>/<mesh-main>/contents/
 // .lyt/mesh.yon. Graceful-fails to remote-gh-unavailable when gh-down.
 //
-// Output shape (per OD-8 nested):
+// Output shape (per the ratified default nested):
 // { mesh, publicMeta?, updateCadences, homeVaults }
 //
 // Local-mode resolves by mesh name in the registry. --remote-mode requires
@@ -149,7 +149,7 @@ export async function meshInfoFlow(args: MeshInfoArgs): Promise<MeshInfoResult> 
           "mesh has no push_target (--no-push); --remote needs a remote to peek at",
         );
       }
-      // Brief B (OD-B1 scheme D) — mesh main vault repo via the vaultRepoName
+      // Brief B (scheme D) — mesh main vault repo via the vaultRepoName
       // chokepoint (lyt-vault-<mesh>--main). SEE ALSO mesh-publish.ts.
       const repoName = vaultRepoNameFromParts(args.meshName, "main");
       let fetched: string | null;

@@ -62,7 +62,7 @@ export interface RebuildLanesArgs {
   // (lyt-runner already resolved it for the run-plan).
   vaultPathOverride?: string;
   // Minimum number of notes a tag must appear in to form a lane. Default
-  // = 2 per brief OD-5.
+  // = 2 per brief.
   threshold?: number;
   // Open-once seam (v1.A.5 CR-B1 pattern). When supplied, the flow uses
   // the caller's registry client and does NOT close it. When omitted,

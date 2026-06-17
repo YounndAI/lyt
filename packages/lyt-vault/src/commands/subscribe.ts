@@ -34,7 +34,7 @@ import {
 // refreshed after a successful write so the v1.D.3 cascade engine
 // surfaces the subscribed vault under mesh-scoped uniform search.
 //
-// Structured error contract (per OD-5):
+// Structured error contract (per the ratified default):
 // exit 0 subscription written OR subscription-already-present (idempotent)
 // exit 1 vault-not-found / clone-failed for --vault
 // exit 4 main-vault-missing (subscribing mesh's main vault not in registry)
@@ -48,11 +48,11 @@ interface SubscribeCliOpts {
 export function buildMeshSubscribeSubcommand(): Command {
   return new Command("subscribe")
     .description(
-      "v1.C.2: write a flat @MESH_SUBSCRIPTION into the subscribing mesh's mesh.yon (asymmetric — referenced vault's home mesh untouched). Clones the subscribed vault locally on first subscribe (OD-7) + builds the local libSQL index so mesh-scoped search includes it.",
+      "v1.C.2: write a flat @MESH_SUBSCRIPTION into the subscribing mesh's mesh.yon (asymmetric — referenced vault's home mesh untouched). Clones the subscribed vault locally on first subscribe + builds the local libSQL index so mesh-scoped search includes it.",
     )
     .requiredOption(
       "--vault <name>",
-      "Subscribed vault — {mesh}/{vault} (e.g. younndai/pub-test) or the literal repo name {owner}/lyt-vault-<mesh>--<leaf>; both normalize to the vault name . If absent from the local registry, lyt clones it via cloneVaultFlow before writing the subscription",
+      "Subscribed vault — {mesh}/{vault} (e.g. younndai/pub-test) or the literal repo name {owner}/lyt-vault-<mesh>--<leaf>; both normalize to the vault name. If absent from the local registry, lyt clones it via cloneVaultFlow before writing the subscription",
     )
     .requiredOption(
       "--from-mesh <name>",

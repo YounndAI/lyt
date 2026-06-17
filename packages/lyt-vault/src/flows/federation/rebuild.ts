@@ -34,7 +34,7 @@ import { derivePodManifestDoc, podManifestDocsEqualIgnoringStamp } from "./regen
 // running rebuild twice produces byte-identical output (modulo last_synced_at,
 // which is intentionally exempt per OQ-4 resolution).
 //
-// D31 (Brief A): the manifest now LISTS the registry's meshes (@FED_MESH) AND
+// (Brief A): the manifest now LISTS the registry's meshes (@FED_MESH) AND
 // vaults (@FED_VAULT) — both derived via the single `derivePodManifestDoc` path
 // shared with the lifecycle regen hooks (regenerate.ts). Earlier (v1.A.0) this
 // flow emitted zero @FED_MESH because the multi-mesh tables didn't exist yet;
@@ -96,7 +96,7 @@ export async function federationRebuildFlow(
     const existingRaw = readFileSync(fedYonPath, "utf8");
     const existing = parseFederationYon(existingRaw);
 
-    // D31: derive meshes + vaults from the registry via the single shared
+    // derive meshes + vaults from the registry via the single shared
     // derivation path (regenerate.ts). Preserve the federation-level fields not
     // stored in the registry (visibility, created_at) from the existing manifest
     // — rebuild does not reset birth time or repo visibility.
@@ -112,7 +112,7 @@ export async function federationRebuildFlow(
 
     // v1.A.2d release review fold (v1.A.0 #16b): struct compare on the parsed
     // FederationDoc, dropping lastSyncedAt — survives writer field-order /
-    // formatting drift. The shared helper now spans @FED_VAULT too (D31). The
+    // formatting drift. The shared helper now spans @FED_VAULT too. The
     // byte-level helper stripStampAndNewlines is still exported for the test
     // suite's byte-identity assertions.
     const changed = !podManifestDocsEqualIgnoringStamp(existing, next);
@@ -159,7 +159,7 @@ export async function federationRebuildFlow(
 // duplicated in tests/federation/federation-rebuild-idempotent.test.ts).
 // Also strips CRLF → LF so cross-platform pod.yon files compare cleanly.
 // Production rebuild logic uses podManifestDocsEqualIgnoringStamp (regenerate.ts)
-// for STRUCTURAL compare (v1.A.0 #16b; D31 extended it to span @FED_VAULT).
+// for STRUCTURAL compare (v1.A.0 #16b; extended it to span @FED_VAULT).
 export function stripStampAndNewlines(content: string): string {
   return content
     .replace(/\r\n/g, "\n")

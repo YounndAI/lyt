@@ -30,8 +30,14 @@ const names = readdirSync(bundled).filter((n) => {
 for (const name of names) {
   const sourceDir = join(bundled, name);
   const targetDir = join(target, name);
-  if (existsSync(targetDir)) {
-    console.log(`[lyt postinstall] skip ${name} (already at ${targetDir} — user customization preserved)`);
+  // Skip ONLY if a REAL (populated) pattern is already installed — preserves user
+  // customizations. A hollow dir (exists but missing pattern.yon) is broken, not a
+  // customization, so we (re)seed it; cpSync merges into the existing empty dir.
+  // 2026-06-16: a pre-existing empty ~/lyt/patterns/<name> (left by a prior
+  // install/init) made every upgrade skip the seed via the old `existsSync(targetDir)`
+  // guard, leaving `lyt capture`/`recall` dead pod-wide with no auto-recovery.
+  if (existsSync(join(targetDir, "pattern.yon"))) {
+    console.log(`[lyt postinstall] skip ${name} (already installed — user customization preserved)`);
     continue;
   }
   cpSync(sourceDir, targetDir, { recursive: true });

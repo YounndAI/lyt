@@ -20,9 +20,10 @@ import { dirname, join, resolve } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
+import { assertVaultName, type CommitVerdict } from "../registry/assert-committed.js";
 import { recordAudit } from "../registry/audit-write.js";
 import { getMeshByRid } from "../registry/meshes-repo.js";
-import { getVaultByName, getVaultByRid } from "../registry/repo.js";
+import { getVaultByName, getVaultByExactName, getVaultByRid } from "../registry/repo.js";
 import { updateMeshHomeNameInFile } from "../registry/vault-home-mesh-helpers.js";
 import { openAuditDb, closeVaultDb } from "../registry/vault-db.js";
 import { validateVaultName } from "../util/identity.js";
@@ -34,7 +35,7 @@ import { renderVaultYon } from "../yon/vault.js";
 //
 // Closes the v1.B.1 retro clause `g` deferral (main-vault rename guard).
 //
-// Pre-flight refusals (OD-8):
+// Pre-flight refusals :
 // - HARD ERROR: rename target = 'main' (MainVaultImmutableError;
 // exit 2; structured error JSON when --json). The main vault is
 // structurally locked per federation-design.md §3 + naming-convention
@@ -118,6 +119,12 @@ export interface RenameVaultResult {
   vaultYonRewritten: boolean;
   meshYonUpdated: boolean;
   auditRecorded: boolean;
+  // 0.9.4 (3d / §4) — read-back verdict. `verified` when the post-UPDATE
+  // re-read confirms vaults.name === newName; `unverified` otherwise. The CLI
+  // appends `unverifiedNote` to the success line on an unverified outcome
+  // instead of printing an unconditional "Renamed".
+  committed: CommitVerdict;
+  unverifiedNote: string | null;
 }
 
 export async function renameVaultFlow(args: RenameVaultArgs): Promise<RenameVaultResult> {
@@ -144,7 +151,10 @@ export async function renameVaultFlow(args: RenameVaultArgs): Promise<RenameVaul
     if (sourceVault === null) {
       throw new RenameVaultNotFoundError(args.oldName);
     }
-    const collision = await getVaultByName(db, args.newName);
+    // Collision check must be a LITERAL name probe — not a leaf-resolving one
+    // (the new target name shouldn't be considered "taken" just because its
+    // bare leaf happens to resolve to some other vault).
+    const collision = await getVaultByExactName(db, args.newName);
     if (collision !== null) {
       throw new VaultNameTakenError(args.newName);
     }
@@ -282,6 +292,12 @@ export async function renameVaultFlow(args: RenameVaultArgs): Promise<RenameVaul
       auditRecorded = false;
     }
 
+    // 7. Read-back guard on top of the UPDATE. Re-read the row and assert
+    // vaults.name actually flipped to <new> before claiming success. Closes
+    // the "reported success without effect" class (the move-bug symptom)
+    // for the rename surface too.
+    const committed = await assertVaultName(db, sourceVault.rid, args.newName);
+
     return {
       vaultRidHex: uuid7BytesToHex(sourceVault.rid),
       oldName: args.oldName,
@@ -293,6 +309,8 @@ export async function renameVaultFlow(args: RenameVaultArgs): Promise<RenameVaul
       vaultYonRewritten: true,
       meshYonUpdated: meshUpdated,
       auditRecorded,
+      committed: committed.verdict,
+      unverifiedNote: committed.unverifiedNote,
     };
   } finally {
     if (!callerSupplied) await closeRegistry(db);

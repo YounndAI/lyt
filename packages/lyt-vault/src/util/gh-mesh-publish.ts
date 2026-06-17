@@ -35,7 +35,7 @@ import { inspectGhError } from "./gh-federation.js";
 // to peek at a remote mesh.yon before subscribing.
 //
 // Graceful degradation: setRepoTopic logs and returns false-ish state when
-// gh is unavailable (per OD-4 default — publishers may be offline / pre-gh;
+// gh is unavailable (per the ratified default — publishers may be offline pre-gh;
 // publish doesn't block on topic-set failure unless --strict is passed).
 // getRemoteFileContent returns null on 404 (the legitimate "not found" case)
 // and throws on other gh-cli failures (auth, network, etc.) — mirrors
@@ -77,7 +77,7 @@ export const realPublishGhClient: PublishGhClient = {
       runGhSilent(["repo", "edit", `${handle}/${repo}`, "--add-topic", topic]);
       return true;
     } catch (err) {
-      // Per OD-4 graceful-degrade: log a warning + return false. --strict
+      // Per graceful-degrade: log a warning + return false. --strict
       // callers convert false to a hard fail.
       const { summary } = inspectGhError(err);
       // eslint-disable-next-line no-console

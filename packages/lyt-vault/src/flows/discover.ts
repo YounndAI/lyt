@@ -45,7 +45,7 @@ import { subscribeFlow, type SubscribeCloneFn } from "./subscribe.js";
 // The flow has 4 phases:
 // 1. Resolve the walk owner (--owner or `getHandleFromIdentity`).
 // 2. Walk the owner's accessible repos via `gh api /user/repos --paginate`
-// (lyt-vault-owned walker per OD-3 alt — cycle-free; lyt-mesh's
+// (lyt-vault-owned walker per the ratified default alt — cycle-free; lyt-mesh's
 // walkGithub couldn't be reused because lyt-mesh depends on lyt-vault,
 // not the other way round).
 // 3. Per repo, fetch `.lyt/vault.yon` via the GH Contents API; skip 404s

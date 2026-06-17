@@ -20,9 +20,12 @@ export interface Migration {
   sql: string;
 }
 
-// v1.A.1b — single amended `001-init` migration. Pre-release clean-slate
-// posture per project CLAUDE.md: schema-shape drift requires
-// `lyt registry reset --yes` + re-init. No `002-*` file is added.
+// v1.A.1b — `001-init` base migration. Pre-release clean-slate posture per
+// project CLAUDE.md governed block-A/B schema work. Migration 002 (below)
+// is additive: once 001 has been applied on a machine its body is frozen,
+// so any post-001 table (e.g. vault_aliases) MUST land as a NEW version —
+// the runner (migrate.ts) skips already-applied versions, so amending 001
+// in place would never reach an existing DB.
 //
 // PRAGMA foreign_keys = ON is set at connection open in client.ts:21
 // (block-A invariant). Table-creation order below is meshes BEFORE
@@ -146,7 +149,7 @@ INSERT OR IGNORE INTO machine_state (key, value, updated_at)
   VALUES ('region', '', strftime('%s', 'now') * 1000);
 
 -- v1.A.0 per-machine federation-repo state cache. SoT lives in the
--- {handle}/lyt-pod GH repo (D26 repo name) cloned to ~/lyt/pod/.
+-- {handle}/lyt-pod GH repo (repo name) cloned to ~/lyt/pod/.
 -- This table is a thin pointer so lyt init can probe whether the machine
 -- already adopted the federation repo without a gh round-trip. handle is
 -- TEXT PK because the GitHub handle IS the natural unique key (one
@@ -206,4 +209,32 @@ CREATE INDEX IF NOT EXISTS idx_machine_leases_active_expires
 `,
 };
 
-export const MIGRATIONS: readonly Migration[] = [migration001Init];
+// 0.9.4 (pod-local aliases) — additive migration 002. This table was
+// originally appended into 001-init, but the runner skips already-applied
+// versions, so on any pre-existing v1 DB the amended 001 never re-ran and
+// vault_aliases was never created (every name resolution then crashed with
+// `no such table: vault_aliases`). Splitting it into its own version makes
+// the upgrade land on both fresh and existing-v1 databases.
+//
+// A handler-defined name → vault rid mapping that survives rename + move
+// (it keys on the rid, not the name). Pod-local: synced across your OWN
+// pod's machines, never to subscribers (enforced by the publish/sync
+// surface, not the schema). alias is the PK (one target per alias name);
+// the same vault rid may carry many aliases. ON DELETE CASCADE: forgetting
+// or deleting a vault drops its aliases with it.
+const migration002Aliases: Migration = {
+  version: 2,
+  name: "aliases",
+  sql: `
+CREATE TABLE IF NOT EXISTS vault_aliases (
+  alias       TEXT PRIMARY KEY,
+  vault_rid   BLOB NOT NULL,
+  created_at  TEXT NOT NULL,
+  FOREIGN KEY (vault_rid) REFERENCES vaults(rid) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_aliases_vault_rid ON vault_aliases(vault_rid);
+`,
+};
+
+export const MIGRATIONS: readonly Migration[] = [migration001Init, migration002Aliases];

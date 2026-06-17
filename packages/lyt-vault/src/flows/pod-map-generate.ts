@@ -20,7 +20,7 @@
 // / @MESH_SUBSCRIPTION relationships. Opens in Obsidian's graph view to
 // render the pod's federation topology natively.
 //
-// Per the ratified default Option A (ratified by Alex 2026-06-01 D4) + D27(c): the pod-map
+// Per the ratified default Option A (ratified by Alex 2026-06-01 ) + the pod-map
 // vault lives FLAT at `<vaults-root>/lyt-pod-map/` — alongside the handler's
 // other vaults (no `<owner>` segment, matching paths.ts resolveVaultPath),
 // NOT inside `alex/main` as a section. The owner is still threaded into the
@@ -89,7 +89,7 @@ export interface PodMapArgs {
   // GitHub handle / owner under which the pod-map vault is keyed. Per
   // the ratified default: a missing or empty owner makes the generator refuse with
   // `ok: false` — no stub-mode fallback (the multi-org composition per
-  // D4 requires a known owner to disambiguate the write target).
+  // requires a known owner to disambiguate the write target).
   owner: string;
   // Vaults root under which the pod-map vault is written. Defaults to
   // `getDefaultVaultsRoot()` (`<lyt-home>/vaults`); tests override via
@@ -106,7 +106,7 @@ export interface PodMapArgs {
 }
 
 export interface PodMapVaultPaths {
-  // Pod-map vault root: `<vaultsRoot>/<sluggedOwner>/lyt-pod-map/` (D26 user-facing
+  // Pod-map vault root: `<vaultsRoot>/<sluggedOwner>/lyt-pod-map/` (user-facing
   // dir name; `vault.kind: pod-map` stays the internal discriminator the plugin keys on).
   root: string;
   // `<root>/.lyt/`
@@ -505,7 +505,7 @@ function derivePodMapPaths(vaultsRoot: string, ownerSlug: string): PodMapVaultPa
   if (ownerSlug.length === 0) {
     return emptyPaths();
   }
-  // D27(c): the pod-map vault sits FLAT under `vaults/` at
+  // the pod-map vault sits FLAT under `vaults/` at
   // `~/lyt/vaults/lyt-pod-map/` — the `<owner>` path segment is dropped so it
   // matches regular vaults (`~/lyt/vaults/<name>` per paths.ts resolveVaultPath)
   // and resolves the mesh-vs-owner grouping inconsistency. `owner` is still

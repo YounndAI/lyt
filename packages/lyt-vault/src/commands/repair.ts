@@ -39,7 +39,7 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // v1.C.4 — `lyt repair` top-level meta-CLI verb. Mirrors `lyt discover`
 // attach pattern from v1.C.3.
 //
-// Default mode is `--dry-run` per OD-5 (safer for a write verb). The user
+// Default mode is `--dry-run` per the ratified default (safer for a write verb). The user
 // explicitly opts into `--apply`.
 //
 // Under TTY with a mesh-yon-parse-error target + no `--from-revision`,
@@ -48,14 +48,14 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // restore"). Under `--json` or non-TTY the flow auto-picks the most
 // recent revision that parses cleanly.
 //
-// Exit-code mapping (per OD-13 default):
+// Exit-code mapping (per the ratified default):
 // 0 repair ran cleanly (no findings OR all repaired)
 // 1 vault-not-found / mesh-not-found / git-history-empty /
 // parse-still-fails-after-restore / orphan-reattach-mesh-not-found
 // 2 partial-repair-warnings (--apply with mixed success) OR dry-run
 // surfaced findings
 // 3 non-TTY under interactive default OR --apply without --target when
-// registry has > 5 findings (OD-10 safety)
+// registry has > 5 findings (safety)
 
 interface RepairCliOpts {
   target?: string;
@@ -121,7 +121,7 @@ export function buildRepairCommand(): Command {
           }
         }
 
-        // OD-10 safety: --apply without --target at > 5 findings is
+        // safety: --apply without --target at > 5 findings is
         // refused unless the user picked a single target. We probe with
         // a dry-run first to count findings.
         if (apply && opts.target === undefined) {

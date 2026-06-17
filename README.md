@@ -27,7 +27,7 @@
   <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D20.9-brightgreen" /></a>
 </p>
 
-> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but it is alpha software: surfaces change between releases, documentation is still growing, and you may hit rough edges. Install only via the `alpha` dist-tag. Your vaults are plain markdown in plain git repos — your data is never locked in. Found something? [Open an issue](https://github.com/younndai/lyt/issues) or see [CONTRIBUTING.md](CONTRIBUTING.md).
+> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but it is alpha software: surfaces change between releases, documentation is still growing, and you may hit rough edges. Install only via the `alpha` dist-tag. Your vaults are plain markdown in plain git repos — your data is never locked in. Found something? [Open an issue](https://github.com/YounndAI/lyt/issues) or see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -52,7 +52,7 @@ npm install -g @younndai/lyt@alpha
 This installs the unified `lyt` binary. You can also install from source:
 
 ```bash
-git clone https://github.com/younndai/lyt && cd lyt && npm install && npm run build
+git clone https://github.com/YounndAI/lyt && cd lyt && npm install && npm run build
 ```
 
 ## Quick start

@@ -21,7 +21,8 @@ import type { Client } from "@libsql/client";
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
 import { listVaults, type VaultRow } from "../../registry/repo.js";
-import { isPureSubscriberVault } from "../writability.js";
+import { deriveWriteGate, hasSubscriptionSignal } from "../writability.js";
+import type { GhExecutor } from "../../util/gh-discover.js";
 import { resolveConfig } from "../../util/config.js";
 import {
   getFederationRepoDir,
@@ -49,7 +50,7 @@ import {
 } from "./outbox.js";
 import { commitPodRepo, materializeVaultPublishable, type GitRunner } from "./vault-publish.js";
 
-// Brief B (D31 §3, B.2) — the ONE reconcile/publish engine.
+// Brief B (B.2) — the ONE reconcile/publish engine.
 //
 // regen pod.yon → enqueue every outward op in the outbox → DRAIN: for each
 // vault create-the-repo-if-missing + pull-rebase-if-behind + push; then commit
@@ -103,7 +104,7 @@ export interface ReconcilePublishArgs {
   push?: boolean | undefined;
   // gh repo create-if-missing. Defaults to the push value (publish creates).
   createRemoteIfMissing?: boolean | undefined;
-  // OD-B3 — pull-rebase before push (bidirectional). Default true. On a conflict
+  // pull-rebase before push (bidirectional). Default true. On a conflict
   // the rebase is ABORTED (no data overwrite) and the vault is reported
   // `conflict` (surface-and-halt) — the locked posture.
   pull?: boolean | undefined;
@@ -112,6 +113,12 @@ export interface ReconcilePublishArgs {
   registryDb?: Client | undefined; // open-once seam
   outboxPath?: string | undefined; // test seam
   nowIso?: string | undefined;
+  // 0.9.3 — injectable gh executor for the read-only publish-exclude
+  // verdict (deriveWriteGate). Distinct from `ghClient` (the federation gh used
+  // for repo create/push); this is the writability probe's executor. Defaults
+  // to the real `gh` CLI; tests inject a fake to exercise the foreign-mesh
+  // subscription exclusion deterministically.
+  writabilityGh?: GhExecutor | undefined;
 }
 
 export interface ReconcilePublishResult {
@@ -181,38 +188,64 @@ export async function reconcilePublishFlow(
     // pod before we commit + push it.
     await regeneratePodManifestNonFatal(db, { handle, nowIso });
 
-    // hardening pass (Cohort-1 fix-pass) — EXCLUDE pure-subscriber read-only vaults from
-    // the publish work-set. The pre-fix engine enqueued a `publish-vault` op for
-    // EVERY non-tombstoned vault, push-attempted a subscribed vault the user
-    // can't push to, the push failed permission-denied → the op was marked
-    // `failed` → `outboxRemaining > 0` → the command printed "N publish op(s)
-    // pending … re-run to finish (resumable)" on EVERY run, a permanent jam (the
-    // op can never succeed). A pure subscriber (subscribed in some mesh, home in
-    // none) is read-only by the MA-1 home-first contract — the same cheap LOCAL
-    // `mesh_vaults.role` signal the capture gate and `syncFlow`
-    // use, NO gh probe. We never enqueue an outbox op for it, so it can never
-    // jam the outbox. Excluded vaults simply aren't part of the outward publish.
+    // 0.9.3 — EXCLUDE read-only subscriptions from the publish
+    // work-set, keyed on the LIVE writability verdict (deriveWriteGate), not the
+    // static role. The pre-fix engine enqueued a `publish-vault` op for EVERY
+    // non-tombstoned vault, push-attempted a subscribed vault the user can't
+    // push to, the push failed → `outboxRemaining > 0` → "N publish op(s)
+    // pending … resumable" on EVERY run, a permanent jam. The prior fix
+    // keyed on `isPureSubscriberVault`, which a subscribe-to-a-foreign-mesh vault
+    // does NOT satisfy (it gets a local `home` role), so the cohort's
+    // younndai/lyt-docs was NOT excluded and the jam persisted. Now an
+    // OWN vault (no subscription signal) is always included with NO gh probe; a
+    // subscription is excluded unless its live verdict is writable:true (a
+    // granted-write subscription stays publishable — brief §1). We never enqueue
+    // an op for an excluded vault, so it can never jam the outbox.
     const allActive = (await listVaults(db)).filter((v) => v.status !== "tombstoned");
     const vaults: VaultRow[] = [];
-    // Minor (Cohort-1 fix-pass release review) — track the names EXCLUDED as pure
-    // subscribers so a persisted `publish-vault:<subscriber>` outbox row (seeded
-    // by a pre-fix run, before hardening pass excluded subscribers) resolves to a correct
-    // warning ("now a read-only subscriber") instead of the misleading
-    // "unregistered vault" — the vault IS registered, just no longer in the
-    // publish work-set.
+    // Track the names EXCLUDED as read-only so a persisted
+    // `publish-vault:<subscriber>` outbox row (seeded by a pre-fix run) resolves
+    // to a correct warning ("now a read-only subscriber") instead of the
+    // misleading "unregistered vault" — the vault IS registered, just no longer
+    // in the publish work-set. This is the hardening pass drain path for already-stuck ops.
     const excludedSubscribers = new Set<string>();
+    // 0.9.4 (dup-repo guard) — a vault carrying a subscription signal is FOREIGN:
+    // it was cloned from another pod (its `origin` points at the upstream owner).
+    // A granted-write subscription (S6 cross-identity write) is NOT blocked by
+    // deriveWriteGate (its live verdict is writable:true) so it STAYS in the
+    // publish work-set to push content back to its REAL origin — but it must
+    // NEVER get a `gh repo create` under the SUBSCRIBER's own handle. The pre-fix
+    // engine called publishOneVault with the pod-wide `createRemote=true` for
+    // every work-set vault → materialize created a brand-new
+    // `{subscriber-handle}/lyt-vault-…` duplicate of the foreign repo (the live
+    // repro: a subscriber handle materializing duplicates of the upstream owner's
+    // lyt-vault repos). Track the subscription signal here so the drain loop can
+    // force createRemote=false for these vaults — repo-create set = HOME vaults
+    // ONLY (the locked fix). Push still targets the existing `origin`, so a
+    // granted-write subscription's content sync is unaffected.
+    const foreignVaultNames = new Set<string>();
     for (const v of allActive) {
-      if (await isPureSubscriberVault(db, v.rid)) {
+      const gate = await deriveWriteGate(
+        v,
+        db,
+        args.writabilityGh !== undefined ? { gh: args.writabilityGh } : {},
+      );
+      if (gate.blocked) {
         warnings.push(`skipped read-only subscribed vault '${v.name}' (pull-only; no push)`);
         excludedSubscribers.add(v.name);
         continue;
+      }
+      // Not blocked, but if it's a subscription (a granted-write one), it's still
+      // foreign — exclude it from repo-create even though it stays in the work-set.
+      if (await hasSubscriptionSignal(db, v.rid)) {
+        foreignVaultNames.add(v.name);
       }
       vaults.push(v);
     }
     const vaultByName = new Map<string, VaultRow>(vaults.map((v) => [v.name, v]));
     const podDir = getFederationRepoDir(handle);
 
-    // release review — the per-vault visibility (OD-B4) lives in pod.yon (the
+    // release review — the per-vault visibility lives in pod.yon (the
     // registry has no visibility column). Read the JUST-regenerated manifest so
     // the gh-repo-create for a consciously-public vault actually creates it
     // public, instead of the pod-wide config default. Falls back to the default
@@ -271,7 +304,10 @@ export async function reconcilePublishFlow(
         }
         const outcome = await publishOneVault(vault, {
           handle,
-          createRemote,
+          // dup-repo guard — never create a repo under the subscriber's handle
+          // for a FOREIGN (subscribed) vault; its repo already lives under the
+          // upstream owner (its `origin`). repo-create set = HOME vaults only.
+          createRemote: createRemote && !foreignVaultNames.has(vault.name),
           push,
           pull,
           // release review — per-vault visibility from pod.yon (not the
@@ -404,7 +440,7 @@ interface PublishOneVaultOpts {
 }
 
 // Per-vault publish: ensure repo+local (create gh repo if missing, no push yet)
-// → OD-B3 pull-rebase if behind (conflict → abort, surface-and-halt) → push.
+// → pull-rebase if behind (conflict → abort, surface-and-halt) → push.
 async function publishOneVault(
   vault: VaultRow,
   opts: PublishOneVaultOpts,
@@ -441,7 +477,7 @@ async function publishOneVault(
   const cwd = vault.path;
   let pulled = false;
 
-  // 2. OD-B3 — pull-rebase if there is an upstream and we are behind. On a
+  // 2. pull-rebase if there is an upstream and we are behind. On a
   // conflict, ABORT (no data overwrite) and surface — the locked posture.
   if (opts.pull) {
     const hasUpstream = await opts.git(
@@ -456,7 +492,7 @@ async function publishOneVault(
       });
       // release review — fail SAFE: an unreadable rev-list (code != 0) is
       // treated as possibly-behind (→ attempt pull-rebase) rather than
-      // assume-not-behind-and-push. OD-B3's "never overwrite remote" must not be
+      // assume-not-behind-and-push. 's "never overwrite remote" must not be
       // defeated by a transient parse/exit error defaulting to the unsafe push.
       const behind = ab.code === 0 ? Number(ab.stdout.trim().split(/\s+/)[1] ?? 0) || 0 : 1;
       if (behind > 0) {

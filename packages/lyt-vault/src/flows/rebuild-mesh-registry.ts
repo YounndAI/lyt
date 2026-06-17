@@ -51,7 +51,7 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // mesh's main_vault_rid → vaults.path)
 // 2. Try readFile + parseMeshYon on <main-vault>/.lyt/mesh.yon — a
 // per-mesh try/catch around the I/O so one corrupted mesh.yon
-// does not poison the rebuild for healthy meshes (OD-6
+// does not poison the rebuild for healthy meshes (
 // skip-and-warn default)
 // 3. BEGIN TRANSACTION
 // 4. UPDATE meshes row from parsed @MESH fields (no DELETE on
@@ -63,7 +63,7 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // @MESH_SUBSCRIPTION rows via addSubscription
 // 7. COMMIT
 //
-// Per-mesh transactions (OD-7 default) keep the blast radius small —
+// Per-mesh transactions (default) keep the blast radius small —
 // one mesh's parse error doesn't roll back successful rebuilds for the
 // others.
 //
@@ -228,7 +228,7 @@ async function rebuildOneMesh(db: Client, mesh: MeshRow): Promise<MeshRebuildOut
   const meshYonPath = join(mainVaultPath, ".lyt", "mesh.yon");
 
   // 2. Try read + parse — per-mesh try/catch so a single corrupted file
-  // doesn't poison the rebuild for other meshes (OD-6 skip-and-warn).
+  // doesn't poison the rebuild for other meshes (skip-and-warn).
   let parsed;
   try {
     const content = readFileSync(meshYonPath, "utf8");

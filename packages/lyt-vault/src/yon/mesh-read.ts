@@ -99,7 +99,7 @@ function parseMesh(content: string): MeshRecord {
   const mainVaultRid = hexToUuid7Bytes(mainVaultRidRaw);
   const createdAt = readTimestampField(content, "created_at") ?? "";
   // v1.B.6 — optional default_vault_update_cadence on @MESH header. Read
-  // from the full content (the field can only appear on @MESH per OD-10).
+  // from the full content (the field can only appear on @MESH per the ratified default).
   const defaultVaultUpdateCadence = readQuotedField(content, "default_vault_update_cadence");
 
   return {

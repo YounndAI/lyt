@@ -24,7 +24,7 @@
 // §5:209-241 (probe order + branch table) + brief
 // 2026-05-31-v1-b-4-lyt-init-bootstrap.md.
 //
-// Branch decision (per federation-design §5 + brief OD-7):
+// Branch decision (per federation-design §5 + brief ):
 // 1. mode === 'discover' (set by --discover flag) → DISCOVERY
 // 2. meshes count == 0 && vaults count == 0 → FRESH
 // 3. otherwise (registry has ≥1 mesh OR ≥1 vault) → RE-INIT
@@ -125,7 +125,7 @@ export interface InitBootstrapFederation {
   federationYonPath: string;
   remoteCreated: boolean;
   pushed: boolean;
-  // D26: the full `{handle}/lyt-pod` repo name, sourced from the
+  // the full `{handle}/lyt-pod` repo name, sourced from the
   // federation flow's chokepoint (federationRepoName) so the emit layer
   // never hardcodes the repo-name literal.
   remoteFullName: string;
@@ -217,7 +217,7 @@ export interface InitBootstrapArgs {
   // Override the authenticated handle (test seam + future BYOK).
   handle?: string;
   customOverrides?: InitBootstrapCustomOverrides;
-  // W1.2 / OD-4 — heal runner. When supplied, the flow runs it on the fresh +
+  // W1.2 heal runner. When supplied, the flow runs it on the fresh +
   // re-init branches (NOT discovery, which is read-only) so a single
   // `lyt init` re-aligns skills + agent manual + patterns. INJECTABLE so unit
   // tests stay hermetic (no real ~/.claude / ~/.codex / ~/.agents writes): the
@@ -325,7 +325,7 @@ export async function initBootstrapFlow(args: InitBootstrapArgs): Promise<InitBo
     const meshes = await listMeshes(db);
     const vaults = await listVaults(db);
 
-    // Branch decision (federation-design §5 + brief OD-7; V-A-11 adds ADOPT).
+    // Branch decision (federation-design §5 + brief; V-A-11 adds ADOPT).
     let branch: InitBootstrapBranch;
     let adoptHandle: string | null = null;
     if (args.mode === "discover") {
@@ -423,7 +423,7 @@ async function reconcileVaults(vaultPaths: readonly string[]): Promise<string[]>
 }
 
 // W1.2 — run the injected heal runner, swallowing any failure so heal can
-// NEVER fail an init (D30 never-fail). Returns null when no runner was
+// NEVER fail an init (never-fail). Returns null when no runner was
 // supplied (the hermetic-test default) or when the heal threw.
 async function runHealIfProvided(args: InitBootstrapArgs): Promise<HealResult | null> {
   if (args.heal === undefined) return null;
@@ -537,7 +537,7 @@ async function doFreshBranch(
   // gh-less `--auto` degrades to a LOCAL pod, exactly like the interactive
   // wizard (the brief's reference), instead of half-failing.
   //
-  // D34 (OD-LOCALFIRST): no gh handle resolves → mint a provisional identity
+  // no gh handle resolves → mint a provisional identity
   // (default OS username) + forge LOCAL-ONLY (no gh probe, no remote). `lyt
   // sync` reconciles to the real gh handle at connect. A provisional cache for
   // THIS handle → stay local-only too (don't gh-probe).
@@ -558,8 +558,8 @@ async function doFreshBranch(
   }
 
   // (a) Scaffold the personal mesh (which scaffolds personal/main as the
-  // mesh's main vault per meshInitFlow). `noPush: true` per OD-3 default;
-  // the handler explicitly publishes later via `lyt sync` (D31 Brief B). The
+  // mesh's main vault per meshInitFlow). `noPush: true` per the ratified default;
+  // the handler explicitly publishes later via `lyt sync` (Brief B). The
   // identity established above lets the scaffold's getIdentity() resolve
   // locally gh-less (V-A-1).
   await onPhase("git-init", "your personal mesh + main vault");
@@ -572,7 +572,7 @@ async function doFreshBranch(
     ...(args.meshGhClient !== undefined ? { ghClient: args.meshGhClient } : {}),
   });
 
-  // (b) Forge the federation repo locally. `pushToRemote: false` per OD-3
+  // (b) Forge the federation repo locally. `pushToRemote: false` per the ratified default
   // default. The federation init's own three-branch state-machine handles the
   // case where the remote repo already exists on GH (Branch B adopted) — we
   // don't second-guess it here. localOnly (resolved above) forges the pod
@@ -604,7 +604,7 @@ async function doFreshBranch(
         remoteFullName: fedResult.remoteFullName,
       };
     } catch (err) {
-      // Federation init failure is NON-FATAL per OD-3 default — the
+      // Federation init failure is NON-FATAL per the ratified default — the
       // personal mesh + personal/main vault are already on disk; the
       // handler can re-invoke `lyt init` (which lands in re-init branch)
       // or run `lyt federation init` directly to recover. Emit the
@@ -616,7 +616,7 @@ async function doFreshBranch(
     }
   }
 
-  // D31 (Brief A) — regenerate the derived pod manifest from the now-populated
+  // (Brief A) — regenerate the derived pod manifest from the now-populated
   // registry so `lyt init` (fresh) leaves a POPULATED pod.yon listing
   // personal/main (acceptance #1). Runs AFTER the federation forge wrote the
   // skeleton + federation_state row. Non-fatal; reuses the open db.
@@ -665,7 +665,7 @@ async function doReInitBranch(
     .map((v) => v.path);
   const reconciledVaultPaths = await reconcileVaults(okPaths);
 
-  // D31 (Brief A) — re-init against an existing pod regenerates pod.yon so it
+  // (Brief A) — re-init against an existing pod regenerates pod.yon so it
   // reflects the ACTUAL registered vaults (acceptance #2). Non-fatal; skipped
   // if the pod has no federation_state yet.
   await regeneratePodManifestNonFatal(db, args.nowIso !== undefined ? { nowIso: args.nowIso } : {});
@@ -738,7 +738,7 @@ async function doDiscoveryBranch(
   const probe = args.discoveryProbe ?? defaultDiscoveryProbe();
   const probed = await probe.probe(handle);
 
-  // Filter: keep lyt-prefix OR lyt-public-topic kinds (OD-5 default — the
+  // Filter: keep lyt-prefix OR lyt-public-topic kinds (default — the
   // .lyt/vault.yon per-repo probe is deferred to v1.C.3). Probe is
   // expected to tag each row with its source `kind`; the bootstrap
   // doesn't re-classify.
@@ -783,7 +783,7 @@ async function doDiscoveryBranch(
 }
 
 // Default impl returns an empty probe — the production gh-api integration
-// ships in v1.C.3 (per OD-5 default; v1.B.4 keeps discovery wired
+// ships in v1.C.3 (per the ratified default; v1.B.4 keeps discovery wired
 // structurally with the probe as an injectable seam used by tests + the
 // future v1.C.3 prod impl). This default makes the no-injection happy
 // path predictable: discovery returns an empty list rather than throwing.

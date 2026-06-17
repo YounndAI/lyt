@@ -14,26 +14,26 @@
  * limitations under the License.
  */
 
-// W1.2 / OD-4 (2026-06-03) — idempotent pod heal.
+// W1.2 (2026-06-03) — idempotent pod heal.
 //
 // `healPod` re-aligns the three things a `lyt init` is meant to keep fresh,
 // composing primitives from lyt-skills + lyt-vault (the meta package is the
 // natural composer — see init-bootstrap.ts header):
 //
 // 1. SKILLS — symlinkSkillsTriRuntime into every DETECTED runtime
-// (collision-safe per D30.4: a user dir at a target is renamed
+// (collision-safe per a user dir at a target is renamed
 // aside, never destroyed; a pristine copy is upgraded to a link;
 // an already-correct link short-circuits to already-linked).
 // 2. MANUAL — the agent manual marker block, replaced-or-appended in each
 // detected runtime's global instructions file. Malformed markers
-// are REFUSED (D9) — heal never silently mutates a hand-edited
+// are REFUSED — heal never silently mutates a hand-edited
 // file; it leaves it and reports `refused-malformed`.
-// 3. PATTERNS — healPatterns version-update (D30.3): add missing, replace
+// 3. PATTERNS — healPatterns version-update : add missing, replace
 // pristine-older (with backup), leave forks untouched.
 //
 // EVERY step is idempotent and non-fatal: a heal on an aligned pod is a no-op;
 // a per-runtime failure is recorded, not thrown, so a single `lyt init` never
-// fails because of heal (D30 never-fail). The CLI command runs this on the
+// fails because of heal (never-fail). The CLI command runs this on the
 // fresh + re-init branches; unit tests drive it directly with seams so no real
 // ~/.claude / ~/.codex / ~/.agents is ever touched in CI.
 
@@ -147,7 +147,7 @@ async function injectManual(runtime: Runtime, opts: HealPodOptions): Promise<Man
   let existing = "";
   if (existsSync(dest)) existing = readFileSync(dest, "utf8");
   try {
-    // force=false → malformed markers REFUSE (D9). Heal never silently
+    // force=false → malformed markers REFUSE. Heal never silently
     // overwrites a hand-edited file; it leaves it and reports.
     const { result: next, replaced } = replaceMarkerBlock(existing, gen.content, dest, false);
     const dir = dirname(dest);

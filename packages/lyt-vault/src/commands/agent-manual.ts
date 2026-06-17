@@ -71,7 +71,7 @@ function coerceRuntime(value: string): AgentManualRuntime {
 export function buildAgentManualCommand(): Command {
   return new Command("agent-manual")
     .description(
-      "v1.G.5 + GP F5: generate the Lyt agent manual and (with --install) inject it into agent-runtime global instructions files. Default (--install, no --runtime): auto-detect ALL installed runtimes (~/.claude, ~/.codex, ~/.agents) and inject into each (absent runtimes skipped with a note). Explicit --runtime <one> targets a single runtime; generic always prints to stdout. Path A3 hybrid: hand-curated mental-model + workflows + protocol-notes + auto-injected WHEN-USER-SAYS table from 11 SKILL.md files + curated CLI-verb list. D9 update-path primitive: <!-- lyt-manual v<lyt-version> BEGIN -->...END --> markers (replace-between-markers on re-install; refuse on malformed; --force appends a fresh block on malformed with a visible warning).",
+      "v1.G.5 + GP F5: generate the Lyt agent manual and (with --install) inject it into agent-runtime global instructions files. Default (--install, no --runtime): auto-detect ALL installed runtimes (~/.claude, ~/.codex, ~/.agents) and inject into each (absent runtimes skipped with a note). Explicit --runtime <one> targets a single runtime; generic always prints to stdout. Path A3 hybrid: hand-curated mental-model + workflows + protocol-notes + auto-injected WHEN-USER-SAYS table from 11 SKILL.md files + curated CLI-verb list. update-path primitive: <!-- lyt-manual v<lyt-version> BEGIN -->...END --> markers (replace-between-markers on re-install; refuse on malformed; --force appends a fresh block on malformed with a visible warning).",
     )
     .option(
       "--runtime <name>",
@@ -88,7 +88,7 @@ export function buildAgentManualCommand(): Command {
     )
     .option(
       "--force",
-      "On a malformed-marker file, append a fresh block (with a visible warning) instead of refusing. Default (no --force) refuses to protect a hand-edited file (D9 / Cor-C1).",
+      "On a malformed-marker file, append a fresh block (with a visible warning) instead of refusing. Default (no --force) refuses to protect a hand-edited file.",
     )
     .action(async (opts: AgentManualCliOpts) => {
       const install = opts.install === true;

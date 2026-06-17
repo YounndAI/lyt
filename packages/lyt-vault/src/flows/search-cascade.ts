@@ -39,11 +39,11 @@
 // vault — single vault from registry (skip Tier 3 entirely —
 // single-vault search has no edges to traverse)
 // mesh — union of home_mesh_rid + mesh_vaults entries for
-// the mesh, deduplicated by vault_rid (OD-6 default)
+// the mesh, deduplicated by vault_rid (default)
 // federation — every registered vault, ordered by name ASC
 // (default scope per master-plan §v1.D.3:786)
 //
-// Tier 2 scoring (OD-4 interpretation): we use FTS5 BM25 `rank`
+// Tier 2 scoring (interpretation): we use FTS5 BM25 `rank`
 // ordering inside `searchFts` (lower rank = better match; BM25 IS a
 // hit-count-derived score, NOT a Jaccard set-similarity coefficient,
 // so this satisfies §v1.D.3:782 "raw hit count, not Jaccard"). The
@@ -61,7 +61,7 @@
 // Open-once seam (v1.A.5 CR-B1 + v1.D.1 + v1.D.2a vindication):
 // optional `registryDb?: Client` — caller threads the registry
 // client through, the engine opens + closes per-vault lyt.db handles
-// inside the flow (OD-11 default = per-vault open+close; connection
+// inside the flow (default = per-vault open+close; connection
 // pool deferred to v1.D.3d).
 //
 // Output (Lock 0.3 deterministic): SearchResult[] sorted by
@@ -116,7 +116,7 @@ const SNIPPET_LEN = 96;
 // tier-2 body hit reaches ~tier-0 level (0.70 + 0.25 = 0.95) and can overtake a
 // weak tier-1 tag-only hit (0.90) — fixing the V-F5 relevance inversion — while
 // a tier-0 arc hit keeps primacy on the resulting tie (tier tiebreak). Selected
-// empirically (Lane V Phase 1, D37; the disciplined α-sweep confirmed 0.25 as
+// empirically (Lane V Phase 1, ; the disciplined α-sweep confirmed 0.25 as
 // the unique in-sample peak — held-out ≥ in-sample, no overfit).
 //
 // COUPLED INVARIANT (release review): the V-F5 fix only holds while
@@ -534,7 +534,7 @@ async function resolveScopeVaults(
       if (!mesh) {
         throw new Error(`search-cascade: no mesh registered with name '${scopeTarget}'.`);
       }
-      // OD-6 default = union of vaults whose home_mesh_rid == mesh.rid AND
+      // default = union of vaults whose home_mesh_rid == mesh.rid AND
       // vaults present in mesh_vaults for the mesh (deduplicated).
       //
       // Track C Wave 3 F5 — subscription targets join the union. `lyt mesh
@@ -542,7 +542,7 @@ async function resolveScopeVaults(
       // mesh_vaults), so subscribed content was structurally excluded from
       // mesh-scoped tier-2 FTS and only surfaced via tier-3 edges (0.5) —
       // under-ranking exactly the public-vault consumption the alpha leads
-      // with (D50). A subscribed vault that isn't locally registered (clone
+      // with it. A subscribed vault that isn't locally registered (clone
       // missing) is skipped — search reads local caches only.
       const allVaults = await listVaults(registryDb);
       const homeMatch = allVaults.filter(
@@ -747,7 +747,7 @@ async function resolveTier3Neighbors(
   fromVault: VaultRow,
   alreadySearched: Set<string>,
 ): Promise<VaultRow[]> {
-  // OD-7 default = 1-hop. Walk edges in BOTH directions: this vault
+  // default = 1-hop. Walk edges in BOTH directions: this vault
   // may be the home of an edge (a child references it) OR the ref
   // (this vault references some home). Collect peer rids.
   const refEdges = await listMeshEdgesByRefVault(registryDb, fromVault.rid);
@@ -799,7 +799,7 @@ function hexLowerToBytes(hex: string): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
-// Snippet derivation for tier 0/1 (OD-5 default — first 96 chars of body)
+// Snippet derivation for tier 0/1 (default — first 96 chars of body)
 // ---------------------------------------------------------------------------
 
 function readSnippetFromDisk(vaultPath: string, figmentPath: string): string {

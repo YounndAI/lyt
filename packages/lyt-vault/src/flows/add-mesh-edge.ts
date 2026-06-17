@@ -57,7 +57,7 @@ import { renderMeshYon, type MeshDoc, type MeshEdgeRecord } from "../yon/mesh-wr
 // 5. Idempotent re-emit guard: if MeshDoc.edges already contains a row
 // with the same (ref_mesh_rid, ref_vault_rid, home_mesh_rid,
 // home_vault_rid, kind=parent) tuple, return `edge-already-present`
-// without mutating disk or cache (per OD-6 + v1.B.6 D2 mesh.yon-
+// without mutating disk or cache (per the ratified default + v1.B.6 mesh.yon-
 // mutation-discipline + v1.B.2 Lock 0.3 byte-stability).
 // 6. Render the updated MeshDoc → tmp file (no disk mutation yet).
 // 7. BEGIN tx → insertMeshEdge into `mesh_edges` cache. On failure:
@@ -114,7 +114,7 @@ export interface AddMeshEdgeResult {
 }
 
 // v1.C.1 — structured errors. CLI maps these to per-command exit codes
-// per OD-5 (1 vault-not-found / vault-no-home-mesh; 4 main-vault-missing).
+// per the ratified default (1 vault-not-found vault-no-home-mesh; 4 main-vault-missing).
 
 export class AddMeshEdgeVaultNotFoundError extends Error {
   readonly errorCode = "vault-not-found";

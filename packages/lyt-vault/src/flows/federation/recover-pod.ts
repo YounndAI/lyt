@@ -30,7 +30,7 @@ import { hexToUuid7Bytes } from "../../util/uuid7.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { registerVaultFromYon } from "../register.js";
 
-// Brief B (D31 §6, B.5 — folds a review finding). Pod.yon-driven RECOVERY/acquisition.
+// Brief B (B.5 — folds a review finding). Pod.yon-driven RECOVERY/acquisition.
 //
 // On a clean machine, `lyt init` clones the published pod ({handle}/lyt-pod);
 // THIS reads the cloned pod.yon and rebuilds the rest: clone each @FED_VAULT's

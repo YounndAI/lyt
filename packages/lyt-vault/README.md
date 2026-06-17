@@ -42,10 +42,12 @@ This exposes a `lyt` binary scoped to the vault, help, doctor, and pattern verb 
 
 ```bash
 # Create or adopt a vault
-lyt vault init <owner/repo>        # folder + .obsidian + .lyt + priming files
+lyt vault init <mesh>/<vault>      # create-if-missing: makes the mesh if absent,
+                                   #   stops if the vault exists (--mesh, --push-to)
 lyt vault adopt <path>             # bring an existing markdown folder under Lyt
-lyt vault list [--json]            # every registered vault on this machine
-lyt vault info <name> [--json]     # status, mesh, writability verdict
+lyt vault list [--json]            # every registered vault (computed {mesh}/{vault} names)
+lyt vault info <name> [--json]     # status, mesh, writability, origin coordinate
+lyt alias <name> <target>          # pod-local name → vault rid (survives rename + move)
 
 # Capture and find knowledge
 lyt capture "<text>"               # save a Figment (markdown note) with frontmatter

@@ -59,11 +59,17 @@ The `lyt` binary dispatches every verb group under one entry point — you never
 
 ```bash
 lyt vault init alex/main       # vault primitive   (@younndai/lyt-vault)
+lyt alias home alex/main       # pod-local name → vault rid (survives rename + move)
 lyt mesh status                # federation layer  (@younndai/lyt-mesh)
 lyt pattern list               # patterns + skills (@younndai/lyt-vault)
 lyt mcp serve                  # MCP server        (@younndai/lyt-mcp)
 lyt doctor --json              # diagnostics       (@younndai/lyt-vault)
 ```
+
+Addressing: the vault `rid` (UUIDv7) is identity; `{mesh}/{vault}` names, bare
+leaves (unique-leaf, errors on collision), aliases, and `lyt:vault:` origin
+coordinates all resolve to it. `lyt vault init <mesh>/<vault>` is
+create-if-missing.
 
 ## The Lyt toolchain
 

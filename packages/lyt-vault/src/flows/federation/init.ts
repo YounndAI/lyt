@@ -49,7 +49,7 @@ import { hexToUuid7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../../util/uui
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { renderFederationYon } from "../../yon/federation-write.js";
 
-// `lyt federation init` — provisions or adopts {handle}/lyt-pod (D26 repo
+// `lyt federation init` — provisions or adopts {handle}/lyt-pod (repo
 // name; CLI verb-group + internal "federation" term unchanged per Option B).
 //
 // Branches (per plan §3 first verb):
@@ -76,7 +76,7 @@ export interface FederationInitOptions {
   visibility?: FederationRepoVisibility | undefined; // default "private"
   pushToRemote?: boolean | undefined; // default true (false in tests)
   createRemoteIfMissing?: boolean | undefined; // default true
-  // D34 (OD-LOCALFIRST, 2026-06-04) — LOCAL-ONLY pod forge: a no-gh `lyt init`
+  // (2026-06-04) — LOCAL-ONLY pod forge: a no-gh `lyt init`
   // (or the local-only choice). Skips the `gh api` remote probe entirely (which
   // would throw ENOENT with no gh on PATH) AND skips remote-create + remote-add:
   // the pod is a real git repo with the provisional handle but NO `origin`.
@@ -146,7 +146,7 @@ export async function federationInitFlow(
   if (handle.length === 0) {
     throw new Error("Could not resolve a GitHub handle for federation init.");
   }
-  // release review fix-pass (D34) — defense-in-depth: refuse an invalid handle
+  // release review fix-pass — defense-in-depth: refuse an invalid handle
   // BEFORE it reaches `git config user.name <handle>` / `git remote add
   // https://github.com/<handle>/…` / `gh repo create`. identity.yon is a
   // hand-editable recovery SoT (source=local|provisional), so a poisoned handle
@@ -219,7 +219,7 @@ export async function federationInitFlow(
     let remoteCreated = false;
 
     if (localOnly) {
-      // D34 (OD-LOCALFIRST) — no gh: never probe or create the remote (a `gh api`
+      // no gh: never probe or create the remote (a `gh api`
       // probe throws ENOENT with no gh on PATH). The pod is a fresh LOCAL git
       // repo with the provisional handle; initLocalNoRemote wires NO `origin`
       // (the remote is created + set at connect under the real handle).
@@ -238,7 +238,7 @@ export async function federationInitFlow(
             `federation init: remote ${remoteFullName} does not exist and createRemoteIfMissing=false.`,
           );
         }
-        // D26: pod-repo description locked to the exact handler string; topics
+        // pod-repo description locked to the exact handler string; topics
         // applied in a follow-up `gh repo edit --add-topic` (gh repo create
         // cannot set topics). Topic failure is non-fatal — the repo exists and
         // federation_state is still written below.
@@ -271,7 +271,7 @@ export async function federationInitFlow(
     // Generate (or preserve) the federation rid. Stable per global UUIDv7
     // directive — once written, never changes.
     //
-    // BRIEF E / OD-E3 — on a WIPED-machine adopt the local registry has no
+    // BRIEF E on a WIPED-machine adopt the local registry has no
     // federation_state row, so the `?? newUuidv7Bytes()` fallback would mint a
     // NEW fedRid even though the just-cloned pod.yon carries the pod's ORIGINAL
     // one — the "silently fork the pod identity" failure that remapFederationHandle
@@ -293,7 +293,7 @@ export async function federationInitFlow(
     const fedRidHex = uuid7BytesToHex(fedRidBytes);
 
     const createdAt = now().toISOString();
-    // D31: init writes a SKELETON manifest (empty meshes/vaults) to BOOTSTRAP the
+    // init writes a SKELETON manifest (empty meshes/vaults) to BOOTSTRAP the
     // file on a FRESH / local forge; the lifecycle regen hook (regenerate.ts,
     // called at the end of init/adopt AFTER the vault + mesh rows land in the
     // registry) populates it. Done this way because init sequencing forges the
@@ -328,7 +328,7 @@ export async function federationInitFlow(
       writeFileSync(fedYonPath, yon, "utf8");
     }
 
-    // W2.3 (OD-3) — persist / recover identity through the pod repo (the
+    // W2.3 — persist recover identity through the pod repo (the
     // durable recovery SoT). On a freshly FORGED pod, write the machine's
     // identity into the repo (`identity.yon`, committed alongside
     // pod.yon) so a future clone can recover it. On ADOPT (clone),
@@ -358,7 +358,7 @@ export async function federationInitFlow(
 
     // Commit + optionally push. `--allow-empty` on the gh client handles
     // re-runs (idempotent), but on fresh init this commit will have content.
-    // D26: repo-name segment routes through remoteFullName (lyt-pod) — the
+    // repo-name segment routes through remoteFullName (lyt-pod) — the
     // CLI verb-group stays `federation` (Option B: internal term untouched).
     const commitMessage = localOnly
       ? `chore(federation): forge ${remoteFullName} (local-only — connect with \`lyt sync\`)`

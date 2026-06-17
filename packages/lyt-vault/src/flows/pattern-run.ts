@@ -24,7 +24,8 @@ import { getIdentity } from "../util/identity.js";
 import { getUserPatternsDir } from "../util/pattern-paths.js";
 import { parsePatternYon, type VerbRecord } from "../yon/pattern.js";
 import { captureIndexFlow } from "./capture-index.js";
-import { isPureSubscriberVault } from "./writability.js";
+import { deriveWriteGate } from "./writability.js";
+import type { GhExecutor } from "../util/gh-discover.js";
 
 // hardening pass (Cohort-1 fix-pass) — the actionable refusal a pure-subscriber WRITE
 // attempt raises. A read-only subscribed vault has no push rights to its
@@ -44,6 +45,17 @@ export const SUBSCRIBER_CAPTURE_REFUSAL = (vaultName: string): string =>
   `(no push rights to its upstream; a write would strand a commit 'lyt sync' can never push). ` +
   `Use one of your home vaults instead, or request write access to '${vaultName}'.`;
 
+// 0.9.3 — refusal when a subscribed vault's write access can't be
+// VERIFIED (gh offline/unavailable → verdict "unknown"). Treating it as
+// read-only is the safe default (the [lyt.gate] pause-and-ask, in flow form):
+// refuse a write we can't confirm is pushable rather than strand a commit.
+// Verb-agnostic (no "capture into"), and names the `lyt vault refresh` remedy.
+export const UNVERIFIED_WRITE_REFUSAL = (vaultName: string): string =>
+  `vault '${vaultName}' is a subscribed vault and its write access couldn't be verified ` +
+  `(gh is offline or unavailable) — treating it as read-only so a write doesn't strand a ` +
+  `commit 'lyt sync' can never push. Use one of your home vaults, or run ` +
+  `'lyt vault refresh ${vaultName}' once you're online to re-check access.`;
+
 export interface PatternRunArgs {
   patternName: string;
   verbId: string;
@@ -51,6 +63,11 @@ export interface PatternRunArgs {
   project?: string | undefined;
   slug?: string | undefined;
   vars?: Record<string, string> | undefined;
+  // 0.9.3 — injectable gh executor for the writability probe at the
+  // write-gate (deriveWriteGate). Defaults to the real `gh` CLI; tests inject a
+  // fake to exercise the foreign-mesh-subscription verdict deterministically.
+  // Only consulted for SUBSCRIPTION targets — own-vault captures never probe.
+  gh?: GhExecutor | undefined;
 }
 
 export interface PatternRunResult {
@@ -111,16 +128,24 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
     // frozen vault. Gate at the shared chokepoint: covers `lyt capture`,
     // `lyt pattern run`, and every /lyt-* skill that wraps them.
     await enforceNotFrozen(row.path, row.name);
-    // hardening pass (Cohort-1 fix-pass) — the SECOND gate at this chokepoint: refuse a
-    // content write into a PURE-SUBSCRIBER read-only vault. Sibling miss to
-    // the freeze gate above (same chokepoint, second gate absent): live S3
-    // repro wrote a figment into a subscribed `writable:false` vault, then
-    // hardening pass turned that stray write into a permanent sync jam. The signal is
-    // CHEAP + LOCAL — `mesh_vaults.role` (pure subscriber = subscribed, not
-    // home), the SAME query deriveVaultWritable runs — so NO gh probe joins
-    // the hot capture path. Refuse BEFORE any write so nothing lands on disk.
-    if (await isPureSubscriberVault(db, row.rid)) {
-      throw new Error(SUBSCRIBER_CAPTURE_REFUSAL(row.name));
+    // 0.9.3 — the SECOND gate at this chokepoint: refuse a content write
+    // into a vault the user CAN'T PUSH to, keyed on the LIVE writability verdict
+    // (what `vault info` reports), not the static role. The prior gate keyed on
+    // `isPureSubscriberVault` (subscribed, not home), which a subscribe-to-a-
+    // foreign-mesh vault does NOT satisfy (it gets a local `home` role via the
+    // hardening pass external-mesh auto-register) — so the live cohort wrote a figment
+    // into a `writable:false` subscribed vault, which then jammed the
+    // outbox. deriveWriteGate keeps the hot path probe-free: an
+    // OWN vault (no subscription signal) is allowed with NO gh probe; only a
+    // subscription consults the (cached) verdict. Refuse BEFORE any write so
+    // nothing lands on disk.
+    const gate = await deriveWriteGate(row, db, args.gh !== undefined ? { gh: args.gh } : {});
+    if (gate.blocked) {
+      throw new Error(
+        gate.verdict.writable === "unknown"
+          ? UNVERIFIED_WRITE_REFUSAL(row.name)
+          : SUBSCRIBER_CAPTURE_REFUSAL(row.name),
+      );
     }
   } finally {
     await closeRegistry(db);
@@ -173,6 +198,10 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
       vaultName: args.vaultName,
       vaultPath,
       relPath,
+      // Thread the same gh seam so the index gate resolves the write-gate verdict
+      // consistently with the capture gate above (and so a granted-write
+      // subscription that PASSED the gate also indexes — not just writes).
+      ...(args.gh !== undefined ? { gh: args.gh } : {}),
     });
     if (idx.deferred) {
       indexDeferred = true;

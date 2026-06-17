@@ -25,8 +25,8 @@ import { resolveSpawnInvocation } from "./gh-federation.js";
 // --paginate` (mirrors lyt-mesh's `discovery/github.ts` walkGithub
 // shape — we keep an in-package copy because lyt-vault has NO dep on
 // lyt-mesh per package.json:* and adding one would create a cycle
-// (lyt-mesh depends on lyt-vault). Brief OD-3 default proposed reuse;
-// cycle prevents it. v1.C.3 picks OD-3 alt — new lyt-vault helper.
+// (lyt-mesh depends on lyt-vault). Brief default proposed reuse;
+// cycle prevents it. v1.C.3 picks alt — new lyt-vault helper.
 // 2. Fetch a candidate repo's `.lyt/vault.yon` via the GitHub Contents
 // API (`gh api /repos/<owner>/<repo>/contents/.lyt/vault.yon --jq
 // .content`). The response is base64-encoded; we decode + return the

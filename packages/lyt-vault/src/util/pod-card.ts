@@ -18,7 +18,7 @@
 //
 // Replaces the terse end-of-init lines with a box summarising what was
 // minted (mesh · vault · {handle}/lyt-pod · lyt-pod-map), each with local
-// paths + GitHub URLs, plus a Next-steps trio. Per D25 the card LEADS with
+// paths + GitHub URLs, plus a Next-steps trio. Per the card LEADS with
 // "pod" and bridges "federation" exactly once (pod = federation gloss).
 //
 // OSC 8 hyperlinks render the GitHub URL + local vault path as clickable
@@ -26,7 +26,7 @@
 // unsupported / non-TTY we fall back GRACEFULLY to plain text (the raw URL
 // stays visible + copy-pasteable).
 //
-// D27(e) — NO `obsidian://open` deep-link. D27 reverses the prior F9 "fix":
+// NO `obsidian://open` deep-link. reverses the prior F9 "fix":
 // Alex live-confirmed the `?path=` URI STILL 404s on unregistered vaults
 // (restoring HANDOFF-006 #4 — the `?path=` self-register claim was wrong in
 // practice). The card now ALWAYS emits the honest affordance: the `file://`
@@ -74,11 +74,11 @@ export interface PodCardData {
   podRepoFullName: string;
   // Local path of the pod (federation) cache, when known.
   podLocalPath?: string;
-  // The pod-map vault local path, when generated. D27(c): on-disk dir is FLAT
+  // The pod-map vault local path, when generated. on-disk dir is FLAT
   // at `~/lyt/vaults/lyt-pod-map/` (no `<owner>` segment); `vault.kind: pod-map`
   // stays the internal discriminator the Pod Manager plugin keys on.
   podMapVaultPath?: string;
-  // The owner slug. Retained for content/identity; D27(c) drops it from the
+  // The owner slug. Retained for content/identity; drops it from the
   // pod-map display + on-disk path (the vault is flat at `vaults/lyt-pod-map`).
   ownerSlug?: string;
   // Whether OSC 8 hyperlinks should be emitted (TTY + not piped).
@@ -87,7 +87,7 @@ export interface PodCardData {
   // pod is materialized LOCALLY but NOT pushed to GitHub; the card must say so
   // rather than imply it is published. "published" means the round-trip
   // completed (after `lyt sync` / the publish prompt). Drives the status line.
-  // D34 (OD-LOCALFIRST) — "local-only" means there is NO GitHub connection yet
+  // "local-only" means there is NO GitHub connection yet
   // (a no-gh / provisional init): a stronger honesty than "staged" (which
   // implies gh is wired + the repo exists). The card says "not connected".
   publishState?: "local-only" | "staged" | "published";
@@ -101,7 +101,7 @@ const GH_BASE = "https://github.com";
 export function renderPodCard(data: PodCardData): string {
   const link = (url: string, text: string): string => hyperlink(url, text, data.hyperlinksEnabled);
 
-  // D27(e) — the "open" affordance is ALWAYS honest: the `file://` vault-folder
+  // the "open" affordance is ALWAYS honest: the `file://` vault-folder
   // path + the instruction to add it as a vault in Obsidian. No
   // `obsidian://open` deep-link (it 404s on freshly-scaffolded unregistered
   // vaults — both `?vault=` and `?path=` forms). Empty path → omit the line
@@ -125,9 +125,9 @@ export function renderPodCard(data: PodCardData): string {
   const lines: string[] = [];
   lines.push("");
   lines.push("┌─ Your pod is ready ──────────────────────────────");
-  // D25 bridge — exactly once, leading with "pod".
+  // bridge — exactly once, leading with "pod".
   lines.push("│ Your pod is your whole bundle of vaults (a federation under the hood).");
-  // Brief B (B.3) + D34 (OD-LOCALFIRST) — the honest connection status. NEVER
+  // Brief B (B.3) + — the honest connection status. NEVER
   // imply published/connected when it isn't:
   // local-only → no GitHub yet (provisional/no-gh); nudge to CONNECT.
   // staged → gh wired, content materialized but not pushed; nudge to PUBLISH.
@@ -156,7 +156,7 @@ export function renderPodCard(data: PodCardData): string {
     lines.push(`│   path:    ${link(data.podLocalPath, data.podLocalPath)}`);
   }
 
-  // Pod-map vault (display name lyt-pod-map; D27(c): on-disk dir is FLAT at
+  // Pod-map vault (display name lyt-pod-map; on-disk dir is FLAT at
   // `~/lyt/vaults/lyt-pod-map/` — no `<owner>` path segment).
   if (data.podMapVaultPath !== undefined && data.podMapVaultPath.length > 0) {
     lines.push("│");

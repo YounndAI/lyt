@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-// D30.3 / OD-2 (2026-06-03) — bundled-patterns manifest. Maps each bundled
+// (2026-06-03) — bundled-patterns manifest. Maps each bundled
 // pattern id → its semver `version` + a content `hash` (+ the set of
 // `prior_hashes` shipped under older versions). The manifest is what lets
 // `healPatterns` (pattern-paths.ts) distinguish three states of an installed

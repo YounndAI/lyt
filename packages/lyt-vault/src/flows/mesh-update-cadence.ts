@@ -27,7 +27,7 @@ import { renderMeshYon, type MeshDoc } from "../yon/mesh-write.js";
 
 // v1.B.6 — `lyt mesh update-cadence <mesh> --default-vault-cadence <spec>
 // [--json]`. Sets @MESH.default_vault_update_cadence (an optional field
-// added in Commit 1 per OD-10 default). Subscribers fall back to this
+// added in Commit 1 per the ratified default). Subscribers fall back to this
 // when a vault has no @UPDATE_CADENCE row of its own. Atomic tmp+rename
 // write; idempotent re-emit per Lock 0.3.
 

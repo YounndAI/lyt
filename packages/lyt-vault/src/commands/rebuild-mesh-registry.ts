@@ -28,13 +28,13 @@ import {
 // re-parses `.lyt/mesh.yon`, and re-derives the per-machine registry
 // mesh table rows (meshes + mesh_vaults + mesh_edges +
 // mesh_subscriptions). Per-mesh transactions keep blast radius small;
-// parse errors skip-and-warn per OD-6.
+// parse errors skip-and-warn per the ratified default.
 //
 // Lock 0.3 deterministic --json output: same disk state + same nowIso
 // seam = byte-identical JSON. Output schema documented inline in the
 // flow's `RebuildMeshRegistryResult` type.
 //
-// Structured error contract (OD-8):
+// Structured error contract :
 // - exit 2 on `--mesh <name>` not found in registry (MeshNotFoundError)
 // - exit 1 only if ALL meshes failed (totally-failed signal)
 // - exit 0 otherwise; per-mesh status surfaces in JSON / human output
@@ -70,7 +70,7 @@ export function buildRebuildMeshRegistryCommand(): Command {
           emitHumanSummary(res.meshes, res.totalsByTable, res.durationMs);
         }
 
-        // OD-8 exit code: 1 only if ALL meshes failed (totally-failed
+        // exit code: 1 only if ALL meshes failed (totally-failed
         // signal). 0 when at least one mesh succeeded OR the registry
         // has zero meshes.
         const failed = res.meshes.filter((m) => m.status !== "ok").length;

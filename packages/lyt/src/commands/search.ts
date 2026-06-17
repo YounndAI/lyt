@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// v1.D.3b — `lyt search` top-level CLI verb (meta-CLI level per OD-1).
+// v1.D.3b — `lyt search` top-level CLI verb (meta-CLI level per the ratified default).
 //
 // First CONSUMER verb of Lane D — runs the tiered-cascade engine
 // (Tier 0 arcs → Tier 1 lanes → Tier 2 FTS5 → Tier 3 edges) over
@@ -24,15 +24,15 @@
 // master-plan §v1.D.3:786):
 // --vault <name> single-vault search (skips Tier 3 per spec)
 // --mesh <name> mesh-scoped (home_mesh_rid ∪ mesh_vaults union
-// per OD-6 default)
+// per the ratified default)
 // --all explicit alias for federation (ergonomics +
 // symmetry with --vault / --mesh)
 // (none) federation (every registered vault, name ASC)
 //
-// --limit defaults to 20 per OD-9; --json emits Lock 0.3
+// --limit defaults to 20 per the ratified default; --json emits Lock 0.3
 // deterministic stable-key-ordered output.
 //
-// Error contract (per OD-8 default):
+// Error contract (per the ratified default):
 // empty query → exit 1, JSON { error: "empty-query", ... }
 // conflicting flags → exit 1, JSON { error: "conflicting-scope-flags", ... }
 //
@@ -97,7 +97,7 @@ export function buildSearchCommand(): Command {
         return;
       }
 
-      // Empty / whitespace-only query (OD-8 default = error).
+      // Empty whitespace-only query (default = error).
       const trimmed = (query ?? "").trim();
       if (trimmed.length === 0) {
         emitError(opts.json === true, {

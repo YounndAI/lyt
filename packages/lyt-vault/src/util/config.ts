@@ -16,7 +16,7 @@
 
 import type { FederationRepoVisibility } from "./gh-federation.js";
 
-// Brief B (D31 §3–§6) — minimal config SEAM.
+// Brief B (§3–§6) — minimal config SEAM.
 //
 // The handler (2026-06-04) wants a settings/config layer for user-preference
 // defaults; the FULL layer (a config file + `lyt config get/set` + env
@@ -32,18 +32,18 @@ import type { FederationRepoVisibility } from "./gh-federation.js";
 // (`config.yon` — parseable via @younndai/yon-parser AND natively
 // AI-understandable), NOT JSON/TOML. Consistent with "YON is first-class".
 
-// Init publish-prompt default. OD-B2 → "yes" ([Y/n]): publishing is the
+// Init publish-prompt default. → "yes" ([Y/n]): publishing is the
 // expected end-state of `lyt init`, and the prompt itself is the explicit
 // consent (no surprise push) so an affirmative default is safe.
 export type PublishPromptDefault = "yes" | "no";
 
-// Sync pull-conflict posture. OD-B3 → "halt": reuse syncOneVault's proven
+// Sync pull-conflict posture. → "halt": reuse syncOneVault's proven
 // surface-and-halt behavior (git rebase --abort + status:conflict + a
 // resolution recipe; no data overwrite). Satisfies acceptance gate #5.
 export type ConflictPosture = "halt" | "hil";
 
 export interface LytConfig {
-  // OD-B4 → "private": all auto-created repos default private; making a vault
+  // → "private": all auto-created repos default private; making a vault
   // public is a conscious, explicit per-vault action (a deferred seam), never a
   // default.
   defaultRepoVisibility: FederationRepoVisibility;

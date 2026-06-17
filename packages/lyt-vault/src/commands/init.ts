@@ -28,6 +28,14 @@ export function buildInitCommand(): Command {
     .description("Create a new Lyt vault (folder + .obsidian/ + .lyt/) and register it")
     .argument("<name>", "Vault name (used for path + vault rid)")
     .option("--path <dir>", "Override the default location (~/lyt/vaults/<name>)")
+    .option(
+      "--mesh <mesh>",
+      "Create the vault in mesh <mesh> (create-if-missing). Equivalent to passing '<mesh>/<name>'. The mesh is created if absent.",
+    )
+    .option(
+      "--push-to <handle>",
+      "When the home mesh is auto-created, make it a SHARING mesh pointed at this GitHub handle/org (otherwise the new mesh is local-only).",
+    )
     .addOption(
       new Option("--template <name>", "Scaffold template")
         .choices(["empty", "obsidian-default"])
@@ -58,10 +66,30 @@ export function buildInitCommand(): Command {
     .action(async (name: string, opts: InitCliOpts) => {
       const desc = await resolveDescription(opts);
 
+      // 0.9.4 (3c) — `--mesh <m>` is sugar for the `<m>/<name>` qualified form.
+      // Reject the contradiction where both `--mesh` and a slashed name are
+      // given with different meshes.
+      let effectiveName = name;
+      if (opts.mesh !== undefined && opts.mesh.length > 0) {
+        if (name.includes("/")) {
+          const namedMesh = name.slice(0, name.indexOf("/"));
+          if (namedMesh !== opts.mesh) {
+            // eslint-disable-next-line no-console
+            console.error(
+              `lyt vault init: conflicting mesh — name '${name}' specifies mesh '${namedMesh}' but --mesh is '${opts.mesh}'. Pass one or the other.`,
+            );
+            process.exitCode = 2;
+            return;
+          }
+        } else {
+          effectiveName = `${opts.mesh}/${name}`;
+        }
+      }
+
       let result: Awaited<ReturnType<typeof initVaultFlow>>;
       try {
         result = await initVaultFlow({
-          name,
+          name: effectiveName,
           path: opts.path,
           template: opts.template as TemplateName | undefined,
           parent: opts.parent,
@@ -90,7 +118,12 @@ export function buildInitCommand(): Command {
           // meshes with ambiguous push-target semantics).
           selfHeal: {
             federation: { enabled: true },
-            mesh: { enabled: true },
+            mesh: {
+              enabled: true,
+              ...(opts.pushTo !== undefined && opts.pushTo.length > 0
+                ? { pushTo: opts.pushTo }
+                : {}),
+            },
           },
         });
       } catch (err) {
@@ -110,7 +143,7 @@ export function buildInitCommand(): Command {
       }
 
       // eslint-disable-next-line no-console
-      console.log(`Created Lyt vault '${name}'`);
+      console.log(`Created Lyt vault '${result.meshAssignment?.meshName ? `${result.meshAssignment.meshName}/${effectiveName.includes("/") ? effectiveName.slice(effectiveName.indexOf("/") + 1) : effectiveName}` : effectiveName}'`);
       // eslint-disable-next-line no-console
       console.log(`  path:     ${result.vaultPath}`);
       // eslint-disable-next-line no-console
@@ -125,8 +158,12 @@ export function buildInitCommand(): Command {
         // eslint-disable-next-line no-console
         console.log(`  commit:   scaffold committed`);
       }
+      // 0.9.4 (3d) — only claim a clean "registered" when the read-back verified
+      // the vault row landed; otherwise append the unverified note.
+      const registrySuffix =
+        result.committed === "verified" ? "" : ` ${result.unverifiedNote ?? "(unverified)"}`;
       // eslint-disable-next-line no-console
-      console.log(`  registry: registered`);
+      console.log(`  registry: registered${registrySuffix}`);
       if (result.meshAssignment) {
         // eslint-disable-next-line no-console
         console.log(`  mesh:     ${result.meshAssignment.statusVoiceEmitted}`);
@@ -141,8 +178,8 @@ export function buildInitCommand(): Command {
         // v1.A.2d fold (v1.A.0 #14): self-heal forges locally but does
         // NOT push by default. Without this hint, handlers may assume
         // "forged" means "published to GitHub".
-        // Brief C (F3) — point at the canonical publish path `lyt sync` (D31
-        // Brief B), not the retired `lyt federation rebuild --push` verb.
+        // Brief C (F3) — point at the canonical publish path `lyt sync`
+        // (Brief B), not the retired `lyt federation rebuild --push` verb.
         // eslint-disable-next-line no-console
         console.log(` next: run \`lyt sync\` to publish your pod to GitHub`);
       }
@@ -152,6 +189,8 @@ export function buildInitCommand(): Command {
 
 interface InitCliOpts {
   path?: string;
+  mesh?: string;
+  pushTo?: string;
   template?: string;
   parent?: string;
   tierHint?: string;

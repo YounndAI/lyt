@@ -25,7 +25,7 @@
 // (refresh last_seen on every rebuild); rows whose source descendant
 // becomes disconnected age naturally past ROLLUP_DISCONNECTED_DAYS and
 // surface via `lyt vault list --include-tombstones`. NEVER auto-delete
-// (per OD-10) — handler-driven `lyt repair` (v1.C.4.1, deferred) owns
+// (per the ratified default) — handler-driven `lyt repair` (v1.C.4.1, deferred) owns
 // destructive cleanup.
 
 import type { Client } from "@libsql/client";
@@ -128,7 +128,7 @@ export async function deleteAllRollup(db: Client): Promise<number> {
 
 // Targeted truncate: drop every rollup row for the given target vault.
 // Reserved for future repair verb; rebuild does NOT call this (UPSERT
-// posture preserves soft-tombstones per OD-10).
+// posture preserves soft-tombstones per the ratified default).
 export async function deleteAllRollupForTarget(
   db: Client,
   targetVaultRid: string,

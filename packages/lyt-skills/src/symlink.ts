@@ -42,7 +42,7 @@ export type SymlinkStatus =
   | "already-linked"
   | "replaced"
   | "divergent-symlink"
-  // D30.4 / OD-1 (2026-06-03) — a non-lyt directory at the skill target was
+  // (2026-06-03) — a non-lyt directory at the skill target was
   // renamed aside to `<skill>.local-<ts>` (preserved) and the lyt symlink was
   // installed. Replaces the prior refuse-or-destroy `copy-installed` branch.
   | "renamed-collision"
@@ -229,14 +229,14 @@ function installOne(input: InstallOneInput): InstallOneOutput {
   }
 
   if (stat.isDirectory()) {
-    // Collision-safe install (D30.4 / OD-1 — P0). A NON-symlink directory
+    // Collision-safe install (P0). A NON-symlink directory
     // sits at the skill target. We NEVER `rmSync` a directory whose content
     // we did not write — that was the data-loss footgun in the prior
     // `--force` branch (and the silent-refuse without it).
     //
     // - Pristine lyt copy-fallback (content byte-identical to the bundled
     // source) → safe to upgrade in place to the symlink, no backup. This
-    // is the heal path for EPERM copy-fallback installs (D30.2 caveat b).
+    // is the heal path for EPERM copy-fallback installs (caveat b).
     // - Anything else (the user's OWN dir, or a stale/divergent copy) →
     // RENAME it aside to `<skill>.local-<ts>` (preserve — never lose),
     // then install the lyt symlink over the now-free target.
@@ -274,7 +274,7 @@ function installOne(input: InstallOneInput): InstallOneOutput {
 
 // Compact UTC stamp for collision-rename suffixes: `YYYYMMDDTHHMMSSZ`.
 // Colon-free (Windows forbids ':' in filenames), lexically sortable, and
-// human-readable. OD-1 (2026-06-03): chosen over epoch-ms for legibility; the
+// human-readable. (2026-06-03): chosen over epoch-ms for legibility; the
 // repeat-collision disambiguator in renameAside covers sub-second reruns.
 function defaultCollisionStamp(): string {
   return new Date()

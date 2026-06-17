@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// v1.D.4 — `lyt primer` top-level meta-CLI verb (OD-1 default).
+// v1.D.4 — `lyt primer` top-level meta-CLI verb (default).
 //
 // Second CONSUMER verb of Lane D (mirrors v1.D.3 `lyt search` posture).
 // Composes a deterministic agent-priming markdown file from the
@@ -25,7 +25,7 @@
 // mental model toward single-vault use; the verb operates at
 // vault/mesh/federation scope. Mirrors how `lyt search` is wired.
 //
-// Error contract (OD-8 default):
+// Error contract (default):
 // missing --target on scope=vault/mesh → exit 1 + structured JSON
 // unknown vault / mesh → exit 1 + structured JSON
 // invalid --top-keywords / --top-arcs / → exit 1 + structured JSON
@@ -142,7 +142,7 @@ export function buildPrimerCommand(): Command {
         if (opts.json === true) {
           emitJsonResult(res);
         } else if (opts.dryRun === true) {
-          // Human dry-run: print the rendered markdown verbatim per OD-11
+          // Human dry-run: print the rendered markdown verbatim per the ratified default
           // default (full markdown to stdout; pipeable into other tools).
           // eslint-disable-next-line no-console
           console.log(res.markdown);

@@ -33,7 +33,7 @@ import {
   type VaultRow,
 } from "@younndai/lyt-vault";
 
-// Brief B (D31 §5, B.4) — `lyt status`: the TRUST SURFACE. Per-vault + pod
+// Brief B (B.4) — `lyt status`: the TRUST SURFACE. Per-vault + pod
 // local⇄remote drift, the "is my stuff safe / published?" answer. Read-only
 // (no network beyond an optional fetch; no writes). Distinct from the
 // mesh-graph renderer (`lyt mesh status`) — that draws the federation topology;
@@ -64,7 +64,7 @@ export type PodDriftStatus =
   | "clean"
   | "unpushed"
   | "no-remote"
-  // D34 (OD-LOCALFIRST) — a provisional (no-gh) pod: real local git, but NOT
+  // a provisional (no-gh) pod: real local git, but NOT
   // connected to GitHub. The honest trust-surface state distinct from "no-remote"
   // (which implies gh is wired but the remote is unset).
   | "local-only"
@@ -251,7 +251,7 @@ export async function podStatusFlow(args: PodStatusArgs = {}): Promise<PodStatus
       pod = { handle, status: "no-pod", ahead: 0, dirtyCount: 0, detail: "pod dir missing" };
     } else {
       const d = await probeGitDrift(podDir, runGit, noFetch);
-      // D34 (OD-LOCALFIRST) — a PROVISIONAL identity means the pod is local-only
+      // a PROVISIONAL identity means the pod is local-only
       // (never connected). This takes precedence over the remote/drift checks:
       // a local pod has no remote BY DESIGN, so report it honestly as "not
       // connected" rather than the generic "no-remote".

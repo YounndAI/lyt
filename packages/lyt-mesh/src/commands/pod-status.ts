@@ -18,7 +18,7 @@ import { Command } from "commander";
 
 import { podStatusFlow, type PodStatusResult } from "../flows/pod-status.js";
 
-// Brief B (D31 §5, B.4) — `lyt status`: the top-level publish-drift TRUST
+// Brief B (B.4) — `lyt status`: the top-level publish-drift TRUST
 // surface. Distinct verb from `lyt mesh status` (the mesh-graph renderer): this
 // answers "is my stuff published / safe?" per vault + pod. Read-only.
 export function buildPodStatusCommand(): Command {

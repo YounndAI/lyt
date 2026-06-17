@@ -16,7 +16,7 @@
 
 import type { DetectedLicense, LicenseBucket } from "./license-detect.js";
 
-// v1.B.6 — license-aware federation warning helper per OD-15. Used by
+// v1.B.6 — license-aware federation warning helper per the ratified default. Used by
 // publishMeshFlow (informational surface) and (v1.C.2) mesh-subscribe.
 // Compares publisher's LICENSE bucket against subscriber's federation
 // LICENSE bucket; warns on copyleft-into-permissive AND

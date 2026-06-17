@@ -20,6 +20,8 @@ import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { listVaults, setVaultGitUrl, type VaultRow } from "../registry/repo.js";
+import { listMeshes } from "../registry/meshes-repo.js";
+import { computeDisplayNameSync } from "../registry/vault-addressing.js";
 import { closeVaultDb, getLytDbPath, openLytDb } from "../registry/vault-db.js";
 import { readGitRemoteOriginUrl } from "../util/git.js";
 import {
@@ -50,6 +52,11 @@ export interface ListFlowOptions {
 
 export interface ListFlowResult {
   vaults: VaultRow[];
+  // 0.9.4 (3a) — the COMPUTED `{mesh}/{vault}` display name per vault, keyed by
+  // ridHex. Derived from each vault's live `home_mesh_rid` + leaf, so a `move`
+  // is reflected here even though the stored `name` prefix may lag. The human
+  // table renders these; the raw `vaults[].name` is the storage value.
+  displayNames: Record<string, string>;
   // Populated only when options.includeRollupTombstones === true. Keyed
   // by vault ridHex. A vault whose lyt.db is missing or whose rollup
   // table has no stale rows surfaces with count=0, latestSeen=null.
@@ -76,8 +83,17 @@ export async function listVaultsFlow(opts: ListFlowOptions = {}): Promise<ListFl
     // change the surfaced value (we already hold the live URL).
     await reconcileNullGitUrls(db, vaults);
 
+    // 0.9.4 (3a) — compute the canonical `{mesh}/{vault}` display name from
+    // each vault's live home_mesh_rid + leaf (one mesh-list query, reused).
+    const meshes = await listMeshes(db);
+    const meshNameByRidHex = new Map(meshes.map((m) => [m.ridHex, m.name] as const));
+    const displayNames: Record<string, string> = {};
+    for (const v of vaults) {
+      displayNames[v.ridHex] = computeDisplayNameSync(v, meshNameByRidHex);
+    }
+
     if (opts.includeRollupTombstones !== true) {
-      return { vaults };
+      return { vaults, displayNames };
     }
 
     const thresholdDays = opts.rollupThresholdDays ?? ROLLUP_DISCONNECTED_DAYS;
@@ -90,6 +106,7 @@ export async function listVaultsFlow(opts: ListFlowOptions = {}): Promise<ListFl
     }
     return {
       vaults,
+      displayNames,
       rollupTombstones: aggregates,
       rollupThresholdDays: thresholdDays,
       rollupThresholdIso: thresholdIso,
@@ -151,6 +168,7 @@ async function readVaultRollupTombstones(
 export function formatHumanTable(
   vaults: readonly VaultRow[],
   rollupTombstones?: Record<string, RollupTombstoneAggregate>,
+  displayNames?: Record<string, string>,
 ): string {
   if (vaults.length === 0) {
     return "(no vaults registered — run 'lyt vault init <name>' to create one)";
@@ -160,8 +178,11 @@ export function formatHumanTable(
     ? ["NAME", "STATUS", "RID", "PATH", "TOMB_ROLLUPS", "LATEST_TS"]
     : ["NAME", "STATUS", "RID", "PATH"];
   const rows = vaults.map((v) => {
+    // 0.9.4 (3a) — prefer the COMPUTED `{mesh}/{vault}` name (reflects a move
+    // immediately); fall back to the stored name when no map is supplied.
+    const shown = displayNames?.[v.ridHex] ?? v.name;
     const base = [
-      (v.parentVault === null ? "★ " : "  ") + v.name,
+      (v.parentVault === null ? "★ " : "  ") + shown,
       renderStatus(v.status),
       truncate(v.ridHex, 36),
       v.path,

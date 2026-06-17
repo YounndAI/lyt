@@ -34,10 +34,10 @@ export type SyncMetadataMode = "dry-run" | "apply";
 export interface SyncMetadataScope {
   vault?: string | undefined;
   vaults?: readonly string[] | undefined;
-  // D13: traverse mesh from a root vault (depth-bounded; default 5).
+  // traverse mesh from a root vault (depth-bounded; default 5).
   mesh?: string | undefined;
   meshDepth?: number | undefined;
-  // D13: parse a YON manifest, extract @VAULT names, sync those.
+  // parse a YON manifest, extract @VAULT names, sync those.
   fromManifest?: string | undefined;
 }
 
@@ -124,7 +124,7 @@ function filterByScope(all: VaultRow[], scope: SyncMetadataScope): VaultRow[] {
   return all.filter((v) => v.status === "active" && patterns.some((p) => p.test(v.name)));
 }
 
-// D13: expand --mesh and --from-manifest into a comma-list scope before filterByScope runs.
+// expand --mesh and --from-manifest into a comma-list scope before filterByScope runs.
 // Both flags resolve down to the same --vaults pathway internally — single processing path.
 async function expandScope(
   db: Awaited<ReturnType<typeof openRegistry>>,

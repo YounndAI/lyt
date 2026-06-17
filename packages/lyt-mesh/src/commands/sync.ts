@@ -125,7 +125,7 @@ export function buildSyncCommand(): Command {
         }
       }
 
-      // Brief D (D.3, OD-D1) — `lyt sync` SELF-HEALS to connect a local-first
+      // Brief D (D.3) — `lyt sync` SELF-HEALS to connect a local-first
       // pod (no separate `lyt connect` verb). When the pod is provisional
       // (local-only), reconcile it to the real gh handle (guide auth → resolve →
       // remap-state → create pod repo + wire remote) BEFORE the publish pass.

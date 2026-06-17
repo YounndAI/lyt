@@ -67,7 +67,7 @@ export function getLytOverviewContent(input: LytOverviewInput): string {
     `![[.lyt/mesh-context]]`,
     ``,
     // v1.D.5 — additive `## Vault Primer` section AFTER `## Mesh Context`
-    // per OD-4 default. Transcludes the markdown emitted by `lyt primer
+    // per the ratified default. Transcludes the markdown emitted by `lyt primer
     // --scope vault` so handlers opening lyt-overview.md in Obsidian see
     // the primer's hot keywords / active arcs / recent activity / top lanes
     // inline. The transclusion target may not exist on a fresh vault — in

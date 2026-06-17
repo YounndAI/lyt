@@ -214,7 +214,25 @@ export async function upsertVault(db: Client, args: InsertVaultArgs): Promise<vo
   });
 }
 
+// 0.9.4 (G — the single resolver chokepoint). `getVaultByName` is the
+// historic name-lookup surface every verb routes through; it now delegates to
+// the addressing chokepoint (`resolveVault`) so the WHOLE verb fleet gains the
+// `{mesh}/{vault}` · bare-leaf · alias · origin-coordinate grammar from one
+// edit. The raw exact-string SQL match lives in `getVaultByExactName` for the
+// rare caller that genuinely needs a literal `name =` probe (e.g. a rename
+// collision check that must not auto-resolve a leaf). The chokepoint THROWS
+// `AmbiguousVaultLeafError` on a colliding bare leaf — never tiebreaks.
 export async function getVaultByName(db: Client, name: string): Promise<VaultRow | null> {
+  // Lazy import breaks the repo.ts ↔ vault-addressing.ts cycle (the addressing
+  // module imports getVaultByRid from here).
+  const { resolveVault } = await import("./vault-addressing.js");
+  return resolveVault(db, name);
+}
+
+// Literal `name = ?` probe — NO leaf/alias/coordinate resolution. Used by
+// collision checks (rename/init) where "is this EXACT name taken?" must not be
+// softened into "does this leaf resolve to something?".
+export async function getVaultByExactName(db: Client, name: string): Promise<VaultRow | null> {
   const r = await db.execute({
     sql: "SELECT * FROM vaults WHERE name = ?",
     args: [name],

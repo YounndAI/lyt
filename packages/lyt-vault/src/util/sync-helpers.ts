@@ -59,7 +59,7 @@ export function inferCommitMessage(diff: GitDiffSummary): string {
 // lyt-mesh sync.ts:syncOneVault) with a deterministic, LLM-FREE summary naming
 // each changed figment by title with a +new / ~updated / -deleted prefix. An
 // agent-issued `lyt sync` MAY override the whole message via a caller-supplied
-// `message`; the CLI itself NEVER calls an LLM (D31 §2-F2 + handler ask). These
+// `message`; the CLI itself NEVER calls an LLM (§2-F2 + handler ask). These
 // helpers are PURE (no fs/git) so the heuristic has a unit-test surface; the fs
 // glue (reading each figment's frontmatter title) lives in the caller.
 // ---------------------------------------------------------------------------

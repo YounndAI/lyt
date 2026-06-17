@@ -147,13 +147,13 @@ program.addCommand(buildReindexCommand());
 // dev-only and not shipped); this is the CLI-surface adapter.
 program.addCommand(buildBenchCommand());
 
-// v1.B.4 — `lyt init` lives at the meta-CLI top level per OD-1 default +
+// v1.B.4 — `lyt init` lives at the meta-CLI top level per the ratified default +
 // master-plan §v1.B.4:543 + federation-design §5:248. Composes
 // meshInitFlow + federationInitFlow into idempotent bootstrap with
 // three branches (fresh / re-init / discovery) + `--auto` default.
 program.addCommand(buildLytInitCommand());
 
-// v1.C.3 — `lyt discover` lives at the meta-CLI top level per OD-1 default +
+// v1.C.3 — `lyt discover` lives at the meta-CLI top level per the ratified default +
 // federation-design §6:249 (lists `lyt discover` next to `lyt init`).
 // Read-only walk of GH-accessible repos; clusters discovered Lyt vaults
 // by @VAULT_HOME_MESH.mesh_name; per-cluster orphan-recovery prompt
@@ -161,7 +161,7 @@ program.addCommand(buildLytInitCommand());
 // primer / lyt init top-level attach pattern.
 program.addCommand(buildDiscoverCommand());
 
-// v1.C.4 — `lyt repair` lives at the meta-CLI top level per OD-1 default +
+// v1.C.4 — `lyt repair` lives at the meta-CLI top level per the ratified default +
 // federation-design §6:250 (lists `lyt repair` next to `lyt init` +
 // `lyt discover`). Default mode is --dry-run; --apply performs writes
 // across the 4 federation-design §11:515-521 failure classes (broken
@@ -171,11 +171,11 @@ program.addCommand(buildDiscoverCommand());
 // §G-5:277.
 program.addCommand(buildRepairCommand());
 
-// v1.F.3 — `lyt skills` lives at the meta-CLI top level per OD-2 default +
+// v1.F.3 — `lyt skills` lives at the meta-CLI top level per the ratified default +
 // master-plan §v1.F.3:1033 verb wording ("lyt skills install"). Composes
 // symlinkSkillsTriRuntime + listSkillsTriRuntime into the symlink + runtime-
 // state-reporting surface for the 10 bundled skills across ~/.claude/skills,
-// ~/.codex/skills, ~/.agents/skills. Per OD-5 + OD-16 ratified 2026-06-01,
+// ~/.codex/skills, ~/.agents/skills. Per ratified 2026-06-01,
 // the legacy standalone `lyt-skills` bin + copy-based `installSkills` flow
 // were removed in the same phase (pre-release clean slate).
 program.addCommand(buildSkillsCommand());
@@ -186,7 +186,7 @@ program.addCommand(buildSkillsCommand());
 // agent manual (~150 lines / ~1.5K tokens) and writes it (or previews
 // it) into agent-runtime global instructions files via the
 // `<!-- lyt-manual v<lyt-version> BEGIN -->...END -->` marker pattern
-// (D9 update-path primitive per the ratified default ratified 2026-06-01).
+// (update-path primitive per the ratified default ratified 2026-06-01).
 program.addCommand(buildAgentManualCommand());
 
 program.parseAsync(process.argv).catch((err: unknown) => {

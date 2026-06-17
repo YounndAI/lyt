@@ -34,7 +34,7 @@ import {
 // v1.B.6 — `lyt vault update-cadence <vault> [--cron <spec> | --interval
 // <seconds> | --on-demand] [--timezone <tz>] [--json]`. Publisher-side
 // CLI for setting @UPDATE_CADENCE per-vault. The record is mesh-scoped
-// (per OD-9 default + lyt-public-mesh §2.3): we look up the vault's home
+// (per the ratified default + lyt-public-mesh §2.3): we look up the vault's home
 // mesh, load that mesh's main-vault mesh.yon, upsert the @UPDATE_CADENCE
 // row keyed by vault_rid, atomic tmp+rename write. Cadence-type flags are
 // mutually exclusive at the CLI layer; the flow asserts exactly one is set.

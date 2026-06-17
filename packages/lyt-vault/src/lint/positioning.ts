@@ -21,7 +21,7 @@
 // leakage check can import `scanForbiddenPhrases` + `FORBIDDEN_PHRASES` and
 // reuse / extend the same canonical list rather than re-deriving it.
 //
-// Canonical forbidden phrases come from the LYT brand Locked decisions (D2):
+// Canonical forbidden phrases come from the LYT brand Locked decisions :
 // Lyt is positioned as the federation layer over the user's own markdown
 // vaults ("pod"), NOT as a "second brain" / "exocortex" / "AI memory" product.
 // Those phrases are off-message and must never leak into shipped copy.
@@ -36,7 +36,7 @@
 // 0-based character index, and the 1-based line number.
 
 /**
- * Canonical banned brand-positioning phrases (LYT Locked decisions / D2).
+ * Canonical banned brand-positioning phrases (LYT Locked decisions).
  *
  * Exported as a readonly const so downstream consumers (GP-2 leakage check)
  * can import and extend the list from a single source of truth instead of

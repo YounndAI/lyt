@@ -34,7 +34,7 @@ interface RebuildArcsCliOpts {
 // libSQL cache half via `upsertArcsCache` invoked from inside the
 // flow.
 //
-// OD-3 default: this verb stays alongside the v1.D.2c automator
+// default: this verb stays alongside the v1.D.2c automator
 // wrapper (`lyt automator run arc-builder --run-now`) so the
 // underlying flow has an evidence-of-life path independent of the
 // automator runtime + so handlers can rebuild arcs synchronously when
@@ -46,7 +46,7 @@ interface RebuildArcsCliOpts {
 // Lock 0.3 deterministic --json mode mirrors `lyt vault
 // rebuild-lanes`. Position collisions surface as structured JSON
 // errors (`{ error: 'position-collision', arc, position,
-// conflicting_figments }`) per OD-7.
+// conflicting_figments }`) per the ratified default.
 export function buildRebuildArcsCommand(): Command {
   return new Command("rebuild-arcs")
     .description(

@@ -40,14 +40,14 @@ export function slugifyHandle(handle: string): string {
   return slugifyVaultName(handle);
 }
 
-// D26 follow-up (v1.GP WS3, 2026-06-02): the on-disk LOCAL CACHE DIRECTORY
-// the user sees is `~/lyt/pod/`. D5/D31 (Brief A, 2026-06-04) extends the
+// follow-up (v1.GP WS3, 2026-06-02): the on-disk LOCAL CACHE DIRECTORY
+// the user sees is `~/lyt/pod/`. (Brief A, 2026-06-04) extends the
 // user-facing rename to the FILE: `federation.yon` → `pod.yon` (see
-// getFederationYonPath). Per D1, the `lyt federation` CLI verbs, this
+// getFederationYonPath). The `lyt federation` CLI verbs, this
 // function's NAME (getFederationRoot), and every internal "federation" symbol
-// stay unchanged (internal-technical surfaces, OD-A2 Option 1).
+// stay unchanged (internal-technical surfaces, Option 1).
 //
-// D27(b): the pod dir is FLAT — `getFederationRepoDir` returns this root
+// the pod dir is FLAT — `getFederationRepoDir` returns this root
 // directly (`~/lyt/pod`), so `pod.yon` lands at `~/lyt/pod/pod.yon` (no
 // `<handle>` subdir). The doctor symmetry probe (doctor.ts
 // checkFederationRepoState) computes the same flat dir independently — kept in
@@ -57,7 +57,7 @@ export function getFederationRoot(): string {
   return join(getLytHome(), "pod");
 }
 
-// D27(b) — FLAT pod dir: a single pod directory at `getFederationRoot()`
+// FLAT pod dir: a single pod directory at `getFederationRoot()`
 // (`~/lyt/pod`) holds `pod.yon` directly. The `handle` arg is kept in
 // the signature (callers still pass it) to minimise blast, but the slug is no
 // longer appended. Multi-handle support (a per-handle subdir for a user with
@@ -74,19 +74,19 @@ export function getFederationRepoDir(handle: string): string {
   return getFederationRoot();
 }
 
-// D5/D31 (Brief A): the manifest file is `pod.yon` (was `federation.yon`). The
-// user-facing artifact uses the user-facing word (D1). The function name stays
-// `getFederationYonPath` (internal-technical symbol per OD-A2 Option 1) — only
+// (Brief A): the manifest file is `pod.yon` (was `federation.yon`). The
+// user-facing artifact uses the user-facing word. The function name stays
+// `getFederationYonPath` (internal-technical symbol per the ratified default Option 1) — only
 // the on-disk filename changed.
 export function getFederationYonPath(handle: string): string {
   return join(getFederationRepoDir(handle), "pod.yon");
 }
 
-// GitHub repo name for the user's pod per D26 (2026-06-02; amends the
+// GitHub repo name for the user's pod per (2026-06-02; amends the
 // master-plan §5 `{handle}/lyt-federation` convention → `{handle}/lyt-pod`).
-// D26 = Option B: rename ONLY the user-visible repo name to "pod"; "federation"
+// = Option B: rename ONLY the user-visible repo name to "pod"; "federation"
 // stays the internal architecture term (CLI verbs, symbols, design docs all
-// unchanged). D5/D31 (Brief A) then renamed the FILE federation.yon → pod.yon
+// unchanged). (Brief A) then renamed the FILE federation.yon → pod.yon
 // too; the repo name + this constant are unaffected. This single constant is
 // the chokepoint — both
 // `gh repo create` (federation/init.ts) AND the cross-machine adopt-detect
@@ -101,7 +101,7 @@ export function federationRepoFullName(handle: string): string {
   return `${handle}/${federationRepoName()}`;
 }
 
-// Brief B (D31 §3, OD-B1 — resolved scheme D via /insight-explore →
+// Brief B (resolved scheme D via /insight-explore →
 // /insight-critique → /insight-assess, 2026-06-04). The GitHub repo name for a
 // single vault. Parallels federationRepoName() ({handle}/lyt-pod) and the
 // pod-map ({handle}/lyt-pod-map): every Lyt artifact self-identifies by the

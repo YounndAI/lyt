@@ -83,7 +83,7 @@ import {
 // P6 lyt agent-manual --install … (spawnSync to G.5 verb; reads populated catalog)
 // P7 Cross-machine adopt-detect (v1.G.14 NEW; gh api federation-repo probe — informational; full adopt body deferred to Brief B)
 // P8 Create `personal` mesh (meshInitFlow direct call)
-// P9 First vault = `personal/main` (D27(a): resolves the mesh main from P8; no name prompt, no duplicate scaffold)
+// P9 First vault = `personal/main` (resolves the mesh main from P8; no name prompt, no duplicate scaffold)
 // P10 Initialize federation repo (federationInitFlow direct call)
 // P11 Pod-map vault + plugin install (generatePodMapFlow + installPodManagerPlugin)
 // P12 First-use demo (direct fs write + grep read-back)
@@ -120,7 +120,7 @@ export interface WizardPhaseResult {
   // fresh-init path. "adopted" means federation-repo exists → currently
   // informational only (full skip/clone body deferred to Brief B — the
   // publish/sync + clone-adopt engine; pod.yon now lists meshes + vaults
-  // per D31, so a cloned pod is enumerable once pods are pushed).
+  // so a cloned pod is enumerable once pods are pushed).
   data?: {
     vaultPath?: string;
     branch?: "fresh" | "adopted";
@@ -148,7 +148,7 @@ export interface WizardRunResult {
   phases: WizardPhaseResult[];
 }
 
-// v1.GP WS3 / D25 — lead with "pod" (user-facing); gloss "federation" on
+// v1.GP WS3 / lead with "pod" (user-facing); gloss "federation" on
 // first surface so the two terms are bridged, never presented as separate
 // unexplained concepts. "pod" is the friendly name; "federation" is the
 // plumbing — same thing.
@@ -183,7 +183,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   phases.push(p1);
   if (!p1.ok && !p1.skipped) return { status: "halted", phases };
 
-  // P2 — gh CLI. D34 (OD-LOCALFIRST): gh is OPTIONAL. If it's missing and the
+  // P2 — gh CLI. : gh is OPTIONAL. If it's missing and the
   // handler declines to install it (or the install fails), DON'T halt — degrade
   // to a LOCAL pod (connect later with `lyt sync`).
   emit(
@@ -238,7 +238,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     if (!p3.ok && !p3.skipped) return { status: "halted", phases };
   }
 
-  // P4 — gh auth. D34 (OD-LOCALFIRST): a missing/unauthed gh no longer HALTS —
+  // P4 — gh auth. : a missing/unauthed gh no longer HALTS —
   // it degrades to LOCAL (provisional identity, no remote; connect later via
   // `lyt sync`). gh present + authed → `ghReady` drives the connected/adopt tree.
   emit(
@@ -295,7 +295,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   phases.push(p5);
   if (!p5.ok && !p5.skipped) return { status: "halted", phases };
 
-  // ---- D34 (OD-LOCALFIRST) decision tree ----
+  // ---- decision tree ----
   // The branch is INVISIBLE to the user (complexity lives in the tree, never in
   // their face — lean-DX). Three outcomes, at most ONE ⏎-acceptable prompt:
   // • gh NOT ready (absent/unauthed) → LOCAL (forced, no question).
@@ -361,7 +361,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   } else {
     // FRESH — scaffold personal mesh + first vault + pod repo. `localMode` (no
     // gh / chose local) forges the pod LOCAL-ONLY (no gh repo, no remote);
-    // connected mode creates the pod container repo per D31 §4 two-tier consent.
+    // connected mode creates the pod container repo per two-tier consent.
     const localMode = mode === "local";
     emit(
       "\nPhase 8 — Create your `personal` mesh\nA mesh is a named group of vaults; `personal` is the default starter mesh.",
@@ -370,7 +370,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     phases.push(p6);
     if (!p6.ok && !p6.skipped) return { status: "halted", phases };
 
-    // P9 — first vault. D27(a): the first vault is `personal/main`, already
+    // P9 — first vault. the first vault is `personal/main`, already
     // scaffolded by P8's mesh-init. P9 resolves that path (no name prompt, no
     // duplicate scaffold) so P12's first-use demo can run against it.
     emit(
@@ -381,7 +381,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     phases.push(p7);
     if (!p7.ok && !p7.skipped) return { status: "halted", phases };
 
-    // P10 — pod repo. WS3 / D25: explicitly bridge pod ↔ federation. In local
+    // P10 — pod repo. WS3 / explicitly bridge pod ↔ federation. In local
     // mode the pod is a LOCAL git repo (connect later); connected mode creates
     // the gh container repo (content push still held until the publish prompt).
     emit(
@@ -439,13 +439,13 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   // v1.GP WS4 — end-of-init pod card + clickable links + Next-steps trio.
   // Skipped under --dry-run (the phase-walk output stays deterministic; a
   // dry-run has no real paths to surface). On a real run, the card LEADS with
-  // "pod" and bridges "federation" once per D25, with OSC 8 hyperlinks when
+  // "pod" and bridges "federation" once, with OSC 8 hyperlinks when
   // the terminal supports them (graceful plain-text fallback otherwise).
   if (!opts.dryRun) {
     const localMode = mode === "local";
     emitPodCard(firstVaultPath, localMode);
     if (localMode) {
-      // D34 (OD-LOCALFIRST) — a local pod has no gh to publish to. NO publish
+      // a local pod has no gh to publish to. NO publish
       // prompt; nudge to CONNECT instead (the self-heal lives in `lyt sync`).
       emit(
         "\nYour pod is local-only (not connected to GitHub). Run `lyt sync` to connect + back it up.\n",
@@ -453,9 +453,9 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     } else {
       // Brief C (F1) — staged-HIL publish prompt. The wizard materialized the pod
       // LOCALLY (mesh/federation init held the push; the pod CONTAINER repo may
-      // already exist on GitHub per D31 §4 two-tier consent, but the CONTENT —
+      // already exist on GitHub per two-tier consent, but the CONTENT —
       // vault repos + pod push — is HELD until this consent). Offer to publish now
-      // (default-Yes per OD-B2); the prompt itself IS the explicit content-consent.
+      // (default-Yes per the ratified default); the prompt itself IS the explicit content-consent.
       // Skipped on a non-TTY (never hangs).
       await maybePromptAndPublishWizard(ph, {
         isTty: process.stdin.isTTY === true,
@@ -481,8 +481,8 @@ export interface WizardPublishPromptDeps {
 }
 
 // Brief C (F1) — the end-of-wizard staged-HIL publish prompt. Default-Yes
-// (OD-B2): publishing is the expected end-state and the prompt is the explicit
-// consent (D31 §4 two-tier consent — running the prompt's "Yes" is the
+// publishing is the expected end-state and the prompt is the explicit
+// consent (two-tier consent — running the prompt's "Yes" is the
 // content-publish consent; "No" genuinely holds the pod staged). Exported so it
 // can be unit-tested with a stub prompt handler + injected publish flow.
 //
@@ -544,7 +544,7 @@ export async function maybePromptAndPublishWizard(
 
 // Build + print the WS4 pod card. Best-effort: handle resolution / pod-map
 // presence are tolerant (a missing piece simply doesn't render). Never throws
-// into the wizard return path. D34 — `localOnly` drives the honest "not
+// into the wizard return path. `localOnly` drives the honest "not
 // connected to GitHub" status line (vs the connected "staged" wording).
 function emitPodCard(firstVaultPath: string, localOnly: boolean): void {
   let handle = "";
@@ -559,16 +559,16 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean): void {
     return;
   }
 
-  // First vault: D27(a) — always `personal/main` (mesh-init's main vault).
+  // First vault: always `personal/main` (mesh-init's main vault).
   const vaultLeaf = firstVaultPath.length > 0 ? basenameOf(firstVaultPath) : "main";
   const vaultName = `personal/${vaultLeaf}`;
 
-  // D27(c): the pod-map vault sits FLAT under `vaults/` (no `<owner>` segment)
+  // the pod-map vault sits FLAT under `vaults/` (no `<owner>` segment)
   // — mirrors derivePodMapPaths in pod-map-generate.ts.
   const ownerSlug = slugifyHandle(handle);
   const podMapPath = join(getDefaultVaultsRoot(), "lyt-pod-map");
 
-  // D27(e): no `obsidian://open` deep-link — the card emits the honest
+  // no `obsidian://open` deep-link — the card emits the honest
   // file:// vault-FOLDER path + "Open folder as vault" instruction for every
   // vault, so no per-vault verified-file (README) resolution is needed here.
   const data: PodCardData = {
@@ -587,19 +587,19 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean): void {
         }
       : {}),
     hyperlinksEnabled: process.stdout.isTTY === true,
-    // D34 — local pod → "not connected to GitHub"; connected (staged) pod →
+    // local pod → "not connected to GitHub"; connected (staged) pod →
     // "not yet published". Both lead the Next-steps with `lyt sync`.
     publishState: localOnly ? "local-only" : "staged",
   };
 
   emit(renderPodCard(data));
-  // Brief C (F4) + D34 — the wizard's pod is always unpublished at this point
+  // Brief C (F4) + the wizard's pod is always unpublished at this point
   // (staged or local-only), so the Next-steps lead with `lyt sync`.
   emit(renderNextSteps({ unpublished: true }));
   emit("");
 }
 
-// D34 (OD-LOCALFIRST) — the fresh-with-gh local-vs-connect ASK. Default
+// the fresh-with-gh local-vs-connect ASK. Default
 // Connected (RATIFIED 2026-06-04). Non-TTY → Connected silently (gh is present
 // + authed). The complexity lives here, not in the user's face: a single
 // ⏎-acceptable prompt, surfaced ONLY when gh is ready AND the pod is fresh.
@@ -628,7 +628,7 @@ async function askLocalVsConnect(
   ]);
 }
 
-// D34 (OD-LOCALFIRST, D.2) — mint the PROVISIONAL identity for a LOCAL pod. The
+// (D.2) — mint the PROVISIONAL identity for a LOCAL pod. The
 // prompt offers the OS username as a pre-filled default (⏎ accepts); a typed
 // handle is validated with isValidGhHandle (re-prompt on miss). Non-TTY / dry-run
 // → the OS-username default, silently. Connect (`lyt sync`) reconciles it to the
@@ -1048,12 +1048,12 @@ export async function phase5_runAgentManualInject(
 
 // v1.G.14 Gap 2 — Cross-machine adopt-detect (P5c).
 //
-// Probes for an existing pod repo at `{handle}/lyt-pod` (D26 repo name) via
+// Probes for an existing pod repo at `{handle}/lyt-pod` (repo name) via
 // `gh api /repos/{handle}/<federationRepoName()>`. The probe is informational
 // only: it surfaces the existence to the handler but does not currently
 // clone the federation or enumerate vaults. Full skip-and-clone adopt body
 // is deferred to Brief B (the publish/sync + clone-adopt engine). pod.yon now
-// lists meshes + vaults (D31, @FED_MESH + @FED_VAULT derived from the
+// lists meshes + vaults (@FED_MESH + @FED_VAULT derived from the
 // registry), so enumerating a cloned pod's vaults is feasible once pods are
 // pushed; the deferred Brief-B work will (a) clone the remote pod, read its
 // pod.yon, AND (b) branch the wizard to skip P8/P9/P10 in adopt-mode.
@@ -1103,7 +1103,7 @@ export function defaultGhFederationProbe(
   // PG-8: argv-array shape; literal endpoint; handle is now validated
   // against GitHub's username regex above. spawnSync argv items remain
   // individual strings — no shell concatenation even under shell:true.
-  // D26: repo-name segment routes through federationRepoName() ("lyt-pod")
+  // repo-name segment routes through federationRepoName() ("lyt-pod")
   // — same chokepoint as `gh repo create`, so the probe and the create can
   // never drift on the repo name.
   const result = spawn("gh", ["api", `/repos/${handle}/${federationRepoName()}`, "--silent"], {
@@ -1275,7 +1275,7 @@ export async function phase6_createPersonalMesh(dryRun: boolean): Promise<Wizard
       name: "mesh-init",
       ok: true,
       message: `Created mesh '${result.meshName}' with main vault at ${result.mainVault.path}`,
-      // D27(a) — the `personal/main` vault scaffolded by mesh-init IS the
+      // the `personal/main` vault scaffolded by mesh-init IS the
       // pod's first (and only) vault on init. Surface its path so P9 can
       // resolve it (instead of scaffolding a duplicate) and P12 can run the
       // first-use demo against it.
@@ -1297,7 +1297,7 @@ export async function phase6_createPersonalMesh(dryRun: boolean): Promise<Wizard
   }
 }
 
-// D27(a) — first vault on init is `personal/main` ONLY.
+// first vault on init is `personal/main` ONLY.
 //
 // The naming convention locks the pod's main vault to the literal `main`
 // under the `personal` mesh. That vault is scaffolded by P8's mesh-init
@@ -1306,7 +1306,7 @@ export async function phase6_createPersonalMesh(dryRun: boolean): Promise<Wizard
 // no longer scaffolds anything. It resolves the `personal/main` path
 // produced by P8 so P12's first-use demo can run against it.
 //
-// Divergence from OD-a1 (the oversight handler lean = "keep the placement-override
+// Divergence from the oversight-handler lean ("keep the placement-override
 // prompt"): the placement override is dropped. It existed to relocate a
 // handler-NAMED first vault; once the first vault is locked to
 // `personal/main` created by mesh-init at the canonical
@@ -1363,14 +1363,14 @@ export async function phase8_initFederationRepo(
       ok: true,
       skipped: true,
       // Brief C (F3) — honest dry-run preview: a real run CREATES the pod
-      // container repo on GitHub (D31 §4 two-tier consent) and STAGES content
+      // container repo on GitHub (two-tier consent) and STAGES content
       // locally (push held). Not "local-only".
       message:
         "[dry-run] would create the pod repo on GitHub + stage content locally (push held until `lyt sync`).",
     };
   }
   try {
-    // D34 — local mode forges the pod LOCAL-ONLY (no gh probe, no remote);
+    // local mode forges the pod LOCAL-ONLY (no gh probe, no remote);
     // connected mode creates the gh container repo (push still held).
     const result = await withPhaseWork(
       "create",
@@ -1381,7 +1381,7 @@ export async function phase8_initFederationRepo(
       phase: 10,
       name: "federation-init",
       ok: true,
-      // Brief C (F3) + D34 — honest text. local → "local pod (not on GitHub) —
+      // Brief C (F3) + honest text. local → "local pod (not on GitHub) —
       // run `lyt sync` to connect"; connected → created/adopted/staged.
       message: federationPhaseMessage(result, localOnly),
     };
@@ -1402,7 +1402,7 @@ export async function phase8_initFederationRepo(
 }
 
 // Brief C (F3) — build the honest end-of-phase pod-repo message. The federation
-// init holds the push (pushToRemote:false) but, per D31 §4 two-tier consent, the
+// init holds the push (pushToRemote:false) but, per two-tier consent, the
 // pod CONTAINER repo IS created on GitHub on a fresh forge (remoteCreated). So
 // the message must distinguish created-on-GitHub / adopted / cached from the
 // stale "local-only" — and always point at `lyt sync` as the publish step.
@@ -1412,7 +1412,7 @@ function federationPhaseMessage(
 ): string {
   const where = `local: ${result.localPath}`;
   if (localOnly) {
-    // D34 — the pod is a LOCAL git repo; no gh repo, no remote. Connect later.
+    // the pod is a LOCAL git repo; no gh repo, no remote. Connect later.
     return `Local pod ready (${result.remoteFullName} — not on GitHub yet) · run \`lyt sync\` to connect + back up. ${where}`;
   }
   if (result.remoteCreated) {

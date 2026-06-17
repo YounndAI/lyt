@@ -39,17 +39,17 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // exists in the local registry)
 // (c) home_mesh_rid resolves to a registered mesh AND that mesh's main
 // vault directory exists on disk (the referenced vault's home mesh
-// is reachable per brief OD-7 default + master-plan §v1.C.1:609)
+// is reachable per brief default + master-plan §v1.C.1:609)
 // Cross-references the libSQL `mesh_edges` cache via listEdgesByRefMesh
 // and emits a separate warn-row per cache-drift case (mesh.yon row not
-// in cache OR cache row not in mesh.yon) per brief OD-15 default —
+// in cache OR cache row not in mesh.yon) per brief default —
 // remediation: `lyt mesh rebuild-registry`.
 //
 // Reuse from flows/doctor.ts: the `CheckResult` shape only. Per brief
-// OD-18 default, mesh-validate does NOT call doctorFlow; a v1.C.4+
+// default, mesh-validate does NOT call doctorFlow; a v1.C.4+
 // micro-commit can add a doctor check that delegates to this flow.
 //
-// Exit-code mapping (per brief OD-9 default; matches v1.B.5 doctor
+// Exit-code mapping (per brief default; matches v1.B.5 doctor
 // `2 = warnings only` posture):
 // 0 — every edge resolves (or no edges)
 // 2 — one or more warn-rows present (never fail; diagnostic, not
@@ -87,7 +87,7 @@ export interface MeshEdgeFinding {
   remediation: string;
 }
 
-// v1.C.4 — sibling-shape per OD-3 default + v1.C.2 D11 precedent. A
+// v1.C.4 — sibling-shape per the ratified default + v1.C.2 precedent. A
 // MeshFileFinding describes a fault discovered at the mesh.yon-FILE level
 // (parse error, future: checksum mismatch). Distinct from
 // MeshEdgeFinding (per-edge row) and MeshSubscriptionFinding (per-row)
@@ -105,7 +105,7 @@ export interface MeshFileFinding {
   remediation: string;
 }
 
-// v1.C.2 — sibling-shape per OD-11 default (lower coupling than widening
+// v1.C.2 — sibling-shape per the ratified default (lower coupling than widening
 // MeshEdgeFinding.reason enum + the discriminating union). A
 // MeshSubscriptionFinding describes a broken @MESH_SUBSCRIPTION row in
 // the SUBSCRIBING mesh's mesh.yon: the subscribed vault no longer
@@ -133,11 +133,11 @@ export interface ValidateMeshEdgesResult {
   // warn-rows.
   checks: CheckResult[];
   findings: MeshEdgeFinding[];
-  // v1.C.2 — additive sibling collection per OD-11 default. Empty when
+  // v1.C.2 — additive sibling collection per the ratified default. Empty when
   // no subscription-side findings, preserving JSON-shape stability for
   // v1.C.1 consumers that read only `findings`.
   subscriptionFindings: MeshSubscriptionFinding[];
-  // v1.C.4 — additive sibling collection per OD-3 default. Empty when no
+  // v1.C.4 — additive sibling collection per the ratified default. Empty when no
   // file-level findings (mesh.yon parses cleanly across every walked
   // mesh). Preserves JSON-shape stability for v1.C.1/v1.C.2 consumers.
   fileFindings: MeshFileFinding[];
@@ -279,7 +279,7 @@ async function validateOneMesh(
     const msg = err instanceof Error ? err.message : String(err);
     // v1.C.4 — emit a MeshFileFinding sibling alongside the CheckResult
     // warn-row so write-side consumers (`lyt repair`) can classify the
-    // failure structurally per OD-3 default. The CheckResult row stays
+    // failure structurally per the ratified default. The CheckResult row stays
     // for human-summary output + JSON-shape stability of v1.C.1/v1.C.2
     // consumers.
     const remediation = `Run: lyt repair --target ${mesh.name} --apply --from-revision <sha>`;
@@ -395,7 +395,7 @@ async function validateOneMesh(
     });
   }
 
-  // Cache-drift detection (OD-15): for each SoT edge, check the cache
+  // Cache-drift detection: for each SoT edge, check the cache
   // contains a row with the same composite key; for each cache row, check
   // the SoT contains a row with the same composite key.
   const cacheRows = await listEdgesByRefMesh(db, mesh.rid);
@@ -526,9 +526,9 @@ function shortHexStr(h: string): string {
 
 // v1.C.2 — subscription-side walker. Mirrors `validateOneMesh` shape
 // but operates over `MeshDoc.subscriptions` + `mesh_subscriptions`
-// cache rows. Per OD-10 default the walk lives inside the same flow
+// cache rows. Per default the walk lives inside the same flow
 // so `lyt mesh validate` stays the single canonical mesh validator;
-// per OD-11 default findings land in a separate `subscriptionFindings`
+// per the ratified default findings land in a separate `subscriptionFindings`
 // collection (sibling, not widened-enum) to keep MeshEdgeFinding
 // reason-class semantics tight.
 async function validateOneMeshSubscriptions(
@@ -609,7 +609,7 @@ async function validateOneMeshSubscriptions(
     });
   }
 
-  // Cache-drift detection (OD-15 — same shape as edge cache-drift): for
+  // Cache-drift detection (same shape as edge cache-drift): for
   // each SoT subscription, check the cache contains a row with the
   // same composite (mesh_rid, external_vault_rid) key; for each cache
   // row, check the SoT contains a matching subscription.

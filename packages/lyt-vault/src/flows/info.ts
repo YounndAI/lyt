@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getMeshByRid } from "../registry/meshes-repo.js";
 import { getVaultByName, getVaultByRid, listVaults, type VaultRow } from "../registry/repo.js";
+import { computeDisplayName, vaultOriginCoordinate } from "../registry/vault-addressing.js";
 import { deriveVaultWritable, type WritabilityVerdict } from "./writability.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 import { detectLicenseFromContent, type DetectedLicense } from "../util/license-detect.js";
@@ -50,6 +51,13 @@ export interface InfoFlowResult {
   vault: {
     rid: string;
     name: string;
+    // 0.9.4 (3a) — COMPUTED `{mesh}/{vault}` canonical display name (from the
+    // live home_mesh_rid + leaf). Reflects a move immediately; `name` is the
+    // raw storage value.
+    displayName: string;
+    // 0.9.4 — cross-pod origin coordinate `lyt:vault:<host>/<owner>/<repo>`
+    // (from git_url), or null when the vault is local-only.
+    originCoordinate: string | null;
     path: string;
     status: VaultRow["status"];
     tierHint: string | null;
@@ -156,10 +164,15 @@ export async function infoVaultFlow(
     // writable:true alongside a stale gitUrl:null in the same payload.
     const gitUrlOut = vault.gitUrl ?? (await getVaultByRid(db, vault.rid))?.gitUrl ?? null;
 
+    const displayName = await computeDisplayName(db, vault);
+    const originCoordinate = vaultOriginCoordinate({ ...vault, gitUrl: gitUrlOut });
+
     return {
       vault: {
         rid: vault.ridHex,
         name: vault.name,
+        displayName,
+        originCoordinate,
         path: vault.path,
         status: vault.status,
         tierHint: vault.tierHint,

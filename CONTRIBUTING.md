@@ -54,7 +54,7 @@ By contributing, you agree to abide by its terms.
 
 ## Questions?
 
-- General questions: [GitHub Discussions](https://github.com/younndai/lyt/discussions)
+- General questions: [GitHub Discussions](https://github.com/YounndAI/lyt/discussions)
 - Legal questions: office@younndai.com
 - Security questions: see [SECURITY.md](SECURITY.md)
 

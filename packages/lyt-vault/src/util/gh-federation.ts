@@ -42,7 +42,7 @@ export interface FederationGhClient {
     visibility: FederationRepoVisibility,
     description: string,
   ): Promise<void>;
-  // D26 — set GitHub repo topics on the pod repo after create. Separate
+  // set GitHub repo topics on the pod repo after create. Separate
   // from createRepo because `gh repo create` does NOT accept --topic;
   // topics must be applied via `gh repo edit --add-topic` (verified — same
   // mechanism util/gh.ts:editRepo + util/gh-mesh-publish.ts already use).
@@ -55,10 +55,10 @@ export interface FederationGhClient {
   // remote pre-exists, we `git clone`. Either way the local directory ends
   // up as a working tree at `localDir` with origin pointing at the remote.
   initLocalFromFresh(handle: string, repoName: string, localDir: string): Promise<void>;
-  // D34 (OD-LOCALFIRST, 2026-06-04) — materialise the pod repo LOCALLY with NO
+  // (2026-06-04) — materialise the pod repo LOCALLY with NO
   // remote. Used by `lyt init` on a no-gh box (or the local-only choice): the
   // pod is a real git repo with local history, but no `origin` is wired until
-  // the user connects (D34 §2.4 — "only GitHub repo names ... aren't created
+  // the user connects (§2.4 — "only GitHub repo names ... aren't created
   // until connect"). Connect (`lyt sync` self-heal) creates the gh repo + sets
   // the remote under the REAL handle. The `handle` is used only to pin a
   // local-repo commit identity (user.name/email), never a remote URL.
@@ -352,7 +352,7 @@ export const realFederationGhClient: FederationGhClient = {
   },
 
   async setRepoTopics(handle, repoName, topics): Promise<void> {
-    // D26: `gh repo create` cannot set topics — apply them in a follow-up
+    // `gh repo create` cannot set topics — apply them in a follow-up
     // `gh repo edit --add-topic a,b,c`. gh accepts a comma-joined list OR
     // repeated --add-topic flags; we pass one comma-joined arg (matches the
     // brief's `--add-topic a,b,c` shape). argv-verbatim spawn (no shell
@@ -384,7 +384,7 @@ export const realFederationGhClient: FederationGhClient = {
   },
 
   async initLocalNoRemote(handle, localDir): Promise<void> {
-    // D34 — git init only; NO `git remote add`. Mirrors initLocalFromFresh's
+    // git init only; NO `git remote add`. Mirrors initLocalFromFresh's
     // fresh-machine guards (pin local commit identity + .gitignore) so commits
     // succeed without global git config, but wires no GitHub reference — the
     // handle never reaches a remote URL until connect.

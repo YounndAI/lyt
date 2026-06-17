@@ -19,14 +19,14 @@
 // group at the top, vault nodes in the middle row, cross-mesh
 // subscriptions in the bottom row (when present).
 //
-// Write path (OD-7 default): `<mesh-main-vault>/.lyt/canvases/mesh-graph.canvas`.
+// Write path (default): `<mesh-main-vault>/.lyt/canvases/mesh-graph.canvas`.
 // The mesh's main vault is the canonical anchor — meshes are logical
 // groupings without a dedicated filesystem path, so the canvas lives
 // alongside the main vault's content. If the mesh has no main vault
 // assigned yet (v1.B.1 fresh state), fall back to the first home vault
 // by name (mirrors primer-generator.ts:310-325 `resolveMeshWriteAnchor`).
 //
-// Layout (OD-8 default — grid-by-tier):
+// Layout (default — grid-by-tier):
 // y=0 mesh group (w=MESH_WIDTH, h=MESH_HEIGHT, x=0)
 // y=200 vault i at (x = i*VAULT_STRIDE, w=VAULT_WIDTH, h=VAULT_HEIGHT)
 // y=400 external subscription i at (x = i*VAULT_STRIDE, w=VAULT_WIDTH, h=VAULT_HEIGHT)

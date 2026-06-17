@@ -20,13 +20,13 @@
 // lanes-repo.ts / arcs-repo.ts).
 //
 // figment_rid column: TEXT (vault-relative POSIX path) — figments do
-// not have UUIDv7 rids in v1 (v1.D.1 D4 + v1.D.2a inherits — the rid
+// not have UUIDv7 rids in v1 (v1.D.1 + v1.D.2a inherits — the rid
 // system for individual notes lands in v1.5 alongside @TASK / @MARK).
 // The column is `UNINDEXED` because we don't search on the path, only
 // on the body text; the path is the lookup key we project back to
 // callers.
 //
-// Content storage (OD-3 default = default mode): the `body` column
+// Content storage (default = default mode): the `body` column
 // lives inside FTS5's shadow `figment_fts_content` table. This is the
 // simplest mode — `snippet()` / `highlight()` work directly without
 // re-reading from disk, and storage overhead for v1 vault sizes
@@ -35,7 +35,7 @@
 // generation, complicates the flow) and `content=figment_docs`
 // (external content with trigger sync) deferred.
 //
-// Tier-2 scoring (OD-4 interpretation of master-plan §v1.D.3:782
+// Tier-2 scoring (interpretation of master-plan §v1.D.3:782
 // "raw hit count, not Jaccard"): we use FTS5's native BM25 `rank`
 // column for ordering within tier-2 hits (lower rank = better match;
 // BM25 IS a hit-count-derived score, not a set-similarity coefficient

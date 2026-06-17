@@ -18,11 +18,12 @@ import { existsSync } from "node:fs";
 
 import type { Client } from "@libsql/client";
 
+import { assertVaultRegistered, type CommitVerdict } from "../registry/assert-committed.js";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { readFederationState } from "../registry/federation-state.js";
 import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getMeshByName } from "../registry/meshes-repo.js";
-import { getVaultByName, setVaultHomeMesh } from "../registry/repo.js";
+import { getVaultByName, getVaultByExactName, setVaultHomeMesh } from "../registry/repo.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
 import { initVaultDbs } from "../registry/vault-db.js";
 import { initVault, type InitOptions, type InitResult } from "../scaffold/init.js";
@@ -39,6 +40,12 @@ import { registerVaultFromYon } from "./register.js";
 
 export interface InitFlowResult extends InitResult {
   registered: boolean;
+  // 0.9.4 (3d / §4) — read-back verdict. `verified` when the post-register
+  // re-read confirms the vault row exists by rid; `unverified` otherwise. The
+  // CLI appends `unverifiedNote` to the success line on an unverified outcome
+  // instead of printing an unconditional "Initialized".
+  committed: CommitVerdict;
+  unverifiedNote: string | null;
   // v1.A.0 federation self-heal branch — populated when initVaultFlow
   // detected ZERO federation_state row AND ZERO local cache AND the just-
   // registered vault put the count at ≥1. `null` when the branch did not
@@ -106,14 +113,21 @@ export interface MeshSelfHealOptions {
   // and never auto-creates a mesh — the call behaves like v1.A.1's
   // mesh-unaware init (vault.yon emits no @VAULT_HOME_MESH).
   enabled?: boolean | undefined;
-  // Override the auto-created mesh name (defaults to `'personal'`). Tests
-  // pass a deterministic name; production sticks with `personal` per
-  // naming-convention.md §Bare-name normalization.
+  // Override the auto-created mesh name for a BARE init (defaults to
+  // `'personal'`). For a `<mesh>/<leaf>` init the mesh slot is the user's
+  // chosen name. Tests pass a deterministic name; production defaults to
+  // `personal` per naming-convention.md §Bare-name normalization.
   meshName?: string | undefined;
   // Push the just-created mesh to remote on auto-create. Default false —
-  // auto-personal is a local self-heal; the handler explicitly invokes
-  // `lyt mesh init personal --push-to <handle>` when they want a remote.
+  // auto-create is a local self-heal; the handler explicitly opts in (via
+  // `lyt vault init <mesh>/<leaf> --push-to <handle>`) when they want a
+  // remote sharing mesh.
   pushOnSelfHeal?: boolean | undefined;
+  // 0.9.4 (3c) — explicit push target for an auto-created mesh (a GitHub
+  // handle/org). When set, the auto-created mesh is a SHARING mesh pointed at
+  // this owner; without it, the new mesh is local-only (matches the personal
+  // default). Threaded into the nested meshInitFlow.
+  pushTo?: string | undefined;
   // Injectable seam for tests + future BYOK consumers. Forwarded into the
   // nested `meshInitFlow` call when auto-creation fires. Mirrors the
   // federation self-heal shape.
@@ -135,7 +149,7 @@ export interface InitFlowOptions extends InitOptions {
 // 1. opts.selfHeal.federation.enabled !== true → false
 // 2. handle cannot be resolved → false
 // 3. federation_state row exists → false
-// 4. local ~/lyt/pod/ directory exists → false (D27(b): flat pod dir)
+// 4. local ~/lyt/pod/ directory exists → false (flat pod dir)
 //
 // Otherwise → returns the resolved handle so the caller can act.
 //
@@ -172,20 +186,39 @@ export async function shouldSelfHealFederation(
 
 // v1.B.3 — structured error raised when `lyt vault init <owner>/<name>`
 // names a mesh that isn't registered AND mesh auto-creation is gated to
-// `personal` only (the safer default per project plan Plan-D1: don't
-// silently auto-create non-personal meshes because the GH push-target
-// semantics for an org mesh differ from the personal mesh's local-only
-// posture).
+// `personal` only.
+//
+// 0.9.4 (3c) — RETAINED for back-compat (still exported so existing
+// callers/tests resolve), but NO LONGER THROWN on a missing mesh: create-if-
+// missing now auto-creates ANY named mesh, uniformly (the `personal`-only
+// special-case is dropped). The class survives only for the defensive
+// "auto-created mesh didn't land / main vault unresolvable" arms.
 export class HomeMeshNotFoundError extends Error {
   readonly errorCode = "home-mesh-not-found";
   readonly meshName: string;
   constructor(meshName: string) {
     super(
-      `lyt vault init: home mesh '${meshName}' is not registered. ` +
-        `Run 'lyt mesh init ${meshName}' first, or use a bare name to auto-create the 'personal' mesh.`,
+      `lyt vault init: home mesh '${meshName}' could not be resolved after auto-create (defensive).`,
     );
     this.name = "HomeMeshNotFoundError";
     this.meshName = meshName;
+  }
+}
+
+// 0.9.4 (3c) — `vault init {mesh}/{vault}` STOPS + NOTIFIES when the
+// vault already exists (idempotent-by-refusal: never silently re-scaffold over
+// a live vault). The mesh is still created-if-missing; only an existing VAULT
+// is the stop condition.
+export class VaultAlreadyExistsError extends Error {
+  readonly errorCode = "vault-already-exists";
+  readonly vaultName: string;
+  constructor(vaultName: string) {
+    super(
+      `lyt vault init: vault '${vaultName}' already exists. ` +
+        `Nothing to do — use 'lyt vault list' to inspect it, or 'lyt vault rename'/'lyt vault move' to change it.`,
+    );
+    this.name = "VaultAlreadyExistsError";
+    this.vaultName = vaultName;
   }
 }
 
@@ -217,6 +250,14 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
 
     const effectiveName = meshSelfHealAssignment?.normalizedName ?? opts.name;
     const homeMeshScaffoldArg = meshSelfHealAssignment?.scaffoldHomeMesh;
+
+    // 0.9.4 (3c) — STOP + NOTIFY if the vault already exists. Probe by
+    // the EXACT normalized name (not the leaf-resolving chokepoint — we want a
+    // literal "is THIS vault present?" check). The mesh has already been
+    // created-if-missing above; only an existing VAULT is the stop condition.
+    if (await getVaultByExactName(db, effectiveName)) {
+      throw new VaultAlreadyExistsError(effectiveName);
+    }
 
     // Resolve --parent <name> into the FK-compatible Uint8Array bytes that
     // scaffold/init writes into vault.yon's @VAULT parent_vault field. Any
@@ -273,7 +314,7 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
 
     federationSelfHealed = await maybeSelfHealFederation(opts, db);
 
-    // D31 (Brief A) — regenerate the derived pod manifest from the now-populated
+    // (Brief A) — regenerate the derived pod manifest from the now-populated
     // registry so `pod.yon` reflects this just-registered vault. Runs LAST, after
     // the vault + mesh + federation_state rows have landed. Non-fatal + skipped
     // when the pod isn't initialised (no federation_state yet). Reuses the open
@@ -283,7 +324,19 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
       federationSelfHealed !== null ? { handle: federationSelfHealed.handle } : {},
     );
 
-    return { ...result, registered: true, federationSelfHealed, meshAssignment };
+    // Read-back guard on top of registration. Re-read the row by rid and
+    // assert the vault is actually present before claiming success — closes
+    // the "reported success without effect" class for the init surface.
+    const committed = await assertVaultRegistered(db, registered.rid);
+
+    return {
+      ...result,
+      registered: true,
+      federationSelfHealed,
+      meshAssignment,
+      committed: committed.verdict,
+      unverifiedNote: committed.unverifiedNote,
+    };
   } finally {
     await closeRegistry(db);
   }
@@ -336,22 +389,23 @@ async function maybeAssignHomeMesh(
 
   const normalizedName = `${resolvedMeshName}/${resolvedVaultLeaf}`;
 
-  // Look up the mesh. If absent: auto-create ONLY for the autoMeshName
-  // (the safe default = `personal`). For any other namespace, surface a
-  // structured error so the handler explicitly runs `lyt mesh init <owner>`
-  // and chooses push-target semantics intentionally.
+  // 0.9.4 (3c) — CREATE-IF-MISSING, uniform across every mesh name.
+  // The old `personal`-only gate (and the HomeMeshNotFoundError refusal for any
+  // other namespace) is dropped: `vault init company/x` auto-creates `company`
+  // if absent, exactly as a bare init auto-creates `personal`. Push semantics
+  // are explicit — a `--push-to <handle>` makes the new mesh a SHARING mesh;
+  // without it the mesh is local-only (the prior personal default).
   let meshRow = await getMeshByName(db, resolvedMeshName);
   let meshAutoCreated = false;
 
   if (meshRow === null) {
-    if (resolvedMeshName !== autoMeshName) {
-      throw new HomeMeshNotFoundError(resolvedMeshName);
-    }
-    // Auto-create the personal mesh via in-process meshInitFlow. --no-push
-    // by default; gated on `pushOnSelfHeal`.
+    const pushTo = meshSelfHeal.pushTo;
+    const wantsPush =
+      (pushTo !== undefined && pushTo.length > 0) || meshSelfHeal.pushOnSelfHeal === true;
     const meshResult = await meshInitFlow({
       name: resolvedMeshName,
-      noPush: meshSelfHeal.pushOnSelfHeal !== true,
+      noPush: !wantsPush,
+      ...(pushTo !== undefined && pushTo.length > 0 ? { pushTo } : {}),
       // Open-once seam (A.4): thread the open registry so mesh-init reuses it
       // instead of opening a 2nd connection (nested-open SQLITE_BUSY risk).
       db,
@@ -371,7 +425,7 @@ async function maybeAssignHomeMesh(
   // post-scaffold.
   let mainVaultPath: string | null = null;
   if (meshRow.mainVaultRid !== null) {
-    const mainVault = await getVaultByName(db, `${meshRow.name}/main`);
+    const mainVault = await getVaultByExactName(db, `${meshRow.name}/main`);
     if (mainVault !== null) mainVaultPath = mainVault.path;
   }
   if (mainVaultPath === null) {

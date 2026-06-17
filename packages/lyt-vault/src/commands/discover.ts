@@ -31,7 +31,7 @@ import {
 import { getHandleFromIdentity } from "../util/identity.js";
 import { withSpinner } from "../util/spinner.js";
 
-// v1.C.3 — `lyt discover` top-level CLI verb (meta-CLI level per OD-1).
+// v1.C.3 — `lyt discover` top-level CLI verb (meta-CLI level per the ratified default).
 //
 // Read-only walk of the user's GH-accessible repos; clusters discovered
 // Lyt vaults by `@VAULT_HOME_MESH.mesh_name` and surfaces per-cluster
@@ -41,10 +41,10 @@ import { withSpinner } from "../util/spinner.js";
 //
 // Lives at the meta-CLI top level — registered via this builder; the
 // meta-CLI in `packages/lyt/src/cli.ts` calls `program.addCommand
-// (buildDiscoverCommand())` per OD-1 (federation-design §6:249 lists
+// (buildDiscoverCommand())` per the ratified default (federation-design §6:249 lists
 // `lyt discover` at the top level next to `lyt init`).
 //
-// Structured error contract (per OD-13 default):
+// Structured error contract (per the ratified default):
 // exit 0 discover ran cleanly (regardless of cluster count)
 // exit 1 gh-unavailable
 // exit 3 non-TTY under --auto without resolvable defaults (Commit 3)

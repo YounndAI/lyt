@@ -65,7 +65,7 @@ export async function forgetVaultFlow(
       }
       result = { vault, tombstoned: false, removedKnownPath };
     }
-    // D31 (Brief A) — forget mutates the registry's vault set; regenerate the
+    // (Brief A) — forget mutates the registry's vault set; regenerate the
     // derived pod manifest so the removed vault drops out of pod.yon. Non-fatal;
     // reuses the open registry.
     await regeneratePodManifestNonFatal(db);
