@@ -22,10 +22,12 @@
 // SPLIT) via the existing `insertProvenance` helper. YON failure is fatal;
 // .db failure is logged + non-fatal.
 
+import { existsSync, readdirSync, statSync } from "node:fs";
 import type { Client } from "@libsql/client";
 import { join } from "node:path";
 
 import { newUuidv7Bytes } from "../util/uuid7.js";
+import { parseLedgerFile, walkLedger, type LedgerRecord } from "../yon/ledger-read.js";
 import { recordToLedger } from "./ledger-write-generic.js";
 import {
   insertProvenance,
@@ -39,6 +41,9 @@ export interface RecordProvenanceArgs extends InsertProvenanceArgs {
   // (`automator:metadata-filler/v0.1.0` etc.) and survives into the
   // libSQL `provenance.src` column.
   stampSrc: string;
+  // Test seam — override the writer id (defaults to getWriterId()).
+  // Determines which per-writerId shard file this record lands in.
+  writerId?: string;
 }
 
 export interface RecordProvenanceResult {
@@ -48,8 +53,58 @@ export interface RecordProvenanceResult {
   cacheInserted: boolean;
 }
 
+// Slice 2b: the provenance shard DIRECTORY.
+// New writes land in `<dir>/<writerId>.yon`; the legacy flat `provenance.yon`
+// is walked as a synthetic "legacy" shard on read (see walkAllProvenanceShards).
+export function getProvenanceLedgerDir(vaultPath: string): string {
+  return join(vaultPath, ".lyt", "ledgers", "provenance");
+}
+
+// Returns the LEGACY single-file path `<vault>/.lyt/ledgers/provenance.yon`.
+// @deprecated New writes use the per-writerId shard (Slice 2b).
 export function getProvenanceLedgerPath(vaultPath: string): string {
   return join(vaultPath, ".lyt", "ledgers", "provenance.yon");
+}
+
+// Enumerate the writerId shard names present under the provenance shard directory.
+// Mirrors listAuditShards in audit-write.ts.
+export function listProvenanceShards(vaultPath: string): string[] {
+  const dir = getProvenanceLedgerDir(vaultPath);
+  if (!existsSync(dir) || !safeIsDir(dir)) return [];
+  const names = new Set<string>();
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (safeIsDir(full)) {
+      names.add(entry);
+    } else if (entry.endsWith(".yon")) {
+      names.add(entry.replace(/\.yon$/, ""));
+    }
+  }
+  return [...names].sort();
+}
+
+// Walk ALL provenance records across every shard + the legacy flat file.
+// Mirrors walkAllAuditShards in audit-write.ts.
+export function walkAllProvenanceShards(vaultPath: string): LedgerRecord[] {
+  const shardDir = getProvenanceLedgerDir(vaultPath);
+  const out: LedgerRecord[] = [];
+  for (const writerId of listProvenanceShards(vaultPath)) {
+    out.push(...walkLedger(shardDir, writerId));
+  }
+  // Legacy flat file read-tolerance.
+  const legacyPath = getProvenanceLedgerPath(vaultPath);
+  if (existsSync(legacyPath)) {
+    out.push(...parseLedgerFile(legacyPath));
+  }
+  return out;
+}
+
+function safeIsDir(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // v1.A.3 (CR-2): body delegates to recordToLedger. Optional-field
@@ -87,6 +142,7 @@ export async function recordProvenance(
     stampSrc: args.stampSrc,
     ts: tsIso,
     insertCache: (client) => insertProvenance(client, args),
+    writerId: args.writerId,
   });
 }
 

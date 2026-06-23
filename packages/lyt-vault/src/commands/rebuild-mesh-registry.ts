@@ -48,7 +48,7 @@ interface RebuildMeshRegistryCliOpts {
 export function buildRebuildMeshRegistryCommand(): Command {
   return new Command("rebuild-registry")
     .description(
-      "v1.B.2: rebuild per-machine mesh registry tables (meshes, mesh_vaults, mesh_edges, mesh_subscriptions) from each registered mesh's main vault `.lyt/mesh.yon` SoT (per Lock 0.2). Per-mesh transactions; parse errors per-mesh skip-and-warn.",
+      "Rebuild per-machine mesh registry tables (meshes, mesh_vaults, mesh_edges, mesh_subscriptions) from each registered mesh's main vault `.lyt/mesh.yon` SoT. Per-mesh transactions; parse errors per-mesh skip-and-warn.",
     )
     .option(
       "--mesh <name>",

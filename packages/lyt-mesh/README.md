@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt-mesh` is the **mesh layer** of [Lyt™](https://github.com/YounndAI/lyt) — the operations that span multiple markdown vaults. A **mesh** is a named group of vaults with declared edges between them: your personal vaults, a team's shared vaults, an organization's knowledge base, or a public mesh anyone can subscribe to. Where [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault) owns the single-vault primitive, this package owns the graph: cloning a whole owner's vault set onto a new machine, subscribing to vaults from other meshes, validating the declared topology, rolling up activity across edges, and standing up a fresh multi-vault mesh from one declarative [YON](https://yon.younndai.com) manifest.
+`@younndai/lyt-mesh` is the **mesh layer** of [Lyt™](https://github.com/YounndAI/lyt) — the operations that span multiple markdown vaults. A **mesh** is a named group of vaults with declared edges between them: your personal vaults, a team's shared vaults, an organization's knowledge base, or a public mesh anyone can subscribe to. Where [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault) owns the single-vault primitive, this package owns the graph: cloning a whole owner's vault set onto a new machine, subscribing to vaults from other meshes, validating the declared topology, and rolling up activity across edges.
 
 Meshes connect the way email does — independent vaults that interoperate, publishers never see subscribers, and there is no central server. Everything stays markdown-in-Git, so a mesh is just a set of git repos with a machine-readable shape an AI agent can traverse: subscribe to a public knowledge mesh and your agent reads its content directly, ranked alongside your own notes.
 
@@ -45,37 +45,19 @@ lyt mesh status                          # graph view of all registered vaults
 lyt mesh list [--json]                   # every mesh on this machine
 lyt mesh info <mesh> [--remote]          # one mesh's members + metadata (local or via gh)
 
-lyt mesh subscribe <vault-url> --to-mesh <mesh>
+lyt mesh subscribe --vault <mesh>/<vault> --from-mesh <mesh>
                                          # clone-on-subscribe a vault from another mesh;
                                          # subscribed content joins mesh-scoped search
 
-lyt mesh clone-all --owner <name>        # idempotent clone-or-pull of every vault owned
-                                         # by <name> — stand up a machine in one verb
+lyt mesh clone-all [--source <name>] [--dry-run]
+                                         # idempotent clone-or-pull of every configured
+                                         # vault source — stand up a machine in one verb
 
 lyt mesh validate                        # parses every vault.yon; reports broken edges,
                                          # tombstone collisions, and missing parents
 
 lyt mesh add-edge --parent <a> --child <b>   # declare a rollup edge between vaults
 lyt mesh rebuild-rollup <mesh>               # recompute cross-vault activity rollups
-
-lyt mesh init --from <manifest.yon> [--dry-run] [--no-push]
-                                         # bulk-init a whole mesh from a YON manifest
-```
-
-Pre-init validation surfaces every error at once (duplicate names, missing parents, cycles, GitHub-org accessibility); init runs in topological order, parents before children.
-
-## Declarative mesh manifests
-
-Describe a whole mesh in one YON file — readable by humans and agents alike:
-
-```yon
-@MESH name="cats-inc" | desc="CATS Inc internal mesh" | gh-org="allemaar" | gh-prefix="cats-"
-
-@VAULT name="cats-master"      | desc="CATS Inc top-level vault" | tier="L0"
-@VAULT name="cats-engineering" | desc="Engineering department"   | tier="L1" | parent="cats-master"
-@VAULT name="cats-eng-auth"    | desc="Auth team"                | tier="L2" | parent="cats-engineering"
-
-@SHARE_WITH a="cats-engineering" | b="cats-design"
 ```
 
 ## Key features

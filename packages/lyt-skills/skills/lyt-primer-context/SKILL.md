@@ -1,7 +1,7 @@
 ---
 name: lyt-primer-context
 description: >
-  Prime an agent with Lyt-scoped context — for a vault, a mesh, or the whole pod — by composing `lyt primer` (top keywords + active arcs + recent activity + top lanes) and `lyt vault info --json` (writable status for vault-scope). Trigger when the user runs /lyt-primer-context, or says "prime me for X", "give me context on this vault", "what's been happening in my pod lately", "what arcs are active in mesh Y", "give the agent context before X", or similar phrasing on a scope they want surfaced for agent priming. Wraps `lyt primer` (v1.D.4) + `lyt vault info --json` (v1.G.2 6-reason writable contract) — composes both into an agent-facing summary. Read-only; pairs with /lyt-search (query-driven recall) and /lyt-capture (write).
+  Prime an agent with Lyt-scoped context — for a vault, a mesh, or the whole pod — by composing `lyt primer` (top keywords + active arcs + recent activity + top lanes) and `lyt vault info --json` (writable status for vault-scope). Trigger when the user runs /lyt-primer-context, or says "prime me for X", "give me context on this vault", "what's been happening in my pod lately", "what arcs are active in mesh Y", "give the agent context before X", or similar phrasing on a scope they want surfaced for agent priming. Wraps `lyt primer` + `lyt vault info --json` (6-reason writable contract) — composes both into an agent-facing summary. Read-only; pairs with /lyt-search (query-driven recall) and /lyt-capture (write).
 visibility: public
 lyt-version: 0.6.0
 capabilities: [read]
@@ -13,10 +13,10 @@ requires_writable_vault: false
 
 Prime an agent with Lyt-scoped context for a **vault**, a **mesh**, or the whole **pod** by composing two CLI verbs:
 
-1. `lyt primer --scope <vault|mesh|federation> [--target <name>] --json --dry-run` (shipped v1.D.4) — aggregates top keywords, active arcs, recent activity, and top lanes across the scope into a Lock 0.3 stable-key-ordered JSON payload (including the full primer markdown body).
-2. `lyt vault info <name> --json` (shipped v1.G.2; 6-reason writable contract) — only for vault-scope priming, fetches `writable` + `writableDetermination` so the skill can surface a capability hint to the agent ("you can /lyt-capture here" vs reason-specific guidance).
+1. `lyt primer --scope <vault|mesh|federation> [--target <name>] --json --dry-run` — aggregates top keywords, active arcs, recent activity, and top lanes across the scope into a stable, deterministically key-ordered JSON payload (including the full primer markdown body).
+2. `lyt vault info <name> --json` (6-reason writable contract) — only for vault-scope priming, fetches `writable` + `writableDetermination` so the skill can surface a capability hint to the agent ("you can /lyt-capture here" vs reason-specific guidance).
 
-The skill is pure prose around two existing CLI verbs — there is no new CLI verb, no new helper, no lyt-vault change. The skill READS; it does not write (except the CLI's atomic primer-file write on non-dry-run, which is opt-in per Phase 2 the ratified default).
+The skill is pure prose around two existing CLI verbs — there is no new CLI verb, no new helper, no lyt-vault change. The skill READS; it does not write (except the CLI's atomic primer-file write on non-dry-run, which is opt-in per Phase 2's default).
 
 ## When to invoke
 
@@ -42,9 +42,9 @@ The `lyt primer` verb requires `--scope` and rejects ambiguity. Pick by the user
 
 **Resolve names before passing them.** Don't guess at mesh/vault names — when the user names one:
 
-1. Run `lyt vault list --json` (vaults) or `lyt mesh list --json` (meshes) first. `lyt mesh list` is the canonical mesh-enumeration verb (per `packages/lyt-vault/src/commands/mesh.ts:32`); both verbs emit Lock 0.3 stable-key-ordered JSON on `--json`.
+1. Run `lyt vault list --json` (vaults) or `lyt mesh list --json` (meshes) first. `lyt mesh list` is the canonical mesh-enumeration verb; both verbs emit stable, deterministically key-ordered JSON on `--json`.
 2. Match the user's term to the listed names (exact, then case-insensitive, then prefix).
-3. **Reject any resolved name that begins with `-` or `--`** before passing it to `--target <name>` — closes the flag-injection surface the same way lyt-sync (Phase 1) and lyt-search (Phase 1) do (family: G.2 CR-1 gh-flag-injection). Vault and mesh names are user-controlled at vault-init / mesh-create time; a vault literally named `--evil` would otherwise smuggle a flag-shaped token into the verb's argv.
+3. **Reject any resolved name that begins with `-` or `--`** before passing it to `--target <name>` — closes the flag-injection surface the same way lyt-sync (Phase 1) and lyt-search (Phase 1) do (the gh-flag-injection defense family). Vault and mesh names are user-controlled at vault-init / mesh-create time; a vault literally named `--evil` would otherwise smuggle a flag-shaped token into the verb's argv.
 4. If no match (or the only match is `--`-leading), tell the user the available names and stop — do not invent a name.
 
 The `--scope federation` invocation MUST NOT pass `--target` — the CLI ignores it for federation scope but it's noise; only pass `--target` for vault/mesh scopes.
@@ -68,12 +68,12 @@ Key rules:
 - `--scope` is **mandatory** (CLI rejects with `error: "invalid-scope"`, exit 1, if missing or unrecognised). The skill always passes one; default to `federation` when no user signal.
 - `--target <name>` is **required** for `--scope vault` and `--scope mesh`; **omitted** for `--scope federation`. CLI rejects missing target with `error: "missing-target"`, exit 1.
 - `--json` is **mandatory** for this skill. Without it, the CLI prints human-readable output that the skill can't reliably parse.
-- `--dry-run` is the **default for this skill** (ratified default). The CLI's non-dry-run mode atomically writes the primer markdown to `<vault>/.lyt/primers/{scope}-primer.md`; the skill READS the result for agent priming and does not need that persisted file as a side-effect of every invocation. Pass `--dry-run` unless the user explicitly asks to regenerate the on-disk primer ("refresh the primer file", "regenerate the on-disk primer" — then omit `--dry-run`).
+- `--dry-run` is the **default for this skill**. The CLI's non-dry-run mode atomically writes the primer markdown to `<vault>/.lyt/primers/{scope}-primer.md`; the skill READS the result for agent priming and does not need that persisted file as a side-effect of every invocation. Pass `--dry-run` unless the user explicitly asks to regenerate the on-disk primer ("refresh the primer file", "regenerate the on-disk primer" — then omit `--dry-run`).
 - `--top-keywords <n>`, `--top-arcs <n>`, `--provenance-days <n>` are advanced flags. Apply only when the user explicitly signals a cap ("top 50 keywords", "last 30 days of activity"); otherwise rely on CLI defaults (20 / 10 / 7).
 
 ## Phase 3 — Parse the JSON output
 
-The CLI emits Lock 0.3 stable-key-ordered JSON on stdout (exit 0 on success). The actual emitted shape (per `packages/lyt/src/commands/primer.ts:174-215`):
+The CLI emits stable, deterministically key-ordered JSON on stdout (exit 0 on success). The emitted shape:
 
 ```json
 {
@@ -124,7 +124,7 @@ Failure modes (CLI emits to stderr; exit non-zero):
 
 ## Phase 4 — Fetch writable status (vault-scope ONLY)
 
-**Skip this phase for `--scope mesh` and `--scope federation`** — those scopes span multiple vaults and there's no single writable status to surface (per the ratified default). For mesh/federation, jump to Phase 5 and present the primer summary alone. The agent can re-invoke `/lyt-primer-context` per-vault with `--scope vault --target <name>` if it needs write-action guidance for a specific vault.
+**Skip this phase for `--scope mesh` and `--scope federation`** — those scopes span multiple vaults and there's no single writable status to surface. For mesh/federation, jump to Phase 5 and present the primer summary alone. The agent can re-invoke `/lyt-primer-context` per-vault with `--scope vault --target <name>` if it needs write-action guidance for a specific vault.
 
 For `--scope vault --target <name>`, invoke `lyt vault info <name> --json` via Bash (argv-array form):
 
@@ -139,7 +139,7 @@ lyt vault info <name> --json
 spawnSync("lyt", ["vault", "info", vaultName, "--json"]);
 ```
 
-Parse the `vault.writable` + `vault.writableDetermination` fields per the v1.G.2 read-only-awareness contract (see `packages/lyt-vault/src/flows/writability.ts:42-48`). The verdict is tri-state (`true | false | "unknown"`); the determination is one of **6 reasons** the skill must branch on explicitly in Phase 5.
+Parse the `vault.writable` + `vault.writableDetermination` fields per the read-only-awareness contract. The verdict is tri-state (`true | false | "unknown"`); the determination is one of **6 reasons** the skill must branch on explicitly in Phase 5.
 
 ## Phase 5 — Synthesize agent-facing context
 
@@ -171,7 +171,7 @@ Render the agent-priming output as a markdown block. Layout:
 
 ### Capability hint — 6-reason writable contract (vault-scope only)
 
-For vault-scope invocations, surface a reason-specific capability hint based on `writable` + `writableDetermination`. The actual reason strings emitted by `vault info --json` (per `packages/lyt-vault/src/flows/writability.ts`) are listed in the **emitted name** column. The **semantic name** column gives the human-readable synonym some briefs use; the SKILL.md handler-facing prose uses the semantic name, but the comparison MUST be against the emitted name.
+For vault-scope invocations, surface a reason-specific capability hint based on `writable` + `writableDetermination`. The actual reason strings emitted by `vault info --json` are listed in the **emitted name** column. The **semantic name** column gives the human-readable synonym; the SKILL.md handler-facing prose uses the semantic name, but the comparison MUST be against the emitted name.
 
 | Emitted name (writableDetermination) | Semantic name               | writable    | Phase 5 capability hint                                                                                                                                                                                                                           |
 | ------------------------------------ | --------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -182,20 +182,20 @@ For vault-scope invocations, surface a reason-specific capability hint based on 
 | `no-remote`                          | (no-remote)                 | `"unknown"` | ⚠ Writable status unknown — vault has no git remote configured. Configure with `gh repo create` or `git remote add origin <url>`.                                                                                                                 |
 | `orphan-vault`                       | (orphan)                    | `"unknown"` | ⚠ Writable status unknown — vault has no mesh role (orphan). Heal: `lyt repair --apply` (fixes the adopt mesh-link drift, no args needed); a truly un-adopted vault: `lyt repair --target <vault> --apply --mesh <mesh>`. `lyt doctor` diagnoses. |
 
-**Note on emitted vs semantic names.** The brief that authored this skill (v1.G.7 handoff) lists `home-pushable-true` / `home-not-pushable-false` as semantic aliases for the first two reasons. The actual strings emitted by `writability.ts` are `gh-viewerCanPush-true` / `gh-viewerCanPush-false`. The semantic names are kept here as documentation aliases so future renames of the underlying enum (e.g. when the gh-probe naming hardens in v1.G.2.1) don't silently break the skill prose. The 4 unchanged reason strings (`subscriber-default-false`, `gh-unavailable`, `no-remote`, `orphan-vault`) match in both surfaces. **Comparison code MUST use the emitted name; handler-facing prose uses either.**
+**Note on emitted vs semantic names.** The semantic names `home-pushable-true` / `home-not-pushable-false` are documentation aliases for the first two emitted strings `gh-viewerCanPush-true` / `gh-viewerCanPush-false`, kept so future renames of the underlying enum don't silently break the skill prose. The 4 other reason strings (`subscriber-default-false`, `gh-unavailable`, `no-remote`, `orphan-vault`) are identical in both surfaces. **Comparison code MUST use the emitted name; handler-facing prose uses either.**
 
 ## Rules
 
 - **MUST pass `--scope`, `--target` (if applicable), and `--json` as separate argv arguments**, not template-interpolated into a shell command string. Mesh/vault names CAN contain shell metacharacters (backticks, `$()`, `;`, `&&`) — those MUST be conveyed as one argv element per name.
 - **MUST pass `--json`** on every invocation. Human-readable output is not a contract this skill parses.
-- **MUST pass `--dry-run`** UNLESS the user explicitly asks to regenerate the on-disk primer file (the ratified default counter-case). Otherwise every priming call pollutes `<vault>/.lyt/primers/`.
+- **MUST pass `--dry-run`** UNLESS the user explicitly asks to regenerate the on-disk primer file. Otherwise every priming call pollutes `<vault>/.lyt/primers/`.
 - **MUST resolve mesh/vault names via `lyt vault list --json` or `lyt mesh list --json` before passing `--target`.** Do not guess names.
-- **MUST reject `--`-leading names** from `lyt vault list --json` / `lyt mesh list --json` results before passing them to `--target` (G.6 inherited defense; family: G.2 CR-1 gh-flag-injection).
+- **MUST reject `--`-leading names** from `lyt vault list --json` / `lyt mesh list --json` results before passing them to `--target` (the gh-flag-injection defense family).
 - **MUST branch on all 6 writable reasons in Phase 5 (vault-scope).** Each has a distinct capability hint; collapsing them into a generic "can't write" message loses semantic signal the agent needs to recover.
 - **MUST NOT call `lyt primer` without `--scope`.** The CLI rejects with `error: "invalid-scope"`, exit 1.
 - **MUST NOT call `lyt primer` with `--scope vault` or `--scope mesh` without `--target`.** The CLI rejects with `error: "missing-target"`, exit 1.
-- **MUST NOT call `lyt vault info` for `--scope mesh` or `--scope federation`.** Phase 4 is skipped for those scopes (the ratified default); the primer summary alone is the output.
-- **MUST NOT modify or write any file.** This is a read-only skill (`requires_writable_vault: false`). The CLI's atomic primer-file write on non-dry-run is opt-in via the the ratified default counter-case; the skill itself never writes.
+- **MUST NOT call `lyt vault info` for `--scope mesh` or `--scope federation`.** Phase 4 is skipped for those scopes; the primer summary alone is the output.
+- **MUST NOT modify or write any file.** This is a read-only skill (`requires_writable_vault: false`). The CLI's atomic primer-file write on non-dry-run is opt-in only when the user explicitly asks; the skill itself never writes.
 - **MUST NOT compose shell command strings.** Argv-array always (parity with lyt-sync + lyt-search).
 - **MUST NOT silently degrade `writable === "unknown"` to a "writable" hint.** Surface the reason-specific guidance.
 

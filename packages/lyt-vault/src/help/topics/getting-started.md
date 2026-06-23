@@ -7,27 +7,29 @@ Five minutes from a fresh machine to a working vault.
 - **Node.js ≥ 20.9** and **npm ≥ 10**.
 - **Git ≥ 2.40**.
 - **GitHub CLI (`gh`) ≥ 2.50**, authenticated via `gh auth login`. Optional, but
-  required for `lyt vault sync-metadata` and any GitHub-touching operation.
+  required for sync, push, sharing, and any GitHub-touching operation.
 
 ## 1. Install Lyt
 
-Today (pre-publish), Lyt is installed from the repo:
-
 ```bash
-git clone https://github.com/YounndAI/lyt
-cd lyt
-npm install
-npx turbo run build
-# Use packages/lyt-vault/dist/cli.js as `lyt` during dev.
+npm install -g @younndai/lyt@alpha
 ```
 
-After Phase 8 ships the npm publish:
+There is no `latest` release yet — the `alpha` dist-tag is required.
+
+## 2. Bootstrap with the wizard
 
 ```bash
-npm install -g @younndai/lyt
+lyt init
 ```
 
-## 2. Create your first vault
+`lyt init` is the canonical bootstrap. It detects your environment, runs
+`gh auth login` if needed, installs the Lyt skills and agent manual, probes
+GitHub for an existing pod on your handle (cross-machine adopt-detect), creates
+your `personal` mesh and first vault, forges Your Pod (`{handle}/lyt-pod`), and
+captures a welcome note. Pass `--dry-run` to preview every step without writing.
+
+## 3. Or create a vault by hand
 
 ```bash
 lyt vault init alex/main --description "Alex's master vault"
@@ -50,45 +52,42 @@ single conventional commit with the scaffold files.
 `lyt vault init alex/main` is **create-if-missing**: it creates the `alex` mesh
 if it doesn't exist, then the vault. A bare `lyt vault init notes` lands in your
 `personal` mesh. Re-running `init` on a vault that already exists stops and tells
-you (it never silently re-scaffolds). Once created, every verb can address the
-vault by `alex/main`, by the bare leaf `main` (when unambiguous), or by an alias
-(`lyt alias <name> alex/main`).
+you (it never silently re-scaffolds).
 
-## 3. Open in Obsidian
+A vault's identity is its `rid` (a UUIDv7); the `{mesh}/{vault}` name is computed
+from its home mesh and leaf. Every verb can address the vault by `alex/main`, by
+the bare leaf `main` (when unambiguous), or by an alias (`lyt alias home alex/main`).
+
+## 4. Capture and find knowledge
+
+```bash
+lyt capture "an idea worth keeping"
+lyt search "idea"            # ranked across your whole pod
+```
+
+`lyt search` cascades arc → lane → full-text → edge matches, ranked by
+confidence, and (when the embedding model is present) fuses in on-device semantic
+matches. See `lyt help commands` for scope flags.
+
+## 5. Open in Obsidian
 
 ```bash
 lyt vault open alex/main
 ```
 
-(Or open `~/lyt/vaults/alex/main` in Obsidian manually.)
+(Or open `~/lyt/vaults/alex/main` in Obsidian — or any markdown editor — manually.)
 
-## 4. Add a second vault and connect them
-
-```bash
-lyt vault init alex/personal --description "Personal subtree" --parent <rid-of-alex/main>
-```
-
-Edges already declared by `--parent` automatically regenerate the child's
-`.lyt/mesh-context.md`.
-
-For peer (sibling) edges:
+## 6. See your pod
 
 ```bash
-lyt vault add-edge alex/personal --peer <rid-of-alex/business> --edge share_with
+lyt vault list               # every registered vault (computed {mesh}/{vault} names)
+lyt vault info alex/main      # status, mesh, writability, origin coordinate
+lyt mesh status               # the federation graph
 ```
-
-## 5. See the mesh
-
-```bash
-lyt vault list
-lyt vault info alex/main
-```
-
-(`lyt mesh status` ships in `@younndai/lyt-mesh`; not bundled with the meta
-package yet.)
 
 ## Next steps
 
 - `lyt help metadata` — descriptions + GitHub topics + priming files.
-- `lyt help mesh` — how the mesh is structured.
+- `lyt help mesh` — how meshes are structured.
 - `lyt help agents` — driving Lyt with AI agents.
+- `lyt help commands` — the full command surface.

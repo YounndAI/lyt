@@ -20,12 +20,9 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { listEdgesByRefMesh } from "../registry/mesh-edges-repo.js";
-import { listSubscriptionsForMesh } from "../registry/mesh-subscriptions-repo.js";
-import { getMeshByName, getMeshByRid, listMeshes, type MeshRow } from "../registry/meshes-repo.js";
+import { getMeshByName, listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { getVaultByRid } from "../registry/repo.js";
 import type { CheckResult } from "./doctor.js";
-import { ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
 
 // v1.C.1 — `lyt mesh validate [--mesh <name>] [--json]`.
@@ -105,19 +102,23 @@ export interface MeshFileFinding {
   remediation: string;
 }
 
-// v1.C.2 — sibling-shape per the ratified default (lower coupling than widening
-// MeshEdgeFinding.reason enum + the discriminating union). A
-// MeshSubscriptionFinding describes a broken @MESH_SUBSCRIPTION row in
-// the SUBSCRIBING mesh's mesh.yon: the subscribed vault no longer
-// resolves OR the external mesh isn't registered OR the libSQL cache
-// row drifted from the SoT.
+// v1.C.2 — sibling-shape per the ratified default. A MeshSubscriptionFinding
+// described a broken @MESH_SUBSCRIPTION row in a subscribing mesh's mesh.yon.
+//
+// Fed-v2 Layer-1 (Phase D1c): subscription validation is RETIRED. mesh.yon is
+// no longer the subscription SoT (no-legacy, design §5) — subscriptions
+// live in the per-writer ledger reconstituted into mesh_subscriptions by
+// `rebuildFederationCacheFlow`, so there is no mesh.yon-vs-cache subscription
+// drift to validate. The type + the `subscriptionFindings` / `subscriptionsValidated`
+// result fields are RETAINED (now always empty / 0) for JSON-shape stability of
+// existing consumers and because `repair.ts` still imports the type for its
+// (now-dormant) reason union. The `external_mesh_*` finding fields are dropped
+// in lockstep with the cache column-drop.
 export interface MeshSubscriptionFinding {
-  // The mesh that recorded the @MESH_SUBSCRIPTION row (the subscriber).
+  // The mesh that recorded the subscription (the subscriber).
   meshName: string;
   meshRidHex: string;
   externalVaultRidHex: string;
-  externalMeshRidHex: string;
-  externalMeshName: string;
   reason:
     | "external-vault-not-registered"
     | "external-mesh-not-registered"
@@ -184,15 +185,15 @@ export async function validateMeshEdgesFlow(
     const subscriptionFindings: MeshSubscriptionFinding[] = [];
     const fileFindings: MeshFileFinding[] = [];
     let edgesValidated = 0;
-    let subscriptionsValidated = 0;
+    // Fed-v2 D1c: subscription validation retired (mesh.yon no longer the
+    // subscription SoT). subscriptionFindings stays empty + subscriptionsValidated
+    // stays 0 for JSON-shape stability.
+    const subscriptionsValidated = 0;
 
     for (const mesh of targets) {
-      const meshEdgeChecks = await validateOneMesh(db, mesh, findings, fileFindings);
+      const meshEdgeChecks = await validateOneMesh(db, mesh, fileFindings);
       for (const c of meshEdgeChecks.checks) checks.push(c);
       edgesValidated += meshEdgeChecks.edgesSeen;
-      const meshSubChecks = await validateOneMeshSubscriptions(db, mesh, subscriptionFindings);
-      for (const c of meshSubChecks.checks) checks.push(c);
-      subscriptionsValidated += meshSubChecks.subscriptionsSeen;
     }
 
     const warnings = checks.filter((c) => c.status === "warn").length;
@@ -231,7 +232,6 @@ async function resolveTargets(db: Client, meshName?: string): Promise<MeshRow[]>
 async function validateOneMesh(
   db: Client,
   mesh: MeshRow,
-  findings: MeshEdgeFinding[],
   fileFindings: MeshFileFinding[],
 ): Promise<{ checks: CheckResult[]; edgesSeen: number }> {
   // Resolve the mesh's main vault to locate its mesh.yon.
@@ -272,9 +272,18 @@ async function validateOneMesh(
     };
   }
 
-  let parsed;
+  // Slice 2a — the @MESH_EDGE edge-validation block was DELETED. mesh.yon no
+  // longer carries edges (the per-writer mesh-edge ledger is the SoT,
+  // reconstituted into the mesh_edges cache by rebuildFederationCacheFlow), so
+  // there is no mesh.yon-row resolution check and no mesh.yon-vs-cache edge-drift
+  // check to run. We still PARSE mesh.yon (the parse-error → MeshFileFinding path
+  // is retained — it's a file-level integrity check, not an edge check). On a
+  // clean parse we emit a `pass` row and `edgesSeen: 0`. (`findings` stays empty,
+  // mirroring the D1c `subscriptionFindings` retirement.) A later slice may add
+  // ledger-edge validation; per the build-stop addendum this is a DELETE, not a
+  // re-point.
   try {
-    parsed = parseMeshYon(readFileSync(meshYonPath, "utf8"));
+    parseMeshYon(readFileSync(meshYonPath, "utf8"));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // v1.C.4 — emit a MeshFileFinding sibling alongside the CheckResult
@@ -312,407 +321,17 @@ async function validateOneMesh(
     };
   }
 
-  const checks: CheckResult[] = [];
-
-  if (parsed.edges.length === 0) {
-    checks.push({
-      id: `mesh.edges.validate:${mesh.name}`,
-      group: "mesh-validate",
-      label: `mesh.yon edges (${mesh.name})`,
-      status: "pass",
-      message: `mesh '${mesh.name}' has 0 edges; nothing to validate`,
-    });
-    return { checks, edgesSeen: 0 };
-  }
-
-  // Per-edge SoT resolution checks.
-  for (const e of parsed.edges) {
-    const refVault = await getVaultByRid(db, e.refVaultRid);
-    if (refVault === null) {
-      const f = buildFinding(
-        mesh,
-        e,
-        "ref-vault-not-registered",
-        `ref_vault_rid not in local registry`,
-        `Run: lyt vault clone <missing-vault-name> OR lyt mesh rebuild-registry`,
-      );
-      findings.push(f);
-      checks.push(findingToCheck(f));
-      continue;
-    }
-    const homeVault = await getVaultByRid(db, e.homeVaultRid);
-    if (homeVault === null) {
-      const f = buildFinding(
-        mesh,
-        e,
-        "home-vault-not-registered",
-        `home_vault_rid not in local registry`,
-        `Run: lyt vault clone <home-vault-name> OR lyt mesh rebuild-registry`,
-      );
-      findings.push(f);
-      checks.push(findingToCheck(f));
-      continue;
-    }
-    const homeMesh = await getMeshByRid(db, e.homeMeshRid);
-    if (homeMesh === null) {
-      const f = buildFinding(
-        mesh,
-        e,
-        "home-mesh-not-registered",
-        `home_mesh_rid not in local registry`,
-        `Run: lyt mesh join <home-mesh-name> --from <gh-target> OR lyt mesh rebuild-registry`,
-      );
-      findings.push(f);
-      checks.push(findingToCheck(f));
-      continue;
-    }
-    // The referenced (child) vault's home mesh main vault directory
-    // must exist on disk per brief Commit 2 spec (c).
-    let homeMeshMainPath: string | null = null;
-    if (homeMesh.mainVaultRid !== null) {
-      const hmv = await getVaultByRid(db, homeMesh.mainVaultRid);
-      if (hmv !== null) homeMeshMainPath = hmv.path;
-    }
-    if (homeMeshMainPath === null || !existsSync(homeMeshMainPath)) {
-      const f = buildFinding(
-        mesh,
-        e,
-        "home-mesh-main-vault-missing-on-disk",
-        `home mesh '${homeMesh.name}' main vault directory missing on disk`,
-        `Run: lyt vault reconnect ${homeMesh.name}/main --path <new> OR lyt mesh rebuild-registry`,
-      );
-      findings.push(f);
-      checks.push(findingToCheck(f));
-      continue;
-    }
-    // This edge resolves cleanly.
-    checks.push({
-      id: edgeCheckId(mesh, e),
-      group: "mesh-validate",
-      label: `edge ${shortHex(e.refVaultRid)} → ${shortHex(e.homeVaultRid)} (${mesh.name})`,
-      status: "pass",
-      message: `edge resolves: ref ${refVault.name} → home ${homeVault.name} (${homeMesh.name})`,
-    });
-  }
-
-  // Cache-drift detection: for each SoT edge, check the cache
-  // contains a row with the same composite key; for each cache row, check
-  // the SoT contains a row with the same composite key.
-  const cacheRows = await listEdgesByRefMesh(db, mesh.rid);
-  for (const e of parsed.edges) {
-    const inCache = cacheRows.some(
-      (r) =>
-        ridsEqual(r.refMeshRid, e.refMeshRid) &&
-        ridsEqual(r.refVaultRid, e.refVaultRid) &&
-        ridsEqual(r.homeMeshRid, e.homeMeshRid) &&
-        ridsEqual(r.homeVaultRid, e.homeVaultRid),
-    );
-    if (!inCache) {
-      const f = buildFinding(
-        mesh,
-        e,
-        "cache-row-missing-for-soT-edge",
-        `SoT edge present but cache row missing (drift)`,
-        `Run: lyt mesh rebuild-registry --mesh ${mesh.name}`,
-      );
-      findings.push(f);
-      checks.push(findingToCheck(f));
-    }
-  }
-  for (const r of cacheRows) {
-    const inSoT = parsed.edges.some(
-      (e) =>
-        ridsEqual(e.refMeshRid, r.refMeshRid) &&
-        ridsEqual(e.refVaultRid, r.refVaultRid) &&
-        ridsEqual(e.homeMeshRid, r.homeMeshRid) &&
-        ridsEqual(e.homeVaultRid, r.homeVaultRid),
-    );
-    if (!inSoT) {
-      const f: MeshEdgeFinding = {
-        refMeshName: mesh.name,
-        refMeshRidHex: uuid7BytesToHex(r.refMeshRid),
-        refVaultRidHex: uuid7BytesToHex(r.refVaultRid),
-        homeMeshRidHex: uuid7BytesToHex(r.homeMeshRid),
-        homeVaultRidHex: uuid7BytesToHex(r.homeVaultRid),
-        kind: "parent",
-        reason: "cache-row-orphaned-no-soT-edge",
-        message: `cache row present but SoT (mesh.yon) has no matching @MESH_EDGE`,
-        remediation: `Run: lyt mesh rebuild-registry --mesh ${mesh.name}`,
-      };
-      findings.push(f);
-      checks.push({
-        id: `${edgeCheckIdFromHexes(mesh.name, f.refVaultRidHex, f.homeVaultRidHex)}:cache-drift`,
+  return {
+    checks: [
+      {
+        id: `mesh.edges.validate:${mesh.name}`,
         group: "mesh-validate",
-        label: `cache-drift (${mesh.name})`,
-        status: "warn",
-        message: f.message,
-        remediation: f.remediation,
-        detail: {
-          refMeshRidHex: f.refMeshRidHex,
-          refVaultRidHex: f.refVaultRidHex,
-          homeMeshRidHex: f.homeMeshRidHex,
-          homeVaultRidHex: f.homeVaultRidHex,
-          reason: f.reason,
-        },
-      });
-    }
-  }
-
-  return { checks, edgesSeen: parsed.edges.length };
-}
-
-function buildFinding(
-  mesh: MeshRow,
-  edge: {
-    refMeshRid: Uint8Array;
-    refVaultRid: Uint8Array;
-    homeMeshRid: Uint8Array;
-    homeVaultRid: Uint8Array;
-    kind: "parent";
-  },
-  reason: MeshEdgeFinding["reason"],
-  message: string,
-  remediation: string,
-): MeshEdgeFinding {
-  return {
-    refMeshName: mesh.name,
-    refMeshRidHex: uuid7BytesToHex(edge.refMeshRid),
-    refVaultRidHex: uuid7BytesToHex(edge.refVaultRid),
-    homeMeshRidHex: uuid7BytesToHex(edge.homeMeshRid),
-    homeVaultRidHex: uuid7BytesToHex(edge.homeVaultRid),
-    kind: edge.kind,
-    reason,
-    message,
-    remediation,
+        label: `mesh.yon (${mesh.name})`,
+        status: "pass",
+        message: `mesh '${mesh.name}' mesh.yon parses; edge validation is ledger-owned (no mesh.yon edge SoT)`,
+      },
+    ],
+    edgesSeen: 0,
   };
 }
 
-function findingToCheck(f: MeshEdgeFinding): CheckResult {
-  return {
-    id: `${edgeCheckIdFromHexes(f.refMeshName, f.refVaultRidHex, f.homeVaultRidHex)}:${f.reason}`,
-    group: "mesh-validate",
-    label: `broken edge (${f.refMeshName})`,
-    status: "warn",
-    message: `${f.message} — edge ${shortHexStr(f.refVaultRidHex)} → ${shortHexStr(f.homeVaultRidHex)}`,
-    remediation: f.remediation,
-    detail: {
-      refMeshRidHex: f.refMeshRidHex,
-      refVaultRidHex: f.refVaultRidHex,
-      homeMeshRidHex: f.homeMeshRidHex,
-      homeVaultRidHex: f.homeVaultRidHex,
-      reason: f.reason,
-    },
-  };
-}
-
-function edgeCheckId(
-  mesh: MeshRow,
-  edge: { refVaultRid: Uint8Array; homeVaultRid: Uint8Array },
-): string {
-  return `mesh.edges.validate:${mesh.name}:${uuid7BytesToHex(edge.refVaultRid)}->${uuid7BytesToHex(edge.homeVaultRid)}`;
-}
-
-function edgeCheckIdFromHexes(meshName: string, refVaultHex: string, homeVaultHex: string): string {
-  return `mesh.edges.validate:${meshName}:${refVaultHex}->${homeVaultHex}`;
-}
-
-function shortHex(b: Uint8Array): string {
-  return shortHexStr(uuid7BytesToHex(b));
-}
-
-function shortHexStr(h: string): string {
-  return h.length > 8 ? `${h.slice(0, 8)}…` : h;
-}
-
-// v1.C.2 — subscription-side walker. Mirrors `validateOneMesh` shape
-// but operates over `MeshDoc.subscriptions` + `mesh_subscriptions`
-// cache rows. Per default the walk lives inside the same flow
-// so `lyt mesh validate` stays the single canonical mesh validator;
-// per the ratified default findings land in a separate `subscriptionFindings`
-// collection (sibling, not widened-enum) to keep MeshEdgeFinding
-// reason-class semantics tight.
-async function validateOneMeshSubscriptions(
-  db: Client,
-  mesh: MeshRow,
-  subscriptionFindings: MeshSubscriptionFinding[],
-): Promise<{ checks: CheckResult[]; subscriptionsSeen: number }> {
-  // Resolve the mesh's main vault to locate its mesh.yon. Edge-walker
-  // already emitted `info` rows for the no-main / no-mesh.yon /
-  // parse-failed cases — we deliberately re-probe + skip silently here
-  // so the JSON output for the subscription leg only emits rows when
-  // there's something subscription-specific to say.
-  let mainVaultPath: string | null = null;
-  if (mesh.mainVaultRid !== null) {
-    const v = await getVaultByRid(db, mesh.mainVaultRid);
-    if (v !== null) mainVaultPath = v.path;
-  }
-  if (mainVaultPath === null || !existsSync(mainVaultPath)) {
-    return { checks: [], subscriptionsSeen: 0 };
-  }
-  const meshYonPath = join(mainVaultPath, ".lyt", "mesh.yon");
-  if (!existsSync(meshYonPath)) {
-    return { checks: [], subscriptionsSeen: 0 };
-  }
-
-  let parsed;
-  try {
-    parsed = parseMeshYon(readFileSync(meshYonPath, "utf8"));
-  } catch {
-    // Edge walker already surfaced the parse failure with full
-    // context + remediation; suppress duplicate emission here.
-    return { checks: [], subscriptionsSeen: 0 };
-  }
-
-  const checks: CheckResult[] = [];
-
-  if (parsed.subscriptions.length === 0) {
-    // No-subscription state is the silent default; the edge walker's
-    // "0 edges; nothing to validate" pass-row covers the per-mesh slot.
-    return { checks, subscriptionsSeen: 0 };
-  }
-
-  // Per-subscription SoT resolution checks.
-  for (const s of parsed.subscriptions) {
-    const extVault = await getVaultByRid(db, s.externalVaultRid);
-    if (extVault === null) {
-      const f = buildSubscriptionFinding(
-        mesh,
-        s,
-        "external-vault-not-registered",
-        `external_vault_rid not in local registry (subscribed vault gone)`,
-        `Run: lyt vault clone ${s.externalMeshName}/<vault-name> OR lyt mesh rebuild-registry`,
-      );
-      subscriptionFindings.push(f);
-      checks.push(subscriptionFindingToCheck(f));
-      continue;
-    }
-    const extMesh = await getMeshByRid(db, s.externalMeshRid);
-    if (extMesh === null) {
-      const f = buildSubscriptionFinding(
-        mesh,
-        s,
-        "external-mesh-not-registered",
-        `external_mesh_rid not in local registry`,
-        `Run: lyt mesh join ${s.externalMeshName} --from <gh-target> OR lyt mesh rebuild-registry`,
-      );
-      subscriptionFindings.push(f);
-      checks.push(subscriptionFindingToCheck(f));
-      continue;
-    }
-    // This subscription resolves cleanly.
-    checks.push({
-      id: subscriptionCheckId(mesh, s),
-      group: "mesh-validate",
-      label: `subscription ${shortHex(s.externalVaultRid)} ← ${mesh.name}`,
-      status: "pass",
-      message: `subscription resolves: ${mesh.name} → ${extVault.name} (${extMesh.name})`,
-    });
-  }
-
-  // Cache-drift detection (same shape as edge cache-drift): for
-  // each SoT subscription, check the cache contains a row with the
-  // same composite (mesh_rid, external_vault_rid) key; for each cache
-  // row, check the SoT contains a matching subscription.
-  const cacheRows = await listSubscriptionsForMesh(db, mesh.rid);
-  for (const s of parsed.subscriptions) {
-    const inCache = cacheRows.some(
-      (r) => ridsEqual(r.meshRid, s.meshRid) && ridsEqual(r.externalVaultRid, s.externalVaultRid),
-    );
-    if (!inCache) {
-      const f = buildSubscriptionFinding(
-        mesh,
-        s,
-        "cache-row-missing-for-soT-subscription",
-        `SoT subscription present but cache row missing (drift)`,
-        `Run: lyt mesh rebuild-registry --mesh ${mesh.name}`,
-      );
-      subscriptionFindings.push(f);
-      checks.push(subscriptionFindingToCheck(f));
-    }
-  }
-  for (const r of cacheRows) {
-    const inSoT = parsed.subscriptions.some(
-      (s) => ridsEqual(s.meshRid, r.meshRid) && ridsEqual(s.externalVaultRid, r.externalVaultRid),
-    );
-    if (!inSoT) {
-      const f: MeshSubscriptionFinding = {
-        meshName: mesh.name,
-        meshRidHex: uuid7BytesToHex(r.meshRid),
-        externalVaultRidHex: uuid7BytesToHex(r.externalVaultRid),
-        externalMeshRidHex: uuid7BytesToHex(r.externalMeshRid),
-        externalMeshName: r.externalMeshName,
-        reason: "cache-row-orphaned-no-soT-subscription",
-        message: `cache row present but SoT (mesh.yon) has no matching @MESH_SUBSCRIPTION`,
-        remediation: `Run: lyt mesh rebuild-registry --mesh ${mesh.name}`,
-      };
-      subscriptionFindings.push(f);
-      checks.push({
-        id: `${subscriptionCheckIdFromHexes(mesh.name, f.externalVaultRidHex)}:cache-drift`,
-        group: "mesh-validate",
-        label: `subscription cache-drift (${mesh.name})`,
-        status: "warn",
-        message: f.message,
-        remediation: f.remediation,
-        detail: {
-          meshRidHex: f.meshRidHex,
-          externalVaultRidHex: f.externalVaultRidHex,
-          externalMeshRidHex: f.externalMeshRidHex,
-          externalMeshName: f.externalMeshName,
-          reason: f.reason,
-        },
-      });
-    }
-  }
-
-  return { checks, subscriptionsSeen: parsed.subscriptions.length };
-}
-
-function buildSubscriptionFinding(
-  mesh: MeshRow,
-  s: {
-    meshRid: Uint8Array;
-    externalVaultRid: Uint8Array;
-    externalMeshRid: Uint8Array;
-    externalMeshName: string;
-  },
-  reason: MeshSubscriptionFinding["reason"],
-  message: string,
-  remediation: string,
-): MeshSubscriptionFinding {
-  return {
-    meshName: mesh.name,
-    meshRidHex: uuid7BytesToHex(s.meshRid),
-    externalVaultRidHex: uuid7BytesToHex(s.externalVaultRid),
-    externalMeshRidHex: uuid7BytesToHex(s.externalMeshRid),
-    externalMeshName: s.externalMeshName,
-    reason,
-    message,
-    remediation,
-  };
-}
-
-function subscriptionFindingToCheck(f: MeshSubscriptionFinding): CheckResult {
-  return {
-    id: `${subscriptionCheckIdFromHexes(f.meshName, f.externalVaultRidHex)}:${f.reason}`,
-    group: "mesh-validate",
-    label: `broken subscription (${f.meshName})`,
-    status: "warn",
-    message: `${f.message} — subscription ${shortHexStr(f.externalVaultRidHex)} → ${f.externalMeshName}`,
-    remediation: f.remediation,
-    detail: {
-      meshRidHex: f.meshRidHex,
-      externalVaultRidHex: f.externalVaultRidHex,
-      externalMeshRidHex: f.externalMeshRidHex,
-      externalMeshName: f.externalMeshName,
-      reason: f.reason,
-    },
-  };
-}
-
-function subscriptionCheckId(mesh: MeshRow, s: { externalVaultRid: Uint8Array }): string {
-  return `mesh.subscriptions.validate:${mesh.name}:${uuid7BytesToHex(s.externalVaultRid)}`;
-}
-
-function subscriptionCheckIdFromHexes(meshName: string, externalVaultHex: string): string {
-  return `mesh.subscriptions.validate:${meshName}:${externalVaultHex}`;
-}

@@ -51,7 +51,7 @@ interface MutateOpts {
 // and unambiguous.
 export function buildFrictionCommand(): Command {
   const cmd = new Command("friction").description(
-    "Capture + triage cross-machine sync friction (arc §10.2-§10.4). Records to per-vault audit_log; `report` summarises the rolling window.",
+    "Capture + triage cross-machine sync friction. Records to per-vault audit_log; `report` summarises the rolling window.",
   );
 
   cmd

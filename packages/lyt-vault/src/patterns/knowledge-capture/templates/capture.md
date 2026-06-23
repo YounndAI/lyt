@@ -12,4 +12,4 @@ meta: {}
 
 # <title>
 
-_(Body content — plain Obsidian-flavored markdown. Use `[[wikilinks]]` for cross-Figment references.)_
+<content>

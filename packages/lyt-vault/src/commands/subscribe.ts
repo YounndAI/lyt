@@ -25,12 +25,12 @@ import {
 
 // v1.C.2 — `lyt mesh subscribe --vault <name> --from-mesh <name> [--json]`.
 //
-// Writes a single @MESH_SUBSCRIPTION row into the subscribing mesh's
-// mesh.yon (the one passed via --from-mesh). The referenced (subscribed)
-// vault's home mesh is unaware per federation-design §3 asymmetric
-// awareness. The libSQL `mesh_subscriptions` cache row is inserted in the
-// same transaction; on cache insert failure the tmp+rename is abandoned
-// and disk is pristine. Local libSQL index (lanes_cache + fts_cache) is
+// Fed-v2 D1c: records the subscription in this writer's append-only
+// subscription ledger shard (the SoT) — mesh.yon is NOT written, and the
+// `mesh_subscriptions` cache is reconstituted from the ledger by
+// rebuildFederationCacheFlow, not inserted here. The referenced
+// (subscribed) vault's home mesh is unaware per federation-design §3
+// asymmetric awareness. Local libSQL index (lanes_cache + fts_cache) is
 // refreshed after a successful write so the v1.D.3 cascade engine
 // surfaces the subscribed vault under mesh-scoped uniform search.
 //
@@ -48,7 +48,7 @@ interface SubscribeCliOpts {
 export function buildMeshSubscribeSubcommand(): Command {
   return new Command("subscribe")
     .description(
-      "v1.C.2: write a flat @MESH_SUBSCRIPTION into the subscribing mesh's mesh.yon (asymmetric — referenced vault's home mesh untouched). Clones the subscribed vault locally on first subscribe + builds the local libSQL index so mesh-scoped search includes it.",
+      "Record a subscription to an external vault in this writer's append-only subscription ledger (asymmetric — referenced vault's home mesh untouched; mesh.yon is not written). Clones the subscribed vault locally on first subscribe + builds the local libSQL index so mesh-scoped search includes it.",
     )
     .requiredOption(
       "--vault <name>",
@@ -87,10 +87,10 @@ export function buildMeshSubscribeSubcommand(): Command {
 function emitHuman(r: SubscribeResult): void {
   if (r.status === "subscription-already-present") {
     // eslint-disable-next-line no-console
-    console.log(`Subscription already present in ${r.meshYonPath} (no mesh.yon mutation).`);
+    console.log(`Subscription already present in the ledger (no ledger write).`);
   } else {
     // eslint-disable-next-line no-console
-    console.log(`Wrote @MESH_SUBSCRIPTION to ${r.meshYonPath}`);
+    console.log(`Recorded subscription to ledger`);
   }
   // eslint-disable-next-line no-console
   console.log(`  subscribing mesh: ${r.subscribingMesh.name} (mesh:${r.subscribingMesh.ridHex})`);

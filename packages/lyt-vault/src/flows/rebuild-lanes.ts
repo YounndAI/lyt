@@ -102,34 +102,60 @@ export async function rebuildLanesFlow(args: RebuildLanesArgs): Promise<RebuildL
   const notesRoot = join(vaultPath, "notes");
   const noteFiles = walkMarkdownFiles(notesRoot);
 
-  // tag → ordered list of vault-relative posix paths (sorted at emit time
-  // for determinism)
-  const tagIndex = new Map<string, string[]>();
+  // Cluster by SLUG, not raw tag. Lane identity IS the slug
+  // (`laneSlugToRidBytes` is deterministic in the slug), so two distinct
+  // raw tags that slugify to the same value (`#YON`/`#yon`,
+  // `topic/v1.A.0`/`topic/v1-A-0`) are ONE lane. Keying on the raw tag
+  // emitted two @LANE records with the same `lane:<slug>` rid, and the
+  // second `insertLane` crashed reindex with `UNIQUE constraint failed:
+  // lanes.rid` (" corruption/crash ladder" Tier-1). Merging at
+  // cluster time keeps the YON SoT collision-free at the source.
+  //
+  // slug → { rawTags clustered into it, member paths }. Paths are deduped
+  // per-note so a note carrying two colliding tags (`#YON` AND `#yon`)
+  // counts once. rawTags drive the merged `source_keywords` and the
+  // (deterministic) display name.
+  interface SlugCluster {
+    rawTags: Set<string>;
+    paths: string[];
+  }
+  const slugIndex = new Map<string, SlugCluster>();
   for (const abs of noteFiles) {
     const tags = parseFrontmatterTags(readFileSync(abs, "utf8"));
     if (tags.length === 0) continue;
     const relPath = toVaultRelPosix(abs, vaultPath);
+    // Slugs already credited a path for THIS note — so two colliding raw
+    // tags in one note do not double-count it toward the lane's mem_count.
+    const creditedSlugs = new Set<string>();
     for (const tag of tags) {
-      const list = tagIndex.get(tag);
-      if (list === undefined) {
-        tagIndex.set(tag, [relPath]);
-      } else {
-        list.push(relPath);
+      const slug = slugifyTag(tag);
+      if (slug.length === 0) continue;
+      let cluster = slugIndex.get(slug);
+      if (cluster === undefined) {
+        cluster = { rawTags: new Set(), paths: [] };
+        slugIndex.set(slug, cluster);
+      }
+      cluster.rawTags.add(tag);
+      if (!creditedSlugs.has(slug)) {
+        cluster.paths.push(relPath);
+        creditedSlugs.add(slug);
       }
     }
   }
 
   const lanes: LaneRecord[] = [];
   const members: LaneMemberRecord[] = [];
-  for (const [tag, paths] of tagIndex) {
-    if (paths.length < threshold) continue;
-    const slug = slugifyTag(tag);
-    if (slug.length === 0) continue;
-    const uniqueSortedPaths = [...new Set(paths)].sort();
+  for (const [slug, cluster] of slugIndex) {
+    const uniqueSortedPaths = [...new Set(cluster.paths)].sort();
+    if (uniqueSortedPaths.length < threshold) continue;
+    // Sort the merged raw tags for determinism; the display name is the
+    // lexicographically-smallest raw tag (a single-tag lane keeps its tag
+    // verbatim — `["Software Design"]` → name "Software Design").
+    const sortedRawTags = [...cluster.rawTags].sort();
     lanes.push({
       ridSlug: slug,
-      name: tag,
-      sourceKeywords: [tag],
+      name: sortedRawTags[0]!,
+      sourceKeywords: sortedRawTags,
       memCount: uniqueSortedPaths.length,
       lastBuilt,
     });
@@ -255,7 +281,12 @@ function toVaultRelPosix(absPath: string, vaultPath: string): string {
 // - a
 // - b
 //
-// Returns lowercased tag strings with surrounding quotes stripped.
+// Returns raw tag strings with surrounding quotes stripped — case is
+// PRESERVED (the caller slugifies, which lowercases). Do not lowercase
+// here: `#YON` and `#yon` must survive as distinct raw tags so the
+// caller can cluster them into one slug-keyed lane while keeping both as
+// source_keywords; lowercasing at parse time would silently re-collapse
+// that distinction.
 // Returns [] when no tags field exists OR the frontmatter is malformed.
 // Same line-based posture as metadata-filler.fillMissingMandatoryFields —
 // no full YAML parse (deferred to a real YAML lib only if frontmatter

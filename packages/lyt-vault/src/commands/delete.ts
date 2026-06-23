@@ -29,6 +29,16 @@ export function buildDeleteCommand(): Command {
     .action(async (name: string, opts: { tombstone?: boolean }) => {
       const noTombstone = opts.tombstone === false;
       const result = await deleteVaultFlow(name, { noTombstone });
+      // Phase E item 1 (#9) — surface the orphaned-then-dropped pod-local
+      // aliases. delete has no interactive gate, so the warning is reported with
+      // the outcome rather than before a prompt.
+      if (result.orphanedAliases.length > 0) {
+        const list = result.orphanedAliases.map((a) => `@${a}`).join(", ");
+        // eslint-disable-next-line no-console
+        console.log(
+          `  dropped ${result.orphanedAliases.length} pod-local alias(es) that pointed here: ${list}`,
+        );
+      }
       // eslint-disable-next-line no-console
       console.log(`Deleted vault '${result.vault.name}' (${result.vault.ridHex}).`);
       // eslint-disable-next-line no-console

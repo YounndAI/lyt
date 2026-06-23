@@ -84,7 +84,10 @@ interface OwnerRepo {
 // length cap mirrors GitHub's own limits (39 chars for usernames; 100
 // for repo names) — defensive cap is 100 here, since we don't need to
 // distinguish.
-const HANDLE_OK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+// Exported as the single source of truth: gh-access-provider.ts imports this
+// SAME regex to validate owner/repo/username before building gh args (CR-1
+// defense-in-depth, no duplicated regex).
+export const HANDLE_OK = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
 // Thin adapter — extracts {owner, repo} from a gitUrl string. Handles
 // the two forms emitted by lyt-vault flows: https URLs (with optional

@@ -45,7 +45,7 @@ interface RebuildFtsCliOpts {
 export function buildRebuildFtsCommand(): Command {
   return new Command("rebuild-fts")
     .description(
-      "v1.D.3a: rebuild the figment FTS5 cache from notes/**/*.md. Strips YAML frontmatter and inserts each figment body into the lyt.db figment_fts virtual table (Lock 0.2 — markdown files on disk are the SoT; FTS5 holds the regenerable search cache). Pair with `lyt sync` (post-pull fts upsert) or `lyt search` (the tiered cascade consumer).",
+      "Rebuild the figment FTS5 cache from notes/**/*.md. Strips YAML frontmatter and inserts each figment body into the lyt.db figment_fts virtual table (markdown files on disk are the SoT; FTS5 holds the regenerable search cache). Pair with `lyt sync` (post-pull fts upsert) or `lyt search` (the tiered cascade consumer).",
     )
     .requiredOption("--vault <name>", "Vault name (must be registered)")
     .option("--json", "Emit a JSON result instead of the human-readable summary")

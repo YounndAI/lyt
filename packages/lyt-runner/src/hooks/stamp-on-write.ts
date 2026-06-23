@@ -277,7 +277,7 @@ async function emitProvenanceAndAudit(p: EmitProvenanceAndAuditArgs): Promise<vo
   const vaultRoot = args.vaultRoot;
   if (vaultRoot === undefined || vaultRoot.length === 0) {
     throw new Error(
-      "lyt-runner pre-write hook requires args.vaultRoot post-v1.A.2c DB SPLIT (no libSQL-only fallback).",
+      "lyt-runner pre-write hook requires args.vaultRoot (no libSQL-only fallback).",
     );
   }
 

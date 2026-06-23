@@ -50,15 +50,15 @@ import { appendLedgerRecord } from "../yon/ledger-write.js";
 export type LedgerRecordKind = "AUDIT" | "PROVENANCE";
 
 export interface RecordToLedgerArgs {
-  // Absolute path to the vault root — `<vault>/.lyt/ledgers/<ledgerName>.yon`
-  // is the ledger file the record appends to.
+  // Absolute path to the vault root. Slice 2b: the shard path is
+  // `<vault>/.lyt/ledgers/<ledgerName>/<writerId>.yon`.
   vaultPath: string;
   // Per-ledger libSQL client (audit.db | provenance.db post-v1.A.2c SPLIT).
   // Threaded through to the `insertCache` closure.
   db: Client;
-  // The ledger's name (e.g. "audit", "provenance"). Determines the YON
-  // file path under `<vault>/.lyt/ledgers/` and the message text in
-  // the cache-failure console.error.
+  // The ledger's name (e.g. "audit", "provenance"). Determines the shard
+  // directory under `<vault>/.lyt/ledgers/` and the message text in the
+  // cache-failure console.error.
   ledgerName: string;
   // The YON record tag without leading `@` (e.g. "AUDIT", "PROVENANCE").
   recordType: string;
@@ -76,6 +76,9 @@ export interface RecordToLedgerArgs {
   // Best-effort cache upsert. Throws → recordToLedger logs + continues
   // (YON SoT remains the source of truth). Resolves → cacheInserted=true.
   insertCache: (db: Client) => Promise<void>;
+  // Test seam — override the writer id (defaults to getWriterId()).
+  // Determines which per-writerId shard file this record lands in.
+  writerId?: string;
 }
 
 export interface RecordToLedgerResult {
@@ -91,16 +94,38 @@ export interface RecordToLedgerResult {
 
 import { join } from "node:path";
 
+import { getWriterId } from "../util/writer-id.js";
+
 // YON-first append → cache upsert. The Lock 0.2 contract carrier.
 // Throws on YON-write failure (fatal — SoT). Logs + continues on
 // cache-write failure (rebuild reconstructs).
+//
+// Slice 2b: writes go to the per-writerId SHARD path:
+//   <vault>/.lyt/ledgers/<ledgerName>/<writerId>.yon
+// (the shard dir is the same name as the old single-file, now a directory)
+// The old flat `<ledgerName>.yon` path is the legacy read-tolerance path —
+// new writes never land there, but upsertLedgerCache + rebuildLedgerOnly
+// still walk it as a synthetic "legacy" shard.
 export async function recordToLedger(args: RecordToLedgerArgs): Promise<RecordToLedgerResult> {
-  const ledgerPath = join(args.vaultPath, ".lyt", "ledgers", `${args.ledgerName}.yon`);
+  // Resolve the writerId: the shard owner.
+  const writerId = args.writerId ?? getWriterId();
+  const ledgerPath = join(
+    args.vaultPath,
+    ".lyt",
+    "ledgers",
+    args.ledgerName,
+    `${writerId}.yon`,
+  );
 
   // Step 1 — YON SoT append (fatal on failure).
+  // ledgerName is the writerId (the shard file's identity), matching the
+  // subscription/alias shard pattern (subscription-ledger-write.ts passes
+  // `ledgerName: writerId` for exactly the same reason). The header's
+  // `id=ledger:<writerId>:<month>` is the per-shard identity, not the
+  // per-vault-ledger-kind identity.
   const ledgerRes = appendLedgerRecord({
     ledgerPath,
-    ledgerName: args.ledgerName,
+    ledgerName: writerId,
     recordType: args.recordType,
     fields: args.fields,
     stampSrc: args.stampSrc,

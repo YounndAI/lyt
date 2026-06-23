@@ -18,6 +18,7 @@ import { closeRegistry, openRegistry } from "../registry/client.js";
 import { removeKnownPath } from "../registry/known-paths.js";
 import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
+import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
 
@@ -29,6 +30,11 @@ export interface ForgetFlowResult {
   vault: VaultRow;
   tombstoned: boolean;
   removedKnownPath: boolean;
+  // Phase E item 1 (#9) — pod-local alias names that POINTED at this vault
+  // and were dropped (tombstoned) because forget (the vault-unsubscribe path)
+  // orphans them. Empty when the vault had no aliases. forget has no interactive
+  // gate, so this is reported alongside the action (the confirmed path).
+  orphanedAliases: string[];
 }
 
 export async function forgetVaultFlow(
@@ -48,6 +54,10 @@ export async function forgetVaultFlow(
       );
     }
     await enforceNotFrozen(vault.path, vault.name);
+    // Phase E item 1 (#9 — warn-then-drop). Snapshot the pod-local aliases
+    // this forget would ORPHAN before mutating the registry; drop them after on
+    // the confirmed path. (See flows/delete.ts for the symmetric wiring.)
+    const orphanedAliases = liveAliasNamesForTargetRid(vault.ridHex);
     let result: ForgetFlowResult;
     if (tombstone) {
       await tombstoneVault(db, vault.rid);
@@ -55,6 +65,7 @@ export async function forgetVaultFlow(
         vault: { ...vault, status: "tombstoned" },
         tombstoned: true,
         removedKnownPath: false,
+        orphanedAliases,
       };
     } else {
       await deleteVault(db, vault.rid);
@@ -63,7 +74,12 @@ export async function forgetVaultFlow(
         removeKnownPath(vault.path);
         removedKnownPath = true;
       }
-      result = { vault, tombstoned: false, removedKnownPath };
+      result = { vault, tombstoned: false, removedKnownPath, orphanedAliases };
+    }
+    // Drop the orphaned aliases on the confirmed path — tombstone each via the
+    // existing removeAliasFlow / appendAliasTombstone path. Reuses the open db.
+    if (orphanedAliases.length > 0) {
+      await dropAliasesForTargetRid(vault.ridHex, db);
     }
     // (Brief A) — forget mutates the registry's vault set; regenerate the
     // derived pod manifest so the removed vault drops out of pod.yon. Non-fatal;

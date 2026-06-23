@@ -24,7 +24,8 @@ import { getIdentity } from "../util/identity.js";
 import { getUserPatternsDir } from "../util/pattern-paths.js";
 import { parsePatternYon, type VerbRecord } from "../yon/pattern.js";
 import { captureIndexFlow } from "./capture-index.js";
-import { deriveWriteGate } from "./writability.js";
+import type { AccessProvider } from "../access/access-provider.js";
+import { GhAccessProvider } from "../access/gh-access-provider.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 
 // hardening pass (Cohort-1 fix-pass) — the actionable refusal a pure-subscriber WRITE
@@ -68,6 +69,11 @@ export interface PatternRunArgs {
   // fake to exercise the foreign-mesh-subscription verdict deterministically.
   // Only consulted for SUBSCRIPTION targets — own-vault captures never probe.
   gh?: GhExecutor | undefined;
+  // keystone Phase B — injectable AccessProvider for the write gate.
+  // Defaults to a GhAccessProvider built from `gh`; tests/callers may inject a
+  // different provider. Behavior-preserving: the default exactly mirrors the
+  // prior direct `deriveWriteGate(row, db, { gh })` call.
+  accessProvider?: AccessProvider | undefined;
 }
 
 export interface PatternRunResult {
@@ -139,7 +145,9 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
     // OWN vault (no subscription signal) is allowed with NO gh probe; only a
     // subscription consults the (cached) verdict. Refuse BEFORE any write so
     // nothing lands on disk.
-    const gate = await deriveWriteGate(row, db, args.gh !== undefined ? { gh: args.gh } : {});
+    const accessProvider =
+      args.accessProvider ?? new GhAccessProvider(db, args.gh !== undefined ? { gh: args.gh } : {});
+    const gate = await accessProvider.canWrite(row);
     if (gate.blocked) {
       throw new Error(
         gate.verdict.writable === "unknown"
@@ -256,6 +264,26 @@ function buildTokens(input: TokensInput): Record<string, string> {
     // `tags: [a, b]` when `--tags a,b` (or `--vars tags=...`) supplies a value.
     // Without a default the unresolved `<tags>` token would render literally.
     tags: "",
+    // Phase A — `content` is the capture body channel. The template's
+    // `<content>` token renders `vars.content` when supplied (CLI `--vars
+    // content=...` or the MCP `capture` tool). Defaults to the prior literal
+    // stub line so a bare capture (no content var) is BYTE-IDENTICAL to the
+    // pre-D67 template body — without this default the unresolved `<content>`
+    // token would render literally (the regression guard). `content` is
+    // optional at the flow level (NOT in MANDATORY_FRONTMATTER_TOKENS); the MCP
+    // layer enforces it for generic clients.
+    //
+    // SEE ALSO — COUPLED CONSTANT: this default string is the empty-state body
+    // rendered into the `<content>` token site at
+    // `src/patterns/knowledge-capture/templates/capture.md` (line ~15). The two
+    // MUST stay in sync — a bare capture (no `content` var) renders this exact
+    // string into that token slot. The trail can only live HERE: capture.md is
+    // rendered verbatim into every Figment, so a comment there would pollute
+    // output. Parity is enforced by the bare-capture regression test in
+    // `tests/flows-pattern.test.ts`; if you change this string, update that
+    // test's expected body.
+    content:
+      "_(Body content — plain Obsidian-flavored markdown. Use `[[wikilinks]]` for cross-Figment references.)_",
   };
   for (const [k, v] of Object.entries(input.vars ?? {})) out[k] = v;
   return out;

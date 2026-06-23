@@ -33,10 +33,12 @@
 // IGNOREs into audit_log so handlers who only pulled (didn't write) see
 // other machines' audit entries.
 
+import { existsSync, readdirSync, statSync } from "node:fs";
 import type { Client } from "@libsql/client";
 import { join } from "node:path";
 
 import { newUuidv7Bytes } from "../util/uuid7.js";
+import { parseLedgerFile, walkLedger, type LedgerRecord } from "../yon/ledger-read.js";
 import { recordToLedger } from "./ledger-write-generic.js";
 import { insertAuditLog, type InsertAuditLogArgs } from "./vault-db-repo.js";
 
@@ -45,6 +47,9 @@ export interface RecordAuditArgs extends InsertAuditLogArgs {
   // record's @STAMP src= field. Conventionally a short kebab string like
   // "flows/automator-run" or "lyt-runner/pre-write-hook".
   stampSrc: string;
+  // Test seam — override the writer id (defaults to getWriterId()).
+  // Determines which per-writerId shard file this record lands in.
+  writerId?: string;
 }
 
 export interface RecordAuditResult {
@@ -59,8 +64,78 @@ export interface RecordAuditResult {
   cacheInserted: boolean;
 }
 
+// Slice 2b: the audit shard DIRECTORY (mirrors getSubscriptionsLedgerDir).
+// New writes land in `<dir>/<writerId>.yon`; the legacy flat `audit.yon`
+// is walked as a synthetic "legacy" shard on read (see walkAllAuditShards).
+export function getAuditLedgerDir(vaultPath: string): string {
+  return join(vaultPath, ".lyt", "ledgers", "audit");
+}
+
+// Returns the LEGACY single-file path `<vault>/.lyt/ledgers/audit.yon`.
+// This path is still valid for read-tolerance (legacy shards) but new
+// writes go to the shard dir. Callers that reference the old flat-file
+// path should migrate to getAuditLedgerDir / walkAllAuditShards.
+//
+// @deprecated New writes use the per-writerId shard (Slice 2b).
+// This path is kept for read-tolerance (legacy file present) and for
+// audit-export / tests that inspect the on-disk shape.
 export function getAuditLedgerPath(vaultPath: string): string {
   return join(vaultPath, ".lyt", "ledgers", "audit.yon");
+}
+
+// Enumerate the writerId shard names present under the audit shard directory.
+// Mirrors listSubscriptionShards: a shard manifests as either a current file
+// `<writerId>.yon` OR an archive subdir `<writerId>/`. Returns sorted list.
+export function listAuditShards(vaultPath: string): string[] {
+  const dir = getAuditLedgerDir(vaultPath);
+  if (!existsSync(dir) || !safeIsDir(dir)) return [];
+  const names = new Set<string>();
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (safeIsDir(full)) {
+      // archive subdir `<writerId>/`
+      names.add(entry);
+    } else if (entry.endsWith(".yon")) {
+      // current file `<writerId>.yon`
+      names.add(entry.replace(/\.yon$/, ""));
+    }
+  }
+  return [...names].sort();
+}
+
+// Walk ALL audit records across every shard + the legacy flat file.
+// The shard dir is `<vault>/.lyt/ledgers/audit/` — each writerId is a shard
+// named by walkLedger (current `<writerId>.yon` + archives `<writerId>/YYYY-MM.yon`).
+// The legacy flat path `<vault>/.lyt/ledgers/audit.yon` is walked as a
+// synthetic shard named "legacy" (read-tolerance for pre-2b data).
+//
+// This is the multi-shard union read that replaces the old single
+// `walkLedger(ledgerDir, "audit")` calls.
+export function walkAllAuditShards(vaultPath: string): LedgerRecord[] {
+  const shardDir = getAuditLedgerDir(vaultPath);
+  const out: LedgerRecord[] = [];
+  // 1. Per-writerId shards under <vault>/.lyt/ledgers/audit/
+  for (const writerId of listAuditShards(vaultPath)) {
+    out.push(...walkLedger(shardDir, writerId));
+  }
+  // 2. Legacy flat file: <vault>/.lyt/ledgers/audit.yon treated as a shard.
+  //    We walk it directly with parseLedgerFile (not walkLedger) because
+  //    walkLedger would look for an archive subdir at the same path as the
+  //    new shard directory — overlap risk. parseLedgerFile reads only the
+  //    flat file, which is exactly what we want for legacy read-tolerance.
+  const legacyPath = getAuditLedgerPath(vaultPath);
+  if (existsSync(legacyPath)) {
+    out.push(...parseLedgerFile(legacyPath));
+  }
+  return out;
+}
+
+function safeIsDir(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // Write an audit record YON-first, then upsert .db cache. Throws on YON
@@ -92,6 +167,7 @@ export async function recordAudit(
     stampSrc: args.stampSrc,
     ts: tsIso,
     insertCache: (client) => insertAuditLog(client, args),
+    writerId: args.writerId,
   });
 }
 

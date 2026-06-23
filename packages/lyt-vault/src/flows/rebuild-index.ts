@@ -17,8 +17,8 @@
 import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { recordAudit, reinjectAuditRecord } from "../registry/audit-write.js";
-import { reinjectProvenanceRecord } from "../registry/provenance-write.js";
+import { recordAudit, reinjectAuditRecord, walkAllAuditShards } from "../registry/audit-write.js";
+import { reinjectProvenanceRecord, walkAllProvenanceShards } from "../registry/provenance-write.js";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName, type VaultRow } from "../registry/repo.js";
 import {
@@ -37,7 +37,6 @@ import {
 } from "../registry/_helpers/ledger-yon-mapper.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { newUuidv7Bytes } from "../util/uuid7.js";
-import { walkLedger } from "../yon/ledger-read.js";
 import { KNOWN_LEDGERS, type LedgerName } from "./housekeep.js";
 
 export interface RebuildIndexArgs {
@@ -222,7 +221,8 @@ async function rebuildLedgerOnly(
     const auditDb = await openAuditDb(vault.path);
     try {
       await auditDb.execute("DELETE FROM audit_log");
-      const records = walkLedger(join(vault.path, ".lyt", "ledgers"), "audit");
+      // Slice 2b: walk all per-writerId shards + legacy flat file.
+      const records = walkAllAuditShards(vault.path);
       for (const r of records) {
         // rebuild defaults "vault.index.rebuilt" preserved verbatim.
         const fields = mapAuditYonToCacheArgs(r, "vault.index.rebuilt");
@@ -237,7 +237,8 @@ async function rebuildLedgerOnly(
     const provenanceDb = await openProvenanceDb(vault.path);
     try {
       await provenanceDb.execute("DELETE FROM provenance");
-      const records = walkLedger(join(vault.path, ".lyt", "ledgers"), "provenance");
+      // Slice 2b: walk all per-writerId shards + legacy flat file.
+      const records = walkAllProvenanceShards(vault.path);
       for (const r of records) {
         const fields = mapProvenanceYonToCacheArgs(r);
         if (fields === null) continue;

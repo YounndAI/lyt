@@ -43,7 +43,7 @@ interface MeshRebuildRollupCliOpts {
 export function buildMeshRebuildRollupCommand(): Command {
   return new Command("rebuild-rollup")
     .description(
-      `v1.E.2: rebuild transitive keyword rollup for every home vault in a mesh (or every mesh when --mesh is omitted). Edges only — subscriptions don't roll up (per master-plan §v1.E.2:897). Disconnected descendants surface as soft-tombstones (default threshold ${ROLLUP_DISCONNECTED_DAYS} days).`,
+      `Rebuild transitive keyword rollup for every home vault in a mesh (or every mesh when --mesh is omitted). Edges only — subscriptions don't roll up. Disconnected descendants surface as soft-tombstones (default threshold ${ROLLUP_DISCONNECTED_DAYS} days).`,
     )
     .option("--mesh <name>", "Restrict to a single mesh by name (default = every registered mesh)")
     .option(

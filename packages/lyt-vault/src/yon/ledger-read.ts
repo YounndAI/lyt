@@ -26,7 +26,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { unescapeQuoted } from "./_helpers.js";
+import { sha256, unescapeQuoted } from "./_helpers.js";
 
 export interface LedgerRecord {
   // The tag without leading `@`.
@@ -38,6 +38,30 @@ export interface LedgerRecord {
   stampSrc: string | null;
   stampTs: string | null;
   stampHash: string | null;
+  // P5-D advisory chain-hash marker. Set to `true` when this record carries a
+  // verifiable chain-hash (`stampHash` not `-`/null) but the recomputed hash of
+  // the file bytes BEFORE this record's body does NOT match the stored
+  // `stampHash` — i.e. some earlier record's payload was edited without
+  // re-stamping, so this record's chain link is broken. ADVISORY ONLY — the fold
+  // still proceeds; this is a recompute-and-warn down-payment, NOT a rejection gate.
+  //
+  // ABSENT/false does NOT mean "verified authentic". It also covers: a first-in-
+  // file record (`hash="-"`, never checked), a record whose `@STAMP` was stripped
+  // (`stampHash===null` — NOT flagged; the guard skips null), and "not yet checked".
+  // A future consumer MUST NOT read `!tamper` as trust.
+  //
+  // NAMED RESIDUALS → S5 (the trust-spine), NOT closed here:
+  //  - tip-edit: editing the LAST record is uncatchable (no successor commits to it).
+  //  - dropped-stamp on a non-first record (`stampHash===null`) is locally
+  //    detectable but NOT flagged today.
+  //  - a fully-self-consistent hostile shard (foreign writer recomputes the whole
+  //    chain) passes recompute by construction.
+  //  - BOM / final-newline / mid-history EOL drift share the CRLF root (see the
+  //    recompute site); read-side LF-normalization closes the dominant case only.
+  // Cost: the recompute re-hashes the full prefix per record (O(N²) per parse) —
+  // fine at monthly-rotation shard sizes; incremental/rolling hashing is the
+  // optimization if a shard grows large.
+  tamper?: boolean;
   // Which file the record came from. Useful for tamper-warning context.
   sourceFile: string;
 }
@@ -106,6 +130,14 @@ export function parseLedgerFile(filePath: string): LedgerRecord[] {
   if (!existsSync(filePath)) return [];
   const content = readFileSync(filePath, "utf8");
   const lines = content.split(/\r?\n/);
+  // P5-D: char offset of the START of `lines[k]` within `content`. Built once so
+  // the chain-hash recompute can slice `content` from offset 0 up to (not
+  // including) each record body's first byte — byte-identical to what the writer
+  // hashed (`prior` = the file text before the appended record). Tracking the
+  // per-line offset is the only place that survives the `\r?\n` split (which
+  // discards the exact newline run); `content.slice(0, off)` reproduces the
+  // original bytes (incl. CR/LF) verbatim because `slice` works on the raw string.
+  const lineOffsets = computeLineOffsets(content, lines);
   const out: LedgerRecord[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -127,6 +159,10 @@ export function parseLedgerFile(filePath: string): LedgerRecord[] {
     }
     // Record line.
     if (line.startsWith("@")) {
+      // The byte offset where THIS record's body begins = the start of its
+      // header line. `content.slice(0, recordStartOffset)` is the writer's
+      // `prior` for this record's @STAMP chain-hash.
+      const recordStartOffset = lineOffsets[i]!;
       const blockLines: string[] = [line];
       i += 1;
       while (i < lines.length) {
@@ -156,12 +192,35 @@ export function parseLedgerFile(filePath: string): LedgerRecord[] {
         }
         break;
       }
+      const stampHash = stamp?.hash ?? null;
+      // P5-D recompute-AND-WARN: only meaningful when the record carries a real
+      // chain-hash (not the first-in-file sentinel `-`, not a missing stamp).
+      // Recompute sha256 of the file bytes BEFORE this record's body and compare;
+      // a mismatch means an earlier record's payload was edited without
+      // re-stamping (this record is the successor whose recorded `prior` no longer
+      // matches the on-disk `prior`). Advisory only — we attach a marker, never
+      // throw or drop the record.
+      let tamper: boolean | undefined;
+      if (stampHash !== null && stampHash !== "-") {
+        // C1: normalize CRLF→LF before hashing. The writer ALWAYS emits LF, so
+        // stored hashes are over LF bytes; a shard CRLF-converted in transit
+        // (Windows core.autocrlf, an editor) must NOT false-flag. This neutralizes
+        // ONLY the EOL encoding — a payload change still mismatches, so real tamper
+        // is still caught. Closes the dominant cross-platform-sync case (LF-written
+        // shard checked out CRLF). NOT fully closed (→ S5): a shard the writer
+        // itself appended over while already CRLF (mid-history EOL drift), a BOM, or
+        // an editor-added final newline — complete fix = writer-side normalization
+        // and/or `.gitattributes eol=lf` baked into scaffolded vaults.
+        const recomputed = sha256(content.slice(0, recordStartOffset).replace(/\r\n/g, "\n"));
+        if (recomputed !== stampHash) tamper = true;
+      }
       out.push({
         recordType,
         fields,
         stampSrc: stamp?.src ?? null,
         stampTs: stamp?.ts ?? null,
-        stampHash: stamp?.hash ?? null,
+        stampHash,
+        ...(tamper ? { tamper: true } : {}),
         sourceFile: filePath,
       });
       continue;
@@ -169,6 +228,27 @@ export function parseLedgerFile(filePath: string): LedgerRecord[] {
     i += 1;
   }
   return out;
+}
+
+// Build the char offset of the start of each line in `lines` within `content`.
+// `content.split(/\r?\n/)` discards the matched newline run (which may be `\n`
+// or `\r\n`), so we cannot reconstruct offsets from line lengths alone. Instead
+// we re-scan `content` once, advancing past each line + whatever newline run
+// actually followed it in the original bytes. The result is byte-exact: for any
+// line index k, `content.slice(0, lineOffsets[k])` is the original file text up
+// to (not including) that line.
+function computeLineOffsets(content: string, lines: string[]): number[] {
+  const offsets: number[] = new Array(lines.length);
+  let pos = 0;
+  for (let k = 0; k < lines.length; k++) {
+    offsets[k] = pos;
+    pos += lines[k]!.length;
+    // Consume the newline run that `split` removed (CR, LF, or CRLF). The final
+    // line has no trailing newline → nothing to consume.
+    if (content[pos] === "\r") pos += 1;
+    if (content[pos] === "\n") pos += 1;
+  }
+  return offsets;
 }
 
 function parseRecordType(headerLine: string): string {

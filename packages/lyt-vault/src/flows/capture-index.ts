@@ -56,7 +56,8 @@ import { writeIndexWatermark } from "../util/index-watermark.js";
 import { reconcileFigmentWrite } from "./reconcile-figment-write.js";
 import { rebuildLanesFlow } from "./rebuild-lanes.js";
 import { rebuildArcsFlow } from "./rebuild-arcs.js";
-import { deriveWriteGate } from "./writability.js";
+import type { AccessProvider } from "../access/access-provider.js";
+import { GhAccessProvider } from "../access/gh-access-provider.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 
 export interface CaptureIndexArgs {
@@ -80,6 +81,11 @@ export interface CaptureIndexArgs {
   // (deriveWriteGate). Defaults to the real `gh` CLI; tests inject a fake.
   // Only consulted for SUBSCRIPTION targets — own-vault indexing never probes.
   gh?: GhExecutor | undefined;
+  // keystone Phase B — injectable AccessProvider for the write gate.
+  // Defaults to a GhAccessProvider built from `gh`; tests/callers may inject a
+  // different provider. Behavior-preserving: the default exactly mirrors the
+  // prior direct `deriveWriteGate(row, db, { gh })` call.
+  accessProvider?: AccessProvider | undefined;
 }
 
 export interface CaptureIndexResult {
@@ -356,7 +362,9 @@ async function subscriberRefusalNote(
       (await getVaultByPath(db, vaultPath)) ??
       (args.vaultName !== undefined ? await getVaultByName(db, args.vaultName) : null);
     if (row === null) return null; // unregistered → no mesh role → proceed
-    const gate = await deriveWriteGate(row, db, args.gh !== undefined ? { gh: args.gh } : {});
+    const accessProvider =
+      args.accessProvider ?? new GhAccessProvider(db, args.gh !== undefined ? { gh: args.gh } : {});
+    const gate = await accessProvider.canWrite(row);
     if (!gate.blocked) return null;
     if (gate.verdict.writable === "unknown") {
       return (

@@ -123,7 +123,7 @@ export async function generateMeshCanvasFlow(
     const writeAnchor = await resolveMeshWriteAnchor(registryDb, mesh, vaults);
 
     const subscriptions = [...(await listSubscriptionsForMesh(registryDb, mesh.rid))].sort(
-      bySubscriptionExternalMeshAsc,
+      bySubscriptionExternalVaultAsc,
     );
 
     const nodes: JsonCanvasNode[] = [];
@@ -174,7 +174,7 @@ export async function generateMeshCanvasFlow(
             width: VAULT_WIDTH,
             height: VAULT_HEIGHT,
           },
-          `**ext: ${s.externalMeshName}**\n\n_external vault rid:_ \`vault:${s.externalVaultRidHex}\``,
+          `**subscribed vault**\n\n_external vault rid:_ \`vault:${s.externalVaultRidHex}\``,
         ),
       );
       edges.push(
@@ -255,10 +255,10 @@ function byVaultNameAsc(a: VaultRow, b: VaultRow): number {
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
 
-function bySubscriptionExternalMeshAsc(a: MeshSubscriptionRow, b: MeshSubscriptionRow): number {
-  if (a.externalMeshName !== b.externalMeshName) {
-    return a.externalMeshName < b.externalMeshName ? -1 : 1;
-  }
+// Fed-v2 D1c: the subscription cache row no longer carries the foreign mesh
+// name (external_mesh_* dropped), so the deterministic canvas ordering keys on
+// the surviving external_vault_rid (hex-lex ASC).
+function bySubscriptionExternalVaultAsc(a: MeshSubscriptionRow, b: MeshSubscriptionRow): number {
   return a.externalVaultRidHex < b.externalVaultRidHex
     ? -1
     : a.externalVaultRidHex > b.externalVaultRidHex

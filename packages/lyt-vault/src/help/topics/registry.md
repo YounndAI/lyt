@@ -12,15 +12,16 @@ verbs read/write this DB to track every vault you have on this machine.
   federation cache, the identity cache). The vault directories themselves
   (`.lyt/vault.yon`, your notes) are untouched.
 
-## Clean-slate posture (v1 pre-release)
+## Clean-slate posture (alpha)
 
-Schema-shape drift requires `lyt registry reset --yes` + re-init since pre-release clean-slate posture is in effect through v1.
+During the alpha, a schema-shape change may require `lyt registry reset --yes` +
+re-init rather than an in-place migration. Your markdown and `.lyt/vault.yon`
+files are never touched by a reset.
 
-## v1.A.2 Lock 0.2 — YON-as-SoT for audit + provenance
+## YON-as-source-of-truth for audit + provenance
 
-As of v1.A.2 (Lock 0.2) + v1.A.2c (per-vault DB SPLIT), the per-vault
-`audit_log` + `provenance` + `automator_runs` tables are libSQL **caches**
-over YON sources of truth at `.lyt/ledgers/audit.yon` and
+The per-vault `audit_log` + `provenance` + `automator_runs` tables are libSQL
+**caches** over YON sources of truth at `.lyt/ledgers/audit.yon` and
 `.lyt/ledgers/provenance.yon`. The .db files live under `.lyt/indexes/`
 (`.lyt/indexes/lyt.db` carries automator_runs / automator_run_events;
 `.lyt/indexes/audit.db` carries audit_log; `.lyt/indexes/provenance.db`

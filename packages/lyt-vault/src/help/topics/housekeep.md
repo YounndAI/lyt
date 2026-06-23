@@ -1,8 +1,7 @@
 # lyt housekeep
 
 Month-boundary rotation for per-vault YON ledger files (audit + provenance).
-Part of the v1.A.2 Lock 0.2 surface — YON is the source of truth, libSQL is
-the regenerable cache.
+YON is the source of truth; libSQL is the regenerable cache.
 
 ## Usage
 
@@ -11,11 +10,8 @@ lyt housekeep [--vault <name>] [--ledger <name>] [--rotate-now] [--dry-run] [--j
 ```
 
 Default scope: every active vault in the registry × every known ledger.
-The known-ledger list is registry-driven: it reads from
-`packages/lyt-vault/src/registry/ledger-registry.ts:LEDGER_REGISTRY`
-(`LEDGER_NAMES` since v1.A.3). The current registry ships `audit` +
-`provenance`. Friction stays libSQL-only this phase (deferred to v1.5); appending it to `LEDGER_REGISTRY` post-v1.5
-brings housekeep along automatically.
+The known-ledger set currently covers `audit` + `provenance`; friction tracking
+stays libSQL-only for now and will join rotation when it gains a YON spine.
 
 ## Rotation algorithm
 
@@ -45,7 +41,7 @@ the prior file in place or the archived path, never a half-rotated state.
 | `--ledger <name>` | Restrict to one ledger (default: every known ledger).                                                                 |
 | `--rotate-now`    | Force rotation regardless of the month-boundary check. Useful for manual archive cuts or test deterministic captures. |
 | `--dry-run`       | Report what would change without mutating any file. Outcome reads `would-rotate` or `would-rotate-now`.               |
-| `--json`          | Lock 0.3 deterministic JSON shape: `{ rotations, dryRun, scannedVaults, scannedLedgers }`.                            |
+| `--json`          | Deterministic JSON shape: `{ rotations, dryRun, scannedVaults, scannedLedgers }`.                                    |
 
 ## Outcomes
 

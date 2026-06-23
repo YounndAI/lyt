@@ -24,9 +24,7 @@ import type { MeshPushKind } from "../yon/mesh-write.js";
 import { buildMeshAddEdgeSubcommand } from "./add-mesh-edge.js";
 import { buildMeshAdoptSubcommand } from "./mesh-adopt.js";
 import { buildMeshInfoSubcommand } from "./mesh-info.js";
-import { buildMeshPublishSubcommand } from "./mesh-publish.js";
 import { buildMeshSubscribeSubcommand } from "./subscribe.js";
-import { buildMeshUpdateCadenceSubcommand } from "./mesh-update-cadence.js";
 import { buildMeshValidateSubcommand } from "./mesh-validate.js";
 import { buildMeshRebuildRollupCommand } from "./mesh-rebuild-rollup.js";
 import { buildRebuildMeshRegistryCommand } from "./rebuild-mesh-registry.js";
@@ -41,7 +39,7 @@ import { buildRebuildMeshRegistryCommand } from "./rebuild-mesh-registry.js";
 
 export function buildMeshCommand(): Command {
   const cmd = new Command("mesh").description(
-    "Manage meshes — groups of vaults sharing a GitHub push target. v1.B.1 ships init/join/list; v1.D.5 adds canvas; v1.B.2 adds rebuild-registry; v1.B.6 adds publish + info (federation-design v2 §3 + §6 + lyt-public-mesh §2.1).",
+    "Manage meshes — groups of vaults sharing a GitHub push target. Subcommands: init/join/list, canvas, rebuild-registry, info.",
   );
   cmd.addCommand(buildMeshInitSubcommand());
   cmd.addCommand(buildMeshJoinSubcommand());
@@ -49,9 +47,7 @@ export function buildMeshCommand(): Command {
   cmd.addCommand(buildMeshCanvasSubcommand());
   cmd.addCommand(buildRebuildMeshRegistryCommand());
   cmd.addCommand(buildMeshRebuildRollupCommand());
-  cmd.addCommand(buildMeshPublishSubcommand());
   cmd.addCommand(buildMeshInfoSubcommand());
-  cmd.addCommand(buildMeshUpdateCadenceSubcommand());
   cmd.addCommand(buildMeshAddEdgeSubcommand());
   cmd.addCommand(buildMeshValidateSubcommand());
   cmd.addCommand(buildMeshSubscribeSubcommand());
@@ -180,7 +176,7 @@ function buildMeshJoinSubcommand(): Command {
     )
     .option(
       "--clone-members",
-      "Also clone every @MESH_HOME-listed vault (out-of-scope in v1.B.1 — flag is currently a no-op; v1.B.3 wires the cascading clone)",
+      "Also clone every @MESH_HOME-listed vault (flag is currently a no-op; cascading clone is not yet wired)",
     )
     .option("--json", "Emit JSON instead of human-readable output")
     .action(async (name: string, opts: MeshJoinCliOpts) => {
@@ -242,7 +238,7 @@ interface MeshCanvasCliOpts {
 function buildMeshCanvasSubcommand(): Command {
   return new Command("canvas")
     .description(
-      "v1.D.5: render the mesh as an Obsidian Canvas (.canvas) — mesh → vaults → cross-mesh subscriptions. Writes to <mesh-main-vault>/.lyt/canvases/mesh-graph.canvas.",
+      "Render the mesh as an Obsidian Canvas (.canvas) — mesh → vaults → cross-mesh subscriptions. Writes to <mesh-main-vault>/.lyt/canvases/mesh-graph.canvas.",
     )
     .requiredOption("--mesh <name>", "Mesh name (must exist in the local registry)")
     .option("--now-iso <iso>", "Pin the 'now' timestamp for deterministic testing (ISO 8601)")

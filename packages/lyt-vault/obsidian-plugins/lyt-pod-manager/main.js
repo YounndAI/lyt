@@ -1,10 +1,10 @@
 "use strict";
-// v1.G.10 Lyt Pod Manager Obsidian plugin — pre-compiled main.js for
+// Lyt Pod Manager Obsidian plugin — pre-compiled main.js for
 // Obsidian to load directly (Obsidian's plugin loader reads main.js).
 // Authoritative source is main.ts in this folder; when editing main.ts
 // run `npm install && npm run build` to refresh this file, OR keep the
 // two in sync by hand (this file is small enough that hand-sync is
-// practical for the v1.5 alpha-close phase).
+// practical).
 //
 // Module shape: CommonJS exporting a default Plugin subclass. Obsidian's
 // loader does `require("./main.js").default` at plugin enable time.

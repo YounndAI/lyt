@@ -25,9 +25,9 @@ import {
 import { withSpinner } from "../util/spinner.js";
 
 // v1.B.6 — `lyt mesh info <mesh> [--remote] [--json]`. Surfaces @MESH +
-// @MESH_PUBLIC + @UPDATE_CADENCE metadata from the mesh's .lyt/mesh.yon SoT
-// (local mode) or peeks at the published mesh.yon WITHOUT cloning under
-// --remote (via gh api).
+// @MESH_HOME metadata from the mesh's .lyt/mesh.yon SoT (local mode) or
+// peeks at the mesh.yon WITHOUT cloning under --remote (via gh api).
+// Fed-v2 Slice 1b (#13 DELETE): @MESH_PUBLIC/@UPDATE_CADENCE removed.
 
 interface MeshInfoCliOpts {
   remote?: boolean;
@@ -37,7 +37,7 @@ interface MeshInfoCliOpts {
 export function buildMeshInfoSubcommand(): Command {
   return new Command("info")
     .description(
-      "v1.B.6: show metadata for a mesh — @MESH + @MESH_PUBLIC + @UPDATE_CADENCE. --remote peeks at the published mesh.yon via gh api without cloning.",
+      "Show metadata for a mesh — @MESH + home vaults. --remote peeks at the mesh.yon via gh api without cloning.",
     )
     .argument(
       "<mesh>",
@@ -83,55 +83,11 @@ export function buildMeshInfoSubcommand(): Command {
         console.log(`  main vault rid:   ${result.mesh.mainVaultRid}`);
         // eslint-disable-next-line no-console
         console.log(`  created at:       ${result.mesh.createdAt}`);
-        if (result.mesh.defaultVaultUpdateCadence !== null) {
-          // eslint-disable-next-line no-console
-          console.log(`  default cadence:  ${result.mesh.defaultVaultUpdateCadence}`);
-        }
-        if (result.publicMeta !== null) {
-          // eslint-disable-next-line no-console
-          console.log(`  PUBLIC:`);
-          // eslint-disable-next-line no-console
-          console.log(`    description:    ${result.publicMeta.description}`);
-          if (result.publicMeta.topics !== undefined) {
-            // eslint-disable-next-line no-console
-            console.log(`    topics:         ${result.publicMeta.topics}`);
-          }
-          if (result.publicMeta.maintainerContact !== undefined) {
-            // eslint-disable-next-line no-console
-            console.log(`    maintainer:     ${result.publicMeta.maintainerContact}`);
-          }
-          if (result.publicMeta.licenseOverride !== undefined) {
-            // eslint-disable-next-line no-console
-            console.log(`    license:        ${result.publicMeta.licenseOverride}`);
-          }
-          if (result.publicMeta.homepageUrl !== undefined) {
-            // eslint-disable-next-line no-console
-            console.log(`    homepage:       ${result.publicMeta.homepageUrl}`);
-          }
-          if (result.publicMeta.chatUrl !== undefined) {
-            // eslint-disable-next-line no-console
-            console.log(`    chat:           ${result.publicMeta.chatUrl}`);
-          }
-        }
         // eslint-disable-next-line no-console
         console.log(`  home vaults:      ${result.homeVaults.length}`);
         for (const h of result.homeVaults) {
           // eslint-disable-next-line no-console
           console.log(`    - ${h.vaultName} (${h.vaultRid})`);
-        }
-        if (result.updateCadences.length > 0) {
-          // eslint-disable-next-line no-console
-          console.log(`  update cadences:  ${result.updateCadences.length}`);
-          for (const c of result.updateCadences) {
-            const detail =
-              c.cadenceType === "cron"
-                ? c.cron
-                : c.cadenceType === "interval"
-                  ? `every ${c.intervalSeconds}s`
-                  : "on-demand";
-            // eslint-disable-next-line no-console
-            console.log(`    - vault:${c.vaultRidHex.slice(0, 12)}…  ${c.cadenceType} ${detail ?? ""}`);
-          }
         }
       } catch (err) {
         const status = mapErrorToExitCode(err);

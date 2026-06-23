@@ -20,11 +20,6 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { deleteAllEdgesByRefMesh, insertMeshEdge } from "../registry/mesh-edges-repo.js";
-import {
-  addSubscription,
-  deleteAllSubscriptionsByMesh,
-} from "../registry/mesh-subscriptions-repo.js";
 import {
   addVaultToMesh,
   deleteAllVaultsByMesh,
@@ -56,12 +51,20 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // 3. BEGIN TRANSACTION
 // 4. UPDATE meshes row from parsed @MESH fields (no DELETE on
 // meshes — preserves the FK from vaults.home_mesh_rid)
-// 5. deleteAllVaultsByMesh + deleteAllEdgesByRefMesh +
-// deleteAllSubscriptionsByMesh on the 3 child tables
-// 6. re-INSERT @MESH_HOME rows via addVaultToMesh(role='home');
-// re-INSERT @MESH_EDGE rows via insertMeshEdge; re-INSERT
-// @MESH_SUBSCRIPTION rows via addSubscription
+// 5. deleteAllVaultsByMesh on the mesh_vaults child table
+// 6. re-INSERT @MESH_HOME rows via addVaultToMesh(role='home')
 // 7. COMMIT
+//
+// Fed-v2 Layer-1 (Phase D1c): subscriptions are NO LONGER rebuilt here.
+// mesh.yon stopped being the subscription SoT (no-legacy, design §5);
+// the per-writer ledger shards are, reconstituted into mesh_subscriptions by
+// `rebuildFederationCacheFlow`. Slice 2a: mesh_edges are LIKEWISE no longer
+// rebuilt here — mesh.yon stopped being the edge SoT too; the per-writer
+// mesh-edge ledger is, reconstituted into mesh_edges by
+// `rebuildFederationCacheFlow`. This flow now rebuilds ONLY meshes / mesh_vaults
+// from mesh.yon; it never touches mesh_subscriptions OR mesh_edges. The
+// `subscriptions` + `edges` outcome fields are retained at 0 for JSON-shape
+// stability of existing consumers.
 //
 // Per-mesh transactions (default) keep the blast radius small —
 // one mesh's parse error doesn't roll back successful rebuilds for the
@@ -273,31 +276,19 @@ async function rebuildOneMesh(db: Client, mesh: MeshRow): Promise<MeshRebuildOut
         await updateMeshMainVault(db, mesh.rid, parsed.mesh.mainVaultRid);
       }
 
-      // 5. Wipe the 3 child tables for this mesh.
+      // 5. Wipe the mesh_vaults child table for this mesh. Fed-v2 D1c:
+      //    mesh_subscriptions is NOT touched — it is owned by the ledger
+      // reconstitution (rebuildFederationCacheFlow). Slice 2a: mesh_edges
+      //    is LIKEWISE no longer touched here — mesh.yon stopped being the edge
+      //    SoT (the per-writer ledger is), so the edge cache is owned by
+      //    rebuildFederationCacheFlow's mesh-edge reconstitution. Leaving the
+      //    edge wipe+rebuild in would clobber the ledger-reconstituted cache on
+      //    every registry rebuild (the exact D1c subscription failure mode).
       await deleteAllVaultsByMesh(db, mesh.rid);
-      await deleteAllEdgesByRefMesh(db, mesh.rid);
-      await deleteAllSubscriptionsByMesh(db, mesh.rid);
 
-      // 6. Re-INSERT from parsed records.
+      // 6. Re-INSERT from parsed records (mesh_vaults only).
       for (const home of parsed.homeVaults) {
         await addVaultToMesh(db, mesh.rid, home.vaultRid, "home");
-      }
-      for (const e of parsed.edges) {
-        await insertMeshEdge(db, {
-          refMeshRid: e.refMeshRid,
-          refVaultRid: e.refVaultRid,
-          homeMeshRid: e.homeMeshRid,
-          homeVaultRid: e.homeVaultRid,
-          kind: e.kind,
-        });
-      }
-      for (const s of parsed.subscriptions) {
-        await addSubscription(db, {
-          meshRid: s.meshRid,
-          externalVaultRid: s.externalVaultRid,
-          externalMeshRid: s.externalMeshRid,
-          externalMeshName: s.externalMeshName,
-        });
       }
 
       await db.execute("COMMIT");
@@ -328,8 +319,12 @@ async function rebuildOneMesh(db: Client, mesh: MeshRow): Promise<MeshRebuildOut
     meshRidHex: uuid7BytesToHex(parsed.mesh.rid),
     parsedFrom: meshYonPath,
     homeVaults: parsed.homeVaults.length,
-    edges: parsed.edges.length,
-    subscriptions: parsed.subscriptions.length,
+    // Slice 2a: this flow no longer rebuilds edges (ledger-owned, like
+    // subscriptions). Retained at 0 for JSON-shape stability of existing
+    // consumers + totalsByTable.mesh_edges accumulation.
+    edges: 0,
+    // Fed-v2 D1c: this flow no longer rebuilds subscriptions (ledger-owned).
+    subscriptions: 0,
     status: "ok",
   };
 }

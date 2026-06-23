@@ -11,7 +11,7 @@ requires_writable_vault: false
 
 # /lyt-sync
 
-Sync a Lyt vault — pull, detect-and-commit local changes, push (gated on the v1.G.2 writable verdict). The skill always runs; the push step gates internally on the 6-reason `writable` contract from `lyt vault info --json`, so even read-only / subscriber / orphan / no-remote vaults pull cleanly without touching origin.
+Sync a Lyt vault — pull, detect-and-commit local changes, push (gated on the writable verdict). The skill always runs; the push step gates internally on the 6-reason `writable` contract from `lyt vault info --json`, so even read-only / subscriber / orphan / no-remote vaults pull cleanly without touching origin.
 
 ## When to invoke
 
@@ -40,7 +40,7 @@ If the resolved path **does not exist or is not a Lyt vault** (no `.lyt/vault.yo
 
 > The target vault `<path>` doesn't exist (or isn't a Lyt vault — no `.lyt/vault.yon`). Use `lyt vault init <name>`, or pass `--vault <existing-path>`.
 
-**Path-shape safety check.** Before invoking `git -C <vault-path>`, reject any resolved path that begins with `-` or `--` (defensive against a crafted `--vault` argument, `$LYT_ACTIVE_VAULT` env value, or any other resolver-input that could smuggle a flag-shaped token into the git positional). The `.lyt/vault.yon` existence check above already filters most invalid paths; this `--`-leading rejection closes the remaining flag-injection surface (same family as the G.2 CR-1 gh-flag-injection close). Resolved paths MUST be absolute and MUST start with a drive letter (Windows) or `/` (POSIX) before they enter any `git` argv.
+**Path-shape safety check.** Before invoking `git -C <vault-path>`, reject any resolved path that begins with `-` or `--` (defensive against a crafted `--vault` argument, `$LYT_ACTIVE_VAULT` env value, or any other resolver-input that could smuggle a flag-shaped token into the git positional). The `.lyt/vault.yon` existence check above already filters most invalid paths; this `--`-leading rejection closes the remaining flag-injection surface (the gh-flag-injection defense family). Resolved paths MUST be absolute and MUST start with a drive letter (Windows) or `/` (POSIX) before they enter any `git` argv.
 
 ## Phase 2 — Pull with rebase
 
@@ -52,7 +52,7 @@ git -C <vault-path> pull --rebase
 
 (On Windows, `git -C <path>` works with quoted paths, but the lyt-vault precedent — `flows/clone.ts`, `flows/repair.ts`, `util/git-history.ts` — uses `spawnSync` with `cwd: <vault-path>` so the path doesn't need to be embedded in argv. Skill prose recommends the `cwd` shape for cross-platform stability.)
 
-**On rebase conflict** (`git pull --rebase` exits non-zero with conflict markers): per the ratified default (2026-06-01), do NOT attempt auto-resolution. Surface a structured result to the handler and halt:
+**On rebase conflict** (`git pull --rebase` exits non-zero with conflict markers): do NOT attempt auto-resolution. Surface a structured result to the handler and halt:
 
 ```json
 {
@@ -72,7 +72,7 @@ Run `git -C <vault-path> status --porcelain`. If the output is empty, skip to Ph
 1. Parse the porcelain output into a `GitDiffSummary`-shaped object (`{staged: string[], modified: string[]}`). Porcelain v1 (the default) emits one line per change with a 2-character prefix: column 1 is the index/staged status, column 2 is the working-tree status. Treat any line whose column-1 char is not space or `?` as **staged** (e.g. `A `, `M `, `MM`, `D `); treat any line whose column-2 char is not space (or whose prefix is `??`) as **modified**. Strip the 3-character prefix to recover the file path. Files that appear staged AND modified land in both arrays — that's tolerated; the helper sorts and de-orders naturally and the resulting message just lists the file once or twice depending on its multi-state shape.
 2. Decide on a commit message. The skill exposes one **caller-options**-style choice:
 
-- `options.commit-message: "auto"` _(default — the oversight handler default per the ratified default)_ — call the `inferCommitMessage(diff)` heuristic to summarise the diff:
+- `options.commit-message: "auto"` _(default)_ — call the `inferCommitMessage(diff)` heuristic to summarise the diff:
 - 0 files → `"no changes"` _(defensive; unreached because porcelain was non-empty)_
 - 1 file (non-mesh.yon) → `"sync: <filename>"`
 - 1 file (mesh.yon, at any depth) → `"sync: mesh.yon update"`
@@ -80,7 +80,7 @@ Run `git -C <vault-path> status --porcelain`. If the output is empty, skip to Ph
 - > 4 files → `"sync: N files (<first 3>, +M more)"`
 - `options.commit-message: "prompt-handler"` — pause and ask the handler for a one-line message; do not invent one.
 
-The heuristic lives in `packages/lyt-vault/src/util/sync-helpers.ts` as `inferCommitMessage`; the skill prose reproduces the rules above so an agent can run them inline without importing.
+The heuristic is `inferCommitMessage`; the skill prose reproduces the rules above so an agent can run them inline without importing.
 
 3. Stage and commit. **Pass the message via argv, NOT through shell interpolation.** The shell-syntax pseudocode below is for documentation only; agents executing this skill MUST translate it to an argv-safe `spawnSync` / `execFileSync` call so a filename containing shell metacharacters (backticks, `$()`, `;`, `"`) inside the inferred message can't escape into command execution. Concretely:
 
@@ -94,15 +94,15 @@ spawnSync("git", ["-C", vaultPath, "add", "-A"]);
 spawnSync("git", ["-C", vaultPath, "commit", "-m", message]);
 ```
 
-The matching precedent lives in `packages/lyt-vault/src/flows/clone.ts:87` (`execFileSync("git", ["clone", opts.url, target])`) — the same argv-array shape used everywhere the lyt-vault flow layer shells to git.
+The matching precedent is `execFileSync("git", ["clone", opts.url, target])` — the same argv-array shape used everywhere the lyt-vault flow layer shells to git.
 
 Do **not** add a `Co-Authored-By` trailer (per the project's `CLAUDE.md` commit conventions). Do **not** add an `@STAMP` block — that is a `.yon`-write concern handled by lyt-runner, not the sync skill.
 
 ## Phase 4 — Push (gated on the 6-reason writable verdict)
 
-Invoke `lyt vault info <vault-name> --json` and parse the `vault.writable` and `vault.writableDetermination` fields per the v1.G.2 read-only-awareness contract (see `packages/lyt-vault/src/flows/writability.ts:42-48`). The verdict is tri-state (`true | false | "unknown"`); the determination is one of **6 reasons** the skill must branch on explicitly.
+Invoke `lyt vault info <vault-name> --json` and parse the `vault.writable` and `vault.writableDetermination` fields per the read-only-awareness contract. The verdict is tri-state (`true | false | "unknown"`); the determination is one of **6 reasons** the skill must branch on explicitly.
 
-The actual reason strings emitted by `vault info --json` (per writability.ts at HEAD `16ccdf6`) are listed in the **emitted name** column. The **semantic name** column gives the human-readable synonym some briefs use; the SKILL.md surface uses the semantic name in handler-facing prose, but the comparison MUST be against the emitted name.
+The actual reason strings emitted by `vault info --json` are listed in the **emitted name** column. The **semantic name** column gives the human-readable synonym; the SKILL.md surface uses the semantic name in handler-facing prose, but the comparison MUST be against the emitted name.
 
 | Emitted name (writableDetermination) | Semantic name               | writable    | Phase 4 behavior                                                                                                                                               |
 | ------------------------------------ | --------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -113,7 +113,7 @@ The actual reason strings emitted by `vault info --json` (per writability.ts at 
 | `no-remote`                          | (no-remote)                 | `"unknown"` | Skip push. Report: _"Skipped push: vault has no git remote configured. Configure a remote with `gh repo create` or `git remote add origin <url>`."_            |
 | `orphan-vault`                       | (orphan)                    | `"unknown"` | Skip push. Report: _"Skipped push: vault has no mesh role (orphan). Adopt into a mesh with `lyt mesh adopt --cluster <name>`."_                                |
 
-**Note on emitted vs semantic names.** The brief that authored this skill (v1.G.3 handoff) lists `home-pushable-true` and `home-not-pushable-false` as the writable-determination reason strings. The actual strings emitted by `writability.ts` are `gh-viewerCanPush-true` and `gh-viewerCanPush-false`. The semantic names are kept here as a documentation alias so future renames of the underlying enum (e.g. when the gh-probe naming hardens in v1.G.2.1) don't silently break the skill prose. The 4 unchanged reason strings (`subscriber-default-false`, `gh-unavailable`, `no-remote`, `orphan-vault`) match in both surfaces.
+**Note on emitted vs semantic names.** The semantic names `home-pushable-true` and `home-not-pushable-false` are documentation aliases for the actual emitted strings `gh-viewerCanPush-true` and `gh-viewerCanPush-false`, kept so future renames of the underlying enum don't silently break the skill prose. The 4 other reason strings (`subscriber-default-false`, `gh-unavailable`, `no-remote`, `orphan-vault`) are identical in both surfaces.
 
 Final handler-facing result shape:
 
@@ -131,7 +131,7 @@ Final handler-facing result shape:
 
 ## Rules
 
-- **MUST NOT auto-resolve a rebase conflict.** Halt with the structured-output shape in Phase 2 and let the handler resolve manually. Per the ratified default.
+- **MUST NOT auto-resolve a rebase conflict.** Halt with the structured-output shape in Phase 2 and let the handler resolve manually.
 - **MUST gate push on `vault.writable` / `vault.writableDetermination`.** Never `git push` unless `writableDetermination === "gh-viewerCanPush-true"` (equivalently, `writable === true`). The other 5 reasons all skip push.
 - **MUST branch on all 6 reasons.** Each has a distinct handler-facing message; collapsing them into a generic "can't push" message loses semantic signal the handler needs to recover.
 - **MUST NOT add a `Co-Authored-By` trailer** to the auto-commit. Per the project's `CLAUDE.md` commit conventions, unless the user explicitly requests one.

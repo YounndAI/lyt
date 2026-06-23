@@ -58,7 +58,7 @@ const VALID_SCOPES: ReadonlySet<PrimerScope> = new Set(["vault", "mesh", "federa
 export function buildPrimerCommand(): Command {
   return new Command("primer")
     .description(
-      "v1.D.4: generate an agent-priming markdown file by aggregating top keywords (frequency × recency), active arcs, recent provenance entries, and top lanes across the selected scope. Writes to <vault>/.lyt/primers/{scope}-primer.md (atomic). Query-less aggregation — distinct from `lyt search` (query-driven).",
+      "Generate an agent-priming markdown file by aggregating top keywords (frequency × recency), active arcs, recent provenance entries, and top lanes across the selected scope. Writes to <vault>/.lyt/primers/{scope}-primer.md (atomic). Query-less aggregation — distinct from `lyt search` (query-driven).",
     )
     .requiredOption("--scope <scope>", "Aggregation scope: vault | mesh | federation")
     .option(
@@ -72,7 +72,7 @@ export function buildPrimerCommand(): Command {
       "Days of provenance history to include in Recent activity (default 7)",
     )
     .option("--dry-run", "Render markdown to stdout WITHOUT writing the primer file")
-    .option("--json", "Emit deterministic Lock 0.3 JSON (includes full markdown payload)")
+    .option("--json", "Emit deterministic JSON (includes full markdown payload)")
     .option("--now-iso <iso>", "Pin the 'now' timestamp for deterministic testing (ISO 8601)")
     .action(async (opts: PrimerCliOpts) => {
       const scopeRaw = String(opts.scope ?? "");

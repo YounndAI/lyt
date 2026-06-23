@@ -4,6 +4,11 @@ export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
     environment: "node",
+    // Safety-net for the test-fixture temp-dir leak: sweeps residual `lyt-*`
+    // dirs created in os.tmpdir() during this run (crashed fixtures + the
+    // shared makeRegisteredVault helper). teardown() runs once in the main
+    // process after all files. See tests/_helpers/global-temp-sweep.ts.
+    globalSetup: ["./tests/_helpers/global-temp-sweep.ts"],
     // libsql's native Node binding is not safe to load across worker threads;
     // use a single forked process so file-based registry tests don't compete
     // for Windows file locks. isolate: false shares the module graph across

@@ -1,4 +1,4 @@
-# Multi-mesh — vault, mesh, federation (v1.A.1 + v1.B.\*)
+# Multi-mesh — vault, mesh, federation
 
 Lyt models knowledge in three layers. Understanding the boundary between them
 is the difference between _"I have a folder of notes"_ and _"I have a
@@ -24,8 +24,9 @@ Content lives in vaults; meshes and federations are organisational layers.
 
 A **mesh** is a named group of vaults sharing a GitHub push target. Its
 definition lives in the **main vault's `.lyt/mesh.yon`** — the SoT for which
-vaults the mesh owns (`@MESH_HOME`), references as edges (`@MESH_EDGE`),
-or subscribes to flat (`@MESH_SUBSCRIPTION`). Every mesh has exactly one main
+vaults the mesh owns (`@MESH_HOME`) and references as edges (`@MESH_EDGE`).
+Flat subscriptions to external vaults are recorded in a per-writer
+**subscription ledger**, not in mesh.yon. Every mesh has exactly one main
 vault, structurally locked: the vault is named `main`, and `lyt vault rename`
 refuses any operation on it.
 
@@ -116,14 +117,14 @@ A mesh can reference vaults that live in OTHER meshes. There are two shapes:
 
 | Form                                    | Relationship                         | Rollup propagates?                      | Searchable in referencing mesh? |
 | --------------------------------------- | ------------------------------------ | --------------------------------------- | ------------------------------- |
-| **Edge** (`@MESH_EDGE`)                 | Parent-child between two vaults      | Yes — keywords propagate child → parent | Yes                             |
-| **Subscription** (`@MESH_SUBSCRIPTION`) | Flat reference, no tree relationship | No                                      | Yes                             |
+| **Edge** (`@MESH_EDGE`, in mesh.yon)    | Parent-child between two vaults      | Yes — keywords propagate child → parent | Yes                             |
+| **Subscription** (ledger record)        | Flat reference, no tree relationship | No                                      | Yes                             |
 
 CLI verbs (subscriber-side):
 
 ```bash
-lyt mesh add-edge --child <ref-vault> --parent <home-vault-in-this-mesh>  # v1.C.1
-lyt mesh subscribe --vault <ref-vault>                                     # v1.C.2
+lyt mesh add-edge --child <ref-vault> --parent <home-vault-in-this-mesh>
+lyt mesh subscribe --vault <ref-vault>
 ```
 
 Both are gated on **write-access to the referencing mesh** (the main vault's
@@ -141,7 +142,7 @@ This is the scalability moat: a popular public vault might be referenced by
 not `O(subscribers)`. Same trick works at every scale — your `alex/main`
 doesn't grow when your team `marlink/main` parents 50 vaults under it.
 
-## Moving vaults between meshes — `lyt vault move` (v1.B.3)
+## Moving vaults between meshes — `lyt vault move`
 
 ```bash
 lyt vault move <name> --to-mesh <target-mesh>            # default: branch
@@ -155,11 +156,11 @@ child `@MESH_EDGE` rows re-root onto the new home. Atomic via tmp+rename on
 both mesh.yon files plus a single registry transaction. After committing, the
 move **reads back** the registry row and only reports a clean success when the
 home-mesh assignment actually landed; an unverified outcome is flagged
-`(unverified — run lyt vault list)` (0.9.4 — success must reflect committed
-state). Because the displayed `{mesh}/{vault}` name is computed from the home
+`(unverified — run lyt vault list)`, so a reported success always reflects
+committed state. Because the displayed `{mesh}/{vault}` name is computed from the home
 mesh, `lyt vault list` reflects the move immediately.
 
-## Cloning into another mesh — `lyt vault clone --to-mesh` (v1.B.3)
+## Cloning into another mesh — `lyt vault clone --to-mesh`
 
 ```bash
 lyt vault clone <source-name> --to-mesh <target-mesh>
@@ -170,7 +171,7 @@ source vault is untouched; the target mesh's mesh.yon gains a new `@MESH_HOME`.
 Use this when you want a divergent copy; use `move` when you want to preserve
 identity.
 
-## Multi-mesh init via `lyt init` (v1.B.4)
+## Multi-mesh init via `lyt init`
 
 `lyt init` is idempotent + re-runnable. Three branches, picked by current state:
 
@@ -192,4 +193,3 @@ starter content; the main vault name is locked to `main`).
 - `lyt help mesh` — `lyt mesh init/join/list/rebuild-registry` verbs.
 - `lyt help mesh-yon` — the `mesh.yon` SoT format + round-trip contract.
 - `lyt help federation` — Your Pod (federation repo) + cross-mesh aggregation.
-- `lyt help public-mesh` — federating community vaults.

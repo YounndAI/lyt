@@ -159,7 +159,7 @@ export async function searchFts(db: Client, query: string, limit: number): Promi
   const trimmed = query.trim();
   if (trimmed.length === 0 || limit <= 0) return [];
   const safeLimit = Math.max(1, Math.floor(limit));
-  const escaped = escapeFtsMatch(trimmed);
+  const escaped = buildFtsMatchExpr(trimmed);
   const res = await db.execute({
     sql:
       "SELECT figment_rid, snippet(figment_fts, 1, '<mark>', '</mark>', '…', 32) AS snip, " +
@@ -185,28 +185,77 @@ function rankToRawHits(rank: number | null): number {
   return Math.abs(rank);
 }
 
-// Escape FTS5 MATCH user input by tokenizing on whitespace and
-// wrapping EACH token in double-quotes (FTS5 phrase-of-one). FTS5
-// treats space-separated terms as implicit AND, so this preserves
-// token-AND search semantics (the v1 default — every token must
-// appear in the doc) while quoting each individual token to neutralise
-// any embedded special characters (`:`, `NEAR`, `(`, `)`, `^`,
-// column-prefix operators) that would otherwise surface as FTS5
-// syntax errors for innocuous user queries.
+// C16 (0.9.x) — query-side stopword set. The FTS5 index uses the
+// `porter unicode61` tokenizer, which does NOT strip stopwords at index time,
+// so a raw natural-language question carries its function words into the MATCH.
+// English function words + the question/instruction words that dominate NL
+// queries ("how", "what", "should", …). Query-side only; never affects what is
+// indexed. Non-English stopwords are intentionally NOT listed — they simply
+// survive as keywords (OR-matched), which is harmless.
+const FTS_QUERY_STOPWORDS = new Set([
+  "a", "an", "the", "of", "to", "in", "on", "for", "with", "without", "and",
+  "or", "but", "if", "so", "is", "are", "be", "been", "being", "do", "does", "did", "how",
+  "why", "what", "when", "which", "who", "whom", "that", "this", "these",
+  "those", "should", "would", "could", "can", "may", "might", "will", "i", "my",
+  "me", "it", "its", "as", "at", "by", "from", "into", "over", "under", "out",
+  "up", "down", "off", "about", "against", "between", "through", "during",
+  "before", "after", "you", "your", "they", "them", "their", "our", "we", "us",
+  "he", "she", "his", "her", "not", "no", "any", "some", "all", "more", "most",
+  "just", "like", "really", "actually", "than", "need", "needs", "needing",
+  "keep", "want", "get",
+]);
+
+// Quote a single term as an FTS5 phrase-of-one, doubling internal double-quotes
+// per FTS5 escape rules so embedded special characters are inert.
+function quoteFtsToken(t: string): string {
+  return `"${t.replace(/"/g, '""')}"`;
+}
+
+// Build the FTS5 MATCH expression from raw user input as a stopword-stripped
+// keyword-OR (C16).
 //
-// Examples:
-// "quick fox" → `"quick" "fox"` (both must appear; not adjacent)
-// "test (function)" → `"test" "(function)"` (special-char tokens quoted)
-// "a:b NEAR x" → `"a:b" "NEAR" "x"` (operators neutralised)
+// Why OR, not the prior token-AND: LYT feeds raw natural-language questions to
+// FTS. The previous behaviour quoted EVERY token (stopwords included) and
+// space-joined them — FTS5 implicit AND — so any multi-word question required
+// all of its words (incl. "how"/"the"/"should") to co-occur in one figment,
+// which mechanically returns ~0 (validated: 0% hit@5 on a 27-query
+// vocab-mismatch benchmark on a real 2063-figment corpus). Stripping stopwords
+// + short tokens and ORing the surviving content keywords — with BM25
+// `ORDER BY rank` still ranking figments that match more / rarer keywords
+// highest, so OR does NOT flood the result — recovers recall to ~52% hit@5 /
+// ~70% hit@10 at zero new cost or substrate. `keyword-AND` was measured too and
+// stayed at 0%; only `keyword-OR` recovers — hence OR.
 //
-// Quote-aware tokenisation: internal double-quotes inside a token are
-// doubled per FTS5 escape rules. Empty tokens (after whitespace split)
-// are dropped.
-function escapeFtsMatch(input: string): string {
+// Unicode-aware: splits on non-(letter|number) via \p{L}\p{N} so Romanian / any
+// non-ASCII vault content survives tokenisation (the validation prototype was
+// ASCII-only; production must not drop accented terms). Special characters
+// (`:`, `(`, `)`, `^`, `NEAR`, column operators) are removed during this split,
+// so injection safety is preserved (strictly stronger than the prior quoting).
+//
+// Fallback: if no content keyword survives (e.g. an all-stopword query), fall
+// back to the prior token-AND of all quoted tokens so odd inputs still match
+// something rather than emitting an empty expression.
+function buildFtsMatchExpr(input: string): string {
+  const keywords = [
+    ...new Set(
+      input
+        .toLowerCase()
+        .split(/[^\p{L}\p{N}]+/u)
+        // len > 1 keeps 2-char discriminators (AI / ML / UI / Go / DB / v1);
+        // the stopword set — not a blanket length gate — is the precision
+        // instrument for 1-2-char noise. (release review C16: len > 2 silently
+        // dropped meaningful short tech tokens, over-broadening mixed queries.)
+        .filter((t) => t.length > 1 && !FTS_QUERY_STOPWORDS.has(t)),
+    ),
+  ];
+  if (keywords.length > 0) {
+    return keywords.map(quoteFtsToken).join(" OR ");
+  }
+  // No content keyword survived — preserve the prior token-AND behaviour.
   const tokens = input
     .trim()
     .split(/\s+/)
     .filter((t) => t.length > 0);
   if (tokens.length === 0) return '""';
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ");
+  return tokens.map(quoteFtsToken).join(" ");
 }

@@ -64,7 +64,7 @@ Per yai.lyt v1 frontmatter contract (arc §3), every captured Figment carries 8 
 | `mesh-visibility` | default `local`                       | one of `local` / `parent` / `public` — ask only if user signals a non-default visibility |
 | `weight`          | default `3`                           | int 1–5 importance signal — ask only if user signals a non-default weight                |
 
-**Do NOT author-fill `links-out-of-vault`.** That field is reserved for the lyt scanner (block-B); it is intentionally absent at capture-write time. The contract is "scanner-filled, not author-filled."
+**Do NOT author-fill `links-out-of-vault`.** That field is reserved for the lyt scanner; it is intentionally absent at capture-write time. The contract is "scanner-filled, not author-filled."
 
 The `meta:` blob is a free-form escape hatch (`{}` by default) — fill it only when the content carries a field the 8-field contract does not cover.
 

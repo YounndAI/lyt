@@ -16,7 +16,12 @@
 
 import { Command } from "commander";
 
-import { reindexFlow, withSpinner, type ReindexScope } from "@younndai/lyt-vault";
+import {
+  reindexFlow,
+  withSpinner,
+  isEmbeddingsInteractive,
+  type ReindexScope,
+} from "@younndai/lyt-vault";
 
 interface ReindexCliOpts {
   all?: boolean;
@@ -48,10 +53,22 @@ export function buildReindexCommand(): Command {
         const scope = resolveScope(opts);
         const threshold =
           opts.threshold !== undefined ? Number.parseInt(opts.threshold, 10) : undefined;
+        // C-1 — the build path may prompt + visibly fetch the ~23MB model
+        // ONLY from an interactive terminal: BOTH stdin AND stdout a real TTY,
+        // AND not --json (a --json run is machine-consumed, so it must stay
+        // non-interactive/no-fetch). stdin must be a TTY too — the prompt reads
+        // process.stdin, so `lyt reindex < /dev/null` (redirected stdin, TTY
+        // stdout) must NOT prompt nor fetch (release review Major fold).
+        const embeddingsInteractive = isEmbeddingsInteractive({
+          json: opts.json,
+          stdinTTY: process.stdin.isTTY === true,
+          stdoutTTY: process.stdout.isTTY === true,
+        });
         const reindexArgs = {
           scope: scope.scope,
           ...(scope.target !== undefined ? { target: scope.target } : {}),
           ...(threshold !== undefined && Number.isFinite(threshold) ? { threshold } : {}),
+          ...(embeddingsInteractive ? { embeddingsInteractive: true } : {}),
         };
         // V-DX-1 — liveness spinner over the multi-vault reindex window.
         // --json stays spinner-free; non-TTY prints "Reindexing…" once.

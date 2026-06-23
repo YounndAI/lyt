@@ -58,7 +58,7 @@ interface DiscoverCliOpts {
 export function buildDiscoverCommand(): Command {
   return new Command("discover")
     .description(
-      "v1.C.3: read-only walk of GH-accessible repos; surfaces Lyt vaults clustered by @VAULT_HOME_MESH.mesh_name + per-cluster push-permission flags (master-plan §v1.C.3 + federation-design §11 orphan-mesh recovery). Under --auto, applies per-cluster default decisions (adopt-if-permitted, external-if-not, skip otherwise) and dispatches via orchestrateClusters.",
+      "Read-only walk of GH-accessible repos; surfaces Lyt vaults clustered by @VAULT_HOME_MESH.mesh_name + per-cluster push-permission flags (includes orphan-mesh recovery). Under --auto, applies per-cluster default decisions (adopt-if-permitted, external-if-not, skip otherwise) and dispatches via orchestrateClusters.",
     )
     .option(
       "--owner <handle>",

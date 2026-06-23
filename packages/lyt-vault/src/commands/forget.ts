@@ -29,6 +29,15 @@ export function buildForgetCommand(): Command {
     .action(async (name: string, opts: { tombstone?: boolean }) => {
       const tombstone = opts.tombstone === true;
       const result = await forgetVaultFlow(name, { tombstone });
+      // Phase E item 1 (#9) — surface the orphaned-then-dropped pod-local
+      // aliases (forget has no interactive gate; reported with the outcome).
+      if (result.orphanedAliases.length > 0) {
+        const list = result.orphanedAliases.map((a) => `@${a}`).join(", ");
+        // eslint-disable-next-line no-console
+        console.log(
+          `  dropped ${result.orphanedAliases.length} pod-local alias(es) that pointed here: ${list}`,
+        );
+      }
       if (result.tombstoned) {
         // eslint-disable-next-line no-console
         console.log(

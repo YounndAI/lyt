@@ -105,3 +105,35 @@ export async function deleteAlias(db: Client, alias: string): Promise<boolean> {
   });
   return r.rowsAffected > 0;
 }
+
+// Fed-v2 Layer-1 (Phase E / E2a) — wipe the ENTIRE vault_aliases cache. The
+// DELETE half of the idempotent full-replace reconstitution driven by
+// `rebuildFederationCacheFlow` (the alias analog of
+// `deleteAllSubscriptions`). The ledger shards under `<podRoot>/ledger/aliases/`
+// are the SoT; this table is a derived cache. The caller holds the
+// reconstitution txn.
+export async function deleteAllAliases(db: Client): Promise<void> {
+  await db.execute("DELETE FROM vault_aliases");
+}
+
+// Fed-v2 Layer-1 (Phase E / E2a) — bulk reINSERT half of the full-replace
+// reconstitution. A raw INSERT (NOT an upsert) because the caller has just
+// DELETE'd the table inside the same txn, so no alias can collide — mirroring
+// `addSubscription`'s role on the subscription rail. Carries `kind` (the
+// fold-winning informational kind) so the reconstituted row matches the live
+// alias shape. `createdAt` is supplied by the caller (the table's NOT-NULL
+// column is satisfied; the alias ledger's add-wins fold itself ignores
+// created_at for identity/sort/merge).
+export async function insertAliasRow(
+  db: Client,
+  args: { alias: string; vaultRid: Uint8Array; kind: string; createdAt: string },
+): Promise<void> {
+  if (!isUuidv7Bytes(args.vaultRid)) {
+    throw new Error("insertAliasRow: vaultRid must be a 16-byte UUIDv7 BLOB.");
+  }
+  await db.execute({
+    sql: `INSERT INTO vault_aliases (alias, vault_rid, kind, created_at)
+          VALUES (?, ?, ?, ?)`,
+    args: [args.alias, args.vaultRid, args.kind, args.createdAt],
+  });
+}

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
@@ -24,9 +24,8 @@ import { getMeshByRid } from "../registry/meshes-repo.js";
 import { getVaultByName, getVaultByRid, type VaultRow } from "../registry/repo.js";
 import { regenMeshContextFromYon } from "../scaffold/mesh-context.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
-import { hexToUuid7Bytes, ridsEqual } from "../util/uuid7.js";
-import { parseMeshYon } from "../yon/mesh-read.js";
-import { renderMeshYon, type MeshDoc } from "../yon/mesh-write.js";
+import { hexToUuid7Bytes, ridsEqual, uuid7BytesToDashedString } from "../util/uuid7.js";
+import { appendMeshEdgeTombstone } from "../yon/mesh-edge-ledger-write.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { renderVaultYon, type VaultDoc } from "../yon/vault.js";
 import {
@@ -268,60 +267,45 @@ function parseLifecycle(s: string | null): "active" | "archived" | "frozen" {
   return "active";
 }
 
-// a review finding — best-effort cleanup of the REPLACED parent's edge on --force
-// re-parent: delete the mesh_edges cache row AND filter the @MESH_EDGE
-// record out of the old parent's home mesh.yon SoT (else rebuild-registry
-// re-derives the stale edge and rollup traverses both parents). Never
-// throws — re-parenting must not fail on old-edge cleanup; returns a note
-// describing what happened.
+// Slice 2a — best-effort retraction of the REPLACED parent's edge on --force
+// re-parent. The edge SoT is now the per-writer mesh-edge ledger (no mesh.yon
+// block, no cache-row delete). Append a TOMBSTONE for the old edge's 3-tuple
+// `(ref_mesh = old parent's home mesh, ref_vault = old parent, home_vault =
+// child)` to THIS writer's shard — the add-wins OR-Set fold then drops the old
+// edge from the live set (cache catches up on the next reconstitution). Never
+// throws — re-parenting must not fail on old-edge cleanup; returns a note.
 async function removeStaleParentEdge(
   db: Client,
   oldParentRid: Uint8Array,
   childVault: VaultRow,
 ): Promise<string> {
   try {
-    await db.execute({
-      sql: "DELETE FROM mesh_edges WHERE ref_vault_rid = ? AND home_vault_rid = ? AND kind = 'parent'",
-      args: [oldParentRid, childVault.rid],
-    });
-
     const oldParent = await getVaultByRid(db, oldParentRid);
     if (oldParent === null || oldParent.homeMeshRid === null) {
-      return "removed (cache row; old parent not local or has no home mesh — no mesh.yon SoT to clean)";
+      // Cannot resolve the old parent's home mesh = the edge's ref_mesh; the
+      // 3-tuple is incomplete, so no well-formed tombstone can be appended.
+      return "not retracted (old parent not local or has no home mesh — cannot derive the edge's ref_mesh; run 'lyt repair')";
     }
     const oldMesh = await getMeshByRid(db, oldParent.homeMeshRid);
-    if (oldMesh === null || oldMesh.mainVaultRid === null) {
-      return "removed (cache row; old parent's home mesh has no local main vault — mesh.yon SoT not cleaned, run 'lyt repair')";
+    if (oldMesh === null) {
+      return "not retracted (old parent's home mesh not in registry — run 'lyt repair')";
     }
-    const oldMain = await getVaultByRid(db, oldMesh.mainVaultRid);
-    if (oldMain === null) {
-      return "removed (cache row; old parent's mesh main vault not local — mesh.yon SoT not cleaned, run 'lyt repair')";
-    }
-    const meshYonPath = join(oldMain.path, ".lyt", "mesh.yon");
-    if (!existsSync(meshYonPath)) {
-      return "removed (cache row; old parent's mesh.yon missing — nothing to clean)";
-    }
-    const doc = parseMeshYon(readFileSync(meshYonPath, "utf8"));
-    const filtered = doc.edges.filter(
-      (e) =>
-        !(
-          ridsEqual(e.refVaultRid, oldParentRid) &&
-          ridsEqual(e.homeVaultRid, childVault.rid) &&
-          e.kind === "parent"
-        ),
-    );
-    if (filtered.length === doc.edges.length) {
-      return "removed (cache row; old parent's mesh.yon carried no matching @MESH_EDGE)";
-    }
-    const updated: MeshDoc = { ...doc, edges: filtered };
-    const tmpPath = `${meshYonPath}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmpPath, renderMeshYon(updated), "utf8");
-    renameSync(tmpPath, meshYonPath);
-    return "removed (cache row + old parent's @MESH_EDGE SoT record)";
+    // ref_mesh = the old parent's home mesh; ref_vault = old parent; home_vault
+    // = child. (home_mesh + kind are VALUES, not identity — carried for audit.)
+    appendMeshEdgeTombstone({
+      refMeshRid: uuid7BytesToDashedString(oldMesh.rid),
+      refVaultRid: uuid7BytesToDashedString(oldParentRid),
+      homeVaultRid: uuid7BytesToDashedString(childVault.rid),
+      homeMeshRid:
+        childVault.homeMeshRid !== null
+          ? uuid7BytesToDashedString(childVault.homeMeshRid)
+          : uuid7BytesToDashedString(oldMesh.rid),
+      kind: "parent",
+    });
+    return "retracted (tombstone appended to the mesh-edge ledger; cache catches up on next reconstitution)";
   } catch (err) {
-    // No rethrow — the re-parent itself succeeded; tmp files are pid+ts
-    // suffixed so a leftover is inert.
+    // No rethrow — the re-parent itself succeeded.
     const msg = err instanceof Error ? err.message : String(err);
-    return `cleanup incomplete (${msg}) — run 'lyt mesh validate' + 'lyt repair' to reconcile the old parent edge`;
+    return `retraction incomplete (${msg}) — run 'lyt repair' to reconcile the old parent edge`;
   }
 }

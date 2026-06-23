@@ -31,7 +31,7 @@ interface CaptureMetricRecordOpts {
 // directly).
 export function buildCaptureMetricCommand(): Command {
   const cmd = new Command("capture-metric").description(
-    "Skill-side helper for the v1 frontmatter ergonomics test (arc §9.2). Internal: writes per-capture rows to ~/lyt/registry.db.dogfooding_capture_metrics.",
+    "Skill-side helper for the v1 frontmatter ergonomics test. Internal: writes per-capture rows to ~/lyt/registry.db.dogfooding_capture_metrics.",
   );
 
   cmd

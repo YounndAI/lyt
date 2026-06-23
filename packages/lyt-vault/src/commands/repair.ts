@@ -71,7 +71,7 @@ const BATCH_FINDING_THRESHOLD = 5;
 export function buildRepairCommand(): Command {
   return new Command("repair")
     .description(
-      "v1.C.4: repair broken mesh.yon references / orphan vaults / unparseable mesh.yon (federation-design §11:515-521). Default mode is --dry-run; pass --apply to perform writes. G-5 contract: this is the write-side companion to `lyt mesh validate`.",
+      "Repair broken mesh.yon references / orphan vaults / unparseable mesh.yon. Default mode is --dry-run; pass --apply to perform writes. This is the write-side companion to `lyt mesh validate`.",
     )
     .option(
       "--target <rid|name>",

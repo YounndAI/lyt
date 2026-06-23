@@ -16,12 +16,9 @@
 
 import { Command } from "commander";
 
-import { closeRegistry, openRegistry } from "../registry/client.js";
 import {
-  checkPublicMeshHygiene,
   doctorFlow,
   renderHumanReport,
-  type CheckResult,
 } from "../flows/doctor.js";
 import { withSpinner } from "../util/spinner.js";
 
@@ -29,7 +26,7 @@ export function buildDoctorCommand(): Command {
   const cmd = new Command("doctor");
   cmd
     .description(
-      "Diagnose Lyt's environment: binaries, ~/lyt/ shape, GitHub auth, registry consistency, per-vault .lyt/ shape, network smoke. v1.B.6 adds standalone subcommand 'public_mesh_hygiene'.",
+      "Diagnose Lyt's environment: binaries, ~/lyt/ shape, GitHub auth, registry consistency, per-vault .lyt/ shape, network smoke.",
     )
     .option("--json", "Emit structured JSON instead of the human report")
     .option("--quiet", "Exit code only (0 = all green, 1 = failures, 2 = warnings)")
@@ -38,66 +35,7 @@ export function buildDoctorCommand(): Command {
       "--apply",
       "Brief F — repair instead of report: migrate a legacy ~/lyt/identity.yon → machine.yon and reconcile the machine cache against the pod SoT (pod wins on handle conflict).",
     )
-    .argument(
-      "[check]",
-      "Optional named check to run standalone (e.g. public_mesh_hygiene). When omitted, runs the full doctor flow.",
-    )
-    .option(
-      "--strict",
-      "v1.B.6 — for public_mesh_hygiene standalone: convert warnings to hard failures (exit 1 on first match).",
-    )
-    .action(async (check: string | undefined, opts: DoctorCliOpts) => {
-      if (check === "public_mesh_hygiene") {
-        const db = await openRegistry();
-        let findings: CheckResult[];
-        try {
-          findings = await checkPublicMeshHygiene(db, { strict: opts.strict === true });
-        } finally {
-          await closeRegistry(db);
-        }
-        const failures = findings.filter((f) => f.status === "fail").length;
-        const warnings = findings.filter((f) => f.status === "warn").length;
-        const exitCode = failures > 0 ? 1 : warnings > 0 ? 2 : 0;
-        if (opts.json === true) {
-          process.stdout.write(
-            JSON.stringify(
-              {
-                check: "public_mesh_hygiene",
-                findings,
-                summary: {
-                  failures,
-                  warnings,
-                  passes: findings.filter((f) => f.status === "pass").length,
-                },
-                exit_code: exitCode,
-              },
-              null,
-              2,
-            ) + "\n",
-          );
-          if (exitCode !== 0) process.exit(exitCode);
-          return;
-        }
-        // eslint-disable-next-line no-console
-        console.log("lyt doctor public_mesh_hygiene");
-        for (const f of findings) {
-          const marker =
-            f.status === "pass" ? "✓" : f.status === "warn" ? "⚠" : f.status === "fail" ? "✗" : "i";
-          // eslint-disable-next-line no-console
-          console.log(`  ${marker} ${f.label}: ${f.message}`);
-          if (f.remediation !== undefined) {
-            // eslint-disable-next-line no-console
-            console.log(`      → ${f.remediation}`);
-          }
-        }
-        // eslint-disable-next-line no-console
-        console.log(
-          `\nsummary: ${findings.filter((f) => f.status === "pass").length} pass | ${warnings} warn | ${failures} fail`,
-        );
-        if (exitCode !== 0) process.exit(exitCode);
-        return;
-      }
-
+    .action(async (opts: DoctorCliOpts) => {
       // V-DX-1 — liveness spinner over the binaries/gh-auth/network-smoke
       // window. Gated off for --json (byte-clean) AND --quiet (exit-code-only,
       // machine use); non-TTY prints "Diagnosing…" once (zero escape codes).
@@ -129,6 +67,5 @@ interface DoctorCliOpts {
   json?: boolean;
   quiet?: boolean;
   full?: boolean;
-  strict?: boolean;
   apply?: boolean;
 }

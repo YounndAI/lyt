@@ -49,13 +49,41 @@ export interface LytConfig {
   defaultRepoVisibility: FederationRepoVisibility;
   publishPromptDefault: PublishPromptDefault;
   conflictPosture: ConflictPosture;
+  // feat/microrag-semantic — OPTIONAL local dense-embedding retrieval arm.
+  // → true (DEFAULT-ON when the runtime is available): when the local model
+  // is available, `lyt vault rebuild` builds a per-doc vector cache and
+  // `lyt search` fuses dense retrieval into the cascade BY DEFAULT (no
+  // --semantic flag needed; opt OUT with `lyt search --no-semantic`). The
+  // ARC-D2 invariant is PRESERVED on the degraded path: a pod whose model can't
+  // load OR whose vector cache is empty falls back to a byte-identical lexical
+  // cascade with no error (fuseDense is gated on vectors-present + model-
+  // available). Read via embeddingsEnabled() (config OR LYT_EMBEDDINGS env
+  // override: LYT_EMBEDDINGS=0 forces it off, =1 forces it on).
+  embeddingsEnabled: boolean;
 }
 
 export const DEFAULT_LYT_CONFIG: LytConfig = {
   defaultRepoVisibility: "private",
   publishPromptDefault: "yes",
   conflictPosture: "halt",
+  // default-ON: semantic fusion is the default search posture when the
+  // local embedding runtime is available. The arm self-degrades to a byte-
+  // identical lexical cascade when the model can't load or no vectors exist
+  // (ARC-D2 preserved). Force off with LYT_EMBEDDINGS=0.
+  embeddingsEnabled: true,
 };
+
+// feat/microrag-semantic + resolve whether the embeddings arm is ON.
+// DEFAULT-ON (DEFAULT_LYT_CONFIG.embeddingsEnabled === true). The
+// `LYT_EMBEDDINGS` env var overrides config either way: `=0` forces it OFF,
+// `=1` forces it ON (the bench / config-less callers use the env escape hatch;
+// the config-file layer is deferred). Keeping the read in ONE place avoids
+// coupled-constant drift across the rebuild + search call-sites.
+export function embeddingsEnabled(opts: ResolveConfigOptions = {}): boolean {
+  if (process.env["LYT_EMBEDDINGS"] === "1") return true;
+  if (process.env["LYT_EMBEDDINGS"] === "0") return false;
+  return resolveConfig(opts).embeddingsEnabled;
+}
 
 export interface ResolveConfigOptions {
   // Test/caller override hook. The future config.yon read lands HERE: parse the

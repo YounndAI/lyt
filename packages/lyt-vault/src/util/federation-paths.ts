@@ -158,8 +158,47 @@ const SLUG_SEGMENT = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 // GitHub owner (user/org) charset — case-preserving, no dots.
 const GH_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 
-function isSlugSegment(segment: string): boolean {
+export function isSlugSegment(segment: string): boolean {
   return SLUG_SEGMENT.test(segment);
+}
+
+// fed-v2 Layer-2 P1 — clone-name containment chokepoint. A
+// clone NAME (whether handler-supplied via `--name` or derived from the URL via
+// deriveNameFromUrl) feeds `path.join(vaultsRoot, name)` → `mkdirSync` at the
+// clone target. A crafted `../escape`, an absolute path, a `..` segment, or any
+// non-slug segment must NEVER round-trip into a filesystem path that escapes the
+// vaults root. This is an ALLOWLIST (per-`/`-segment slug check), NOT a `..`
+// denylist — the denylist approach misses encodings/edge cases; the allowlist
+// admits only paths whose EVERY `/`-segment is a slug.
+//
+// CONTAINMENT, NOT DEPTH: the goal is "the resolved path stays inside the vaults
+// root", which is guaranteed when no segment is `..`/empty/absolute. Depth is
+// NOT capped here — a multi-segment name like a reserved system bucket
+// (`subscriptions/{owner}/{vault}`) must pass through so the downstream
+// reserved-mesh guard (assertMeshNameNotReserved at cloneIntoTargetMesh) owns
+// that policy. A legit `owner/repo` and a bare leaf pass; `../escape`, `a/../b`,
+// `/abs`, `a//b` (empty segment), uppercase, dots, and `..` all fail.
+export function assertSafeCloneName(name: string): void {
+  if (typeof name !== "string" || name.length === 0) {
+    throw new Error(`Invalid clone name: name must be a non-empty string.`);
+  }
+  if (name.trim().length === 0) {
+    throw new Error(`Invalid clone name ${JSON.stringify(name)}: must not be whitespace-only.`);
+  }
+  // Split on BOTH separators so a Windows-style `..\escape` is also caught.
+  // A leading/trailing/double separator yields an empty segment → rejected by
+  // the per-segment slug check below (empty is not a slug).
+  const segments = name.split(/[\\/]+/);
+  for (const segment of segments) {
+    if (!isSlugSegment(segment)) {
+      throw new Error(
+        `Invalid clone name ${JSON.stringify(name)}: segment ${JSON.stringify(segment)} is not ` +
+          `slug-safe (lowercase letters, digits, single interior hyphens — no '..', dots, ` +
+          `slashes, uppercase, or empty segments). Refusing — this name could escape the ` +
+          `vaults root. Pick a name like 'notes' or 'mesh/vault'.`,
+      );
+    }
+  }
 }
 
 // Inverse of vaultRepoName: recover `{mesh}/{vault}` from a repo name. Returns

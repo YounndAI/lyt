@@ -47,7 +47,14 @@ export async function registryRebuildFlow(): Promise<RebuildFlowResult> {
         continue;
       }
       try {
-        const v = await registerVaultFromYon(db, { vaultPath: path });
+        // fed-v2 Layer-2 P1 — rebuild wipes the vaults table
+        // (deleteAllVaults above) then re-registers the user's OWN local vaults
+        // by scanning known paths: an identity-preserving restore of trusted
+        // local content, so it carries trustedReconstruction (re-homing a rid to
+        // its current local path is legitimate). The name-mismatch refusal stays
+        // unconditional regardless. NOTE: trustedReconstruction is a no-op today
+        // (upsertVault :267 `void`s it); pre-wired for the P5 same-name-arm gate.
+        const v = await registerVaultFromYon(db, { vaultPath: path, trustedReconstruction: true });
         registered.push(v);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

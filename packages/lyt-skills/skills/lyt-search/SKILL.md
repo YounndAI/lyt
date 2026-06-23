@@ -1,7 +1,7 @@
 ---
 name: lyt-search
 description: >
-  Search a Lyt pod (or a single mesh or vault) using the tiered-cascade engine — Tier 0 arcs (0.95) → Tier 1 lanes (0.90) → Tier 2 FTS5 (0.70) → Tier 3 edges (0.50) — with confidence ranking. Trigger when the user runs /lyt-search <query>, or says "search my pod for X", "find anything about X across my vaults", "search across all meshes for X", "what's in my pod about X", or similar phrasing on a query wider than a single vault. Wraps the `lyt search` CLI verb (v1.D.3b) — federation scope by default; --vault / --mesh narrow scope; --limit caps results. Returns ranked Figments with vault, mesh, snippet, and confidence. Companion to lyt-recall (single-vault keyword grep) for narrower local searches.
+  Search a Lyt pod (or a single mesh or vault) using the tiered-cascade engine — Tier 0 arcs (0.95) → Tier 1 lanes (0.90) → Tier 2 FTS5 (0.70) → Tier 3 edges (0.50) — with confidence ranking. Trigger when the user runs /lyt-search <query>, or says "search my pod for X", "find anything about X across my vaults", "search across all meshes for X", "what's in my pod about X", or similar phrasing on a query wider than a single vault. Wraps the `lyt search` CLI verb — federation scope by default; --vault / --mesh narrow scope; --limit caps results. Returns ranked Figments with vault, mesh, snippet, and confidence. Companion to lyt-recall (single-vault keyword grep) for narrower local searches.
 visibility: public
 lyt-version: 0.5.0
 capabilities: [search]
@@ -11,7 +11,7 @@ requires_writable_vault: false
 
 # /lyt-search
 
-Search a Lyt **pod** (default: every vault across every mesh) using the tiered-cascade engine. The skill is a thin LLM-driven wrapper around the `lyt search` CLI verb (shipped v1.D.3b); the heavy lifting — arc/lane/FTS5/edge cascade, confidence scoring, deterministic JSON emission — already lives in the CLI. The skill resolves the user's intent (query string + scope), invokes the verb with `--json`, parses the Lock 0.3 stable-key-ordered output, and presents ranked results to the handler.
+Search a Lyt **pod** (default: every vault across every mesh) using the tiered-cascade engine. The skill is a thin LLM-driven wrapper around the `lyt search` CLI verb; the heavy lifting — arc/lane/FTS5/edge cascade, confidence scoring, deterministic JSON emission — already lives in the CLI. The skill resolves the user's intent (query string + scope), invokes the verb with `--json`, parses the stable, deterministically key-ordered output, and presents ranked results to the handler.
 
 ## When to invoke
 
@@ -39,7 +39,7 @@ The CLI verb supports three mutually-exclusive scope flags; the default (no flag
 
 1. Run `lyt vault list --json` (vaults) or `lyt mesh list --json` (meshes) first.
 2. Match the user's term to the listed names (exact, then case-insensitive, then prefix).
-3. **Reject any resolved name that begins with `-` or `--`** before passing it to `--vault <name>` / `--mesh <name>` — closes the flag-injection surface the same way lyt-sync does at its Phase 1 (family: G.2 CR-1 gh-flag-injection). Vault names are user-controlled at vault-init time; a vault literally named `--evil` would otherwise smuggle a flag-shaped token into the verb's argv.
+3. **Reject any resolved name that begins with `-` or `--`** before passing it to `--vault <name>` / `--mesh <name>` — closes the flag-injection surface the same way lyt-sync does at its Phase 1 (the gh-flag-injection defense family). Vault names are user-controlled at vault-init time; a vault literally named `--evil` would otherwise smuggle a flag-shaped token into the verb's argv.
 4. If no match (or the only match is `--`-leading), tell the user the available names and stop — do not invent a name.
 
 Do **NOT** pass `--all` as an explicit flag — it's an alias for the default scope. Bare `lyt search` already searches federation; adding `--all` is redundant.
@@ -63,13 +63,13 @@ The Bash-tool variant: pass the argv array form to the tool's `args` field if th
 Key rules:
 
 - The first positional argument is the query — a single string. Multi-word queries are implicit AND. Quote the query so the shell treats it as one argv element.
-- `--json` is **mandatory** for this skill. It yields the deterministic Lock 0.3 stable-key-ordered output the skill parses below; without it, the CLI prints human-readable lines that the skill can't reliably parse.
+- `--json` is **mandatory** for this skill. It yields the deterministic, stable key-ordered output the skill parses below; without it, the CLI prints human-readable lines that the skill can't reliably parse.
 - `--limit <n>` defaults to 20 (CLI default), capped at 1000. Apply caller's `--limit` only when the user explicitly signals a cap ("top 5 results", "first 10"); otherwise rely on the CLI default.
 - Never combine `--vault` AND `--mesh` — the CLI rejects it with `error: "conflicting-scope-flags"` and exits 1.
 
 ## Phase 3 — Parse the JSON output
 
-The CLI emits Lock 0.3 stable-key-ordered JSON on stdout (exit 0 on success). Expected shape:
+The CLI emits stable, deterministically key-ordered JSON on stdout (exit 0 on success). Expected shape:
 
 ```json
 {

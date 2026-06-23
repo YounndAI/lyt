@@ -30,6 +30,17 @@ import { parseVaultYon } from "../yon/parse.js";
 export interface RegisterVaultArgs {
   vaultPath: string;
   status?: VaultStatus;
+  // fed-v2 Layer-2 P1 — identity-preserving restore capability. When
+  // true, a re-registration of a rid ALREADY held locally under the SAME name
+  // may re-home it to a new on-disk path (genuine cross-machine reconstitution:
+  // recover-pod / rebuild re-point an existing vault to a new location). This
+  // NEVER relaxes the name-mismatch refusal: a clone whose vault.yon asserts a
+  // rid owned by a DIFFERENT-named local vault is refused regardless (the
+  // load-bearing impersonation defense). Default false: only re-mint / brand-new
+  // (clone, adopt, init, join, mesh-*) and perfectly-idempotent re-registers
+  // pass. Set true ONLY on the genuine restore axis. NOTE: a no-op today —
+  // upsertVault (:267) `void`s the flag; pre-wired for the P5 same-name-arm gate.
+  trustedReconstruction?: boolean | undefined;
 }
 
 export interface RegisteredVault {
@@ -111,18 +122,22 @@ export async function registerVaultFromYon(
     }
   }
 
-  await upsertVault(db, {
-    rid: ridBytes,
-    name: parsed.name,
-    path: absPath,
-    memscopeRid: memscopeBytes,
-    parentVault: parentBytes,
-    homeMeshRid: homeMeshBytes,
-    tierHint: parsed.tierHint,
-    status: args.status ?? "active",
-    gitUrl,
-    createdAt: parsed.createdAt,
-  });
+  await upsertVault(
+    db,
+    {
+      rid: ridBytes,
+      name: parsed.name,
+      path: absPath,
+      memscopeRid: memscopeBytes,
+      parentVault: parentBytes,
+      homeMeshRid: homeMeshBytes,
+      tierHint: parsed.tierHint,
+      status: args.status ?? "active",
+      gitUrl,
+      createdAt: parsed.createdAt,
+    },
+    { trustedReconstruction: args.trustedReconstruction === true },
+  );
 
   // v1.A.1b: cross-mesh mesh_edges insertion is gated on real `meshes` rows
   // (which v1.B.1 lands). For now, `vaults.parent_vault` carries the parent

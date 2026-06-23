@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-llm",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "Lyt LLM gateway — multi-source LLM routing for AI-assisted vault operations. Composes 4 adapters (ai-relay external / Ollama local / Claude Code-Codex harness / BYOK) behind a single createLlmGateway() surface, with per-automator source preferences, hard constraints, and a per-run cost-budget hard-stop. Registers std:llm.* ops with @younndai/lyt-runner.",
   "homepage": "https://linkyourthink.com",
   "repository": {

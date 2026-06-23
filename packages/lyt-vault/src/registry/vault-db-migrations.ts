@@ -242,12 +242,82 @@ ALTER TABLE figment_meta ADD COLUMN tags TEXT;
 `,
 };
 
+// feat/keyphrase-boost — `keyphrases` cache for the per-doc keyphrase-match
+// rerank boost. A derived cache over the markdown SoT (Lock 0.2), rebuilt by
+// the same full-walk cadence as lanes/arcs/fts via rebuildVaultFlow's
+// `rebuild-keyphrases` step. One row per (figment, keyphrase token); the
+// cascade loads the per-vault set and adds β·keyphraseMatch(query, doc) to the
+// blended score before the final sort (proven β=0.2 → +53% oracle nDCG@5).
+//
+// PK choice (per the standing UUIDv7 directive — surface the reasoning): this
+// is a NON-TEMPORAL per-doc-term LOOKUP table, identical in shape+intent to
+// lane_members / figment_edges (composite TEXT PK), NOT a time-ordered record
+// stream. So the PK is the natural composite (figment_rid, term) — a TEXT path
+// key + TEXT token — NOT a synthetic UUIDv7. UUIDv7's value (time-sortable
+// surrogate) buys nothing here; the composite is the identity and dedups
+// repeated tokens for free. Mirrors the lane_members rationale verbatim.
+//
+// Collision-safety note (avoid the lanes slug-collision class): the key is the
+// RAW lowercase token verbatim (the extractor's tokenizer output), NOT a
+// further-derived slug. There is no second derivation step that could collapse
+// two distinct keys into one, so the tag→slug collision class cannot recur
+// here (a red-prove test pins this). figment_rid is the same vault-relative
+// POSIX path key as figment_fts.figment_rid.
+const lytMigration006Keyphrases: VaultDbMigration = {
+  version: 6,
+  name: "init-keyphrases",
+  sql: `
+CREATE TABLE IF NOT EXISTS keyphrases (
+ figment_rid TEXT NOT NULL,
+ term TEXT NOT NULL,
+ PRIMARY KEY (figment_rid, term)
+);
+
+CREATE INDEX IF NOT EXISTS idx_keyphrases_figment ON keyphrases(figment_rid);
+`,
+};
+
+// feat/microrag-semantic — `embeddings` cache for the OPTIONAL local dense
+// retrieval arm (bge-small-en-v1.5, 384-dim). A derived cache over the markdown
+// SoT (Lock 0.2), rebuilt by the same full-walk cadence as keyphrases via
+// rebuildVaultFlow's `upsert-embeddings` step — but ONLY when embeddings are
+// enabled AND the local model is available (ARC-D2: a base pod with no fastembed
+// never builds this table; an empty table makes dense retrieval a clean no-op).
+//
+// The migration ALWAYS runs (so the schema is uniform across pods); it is the
+// POPULATION that is gated. One row per figment: the raw little-endian Float32
+// vector bytes (`vec`) + `dim` + a content hash (`body_hash`) so a per-write
+// incremental path can skip unchanged docs (deferred — full-walk only for now).
+//
+// Storage choice (per the standing UUIDv7 directive — surface the reasoning):
+// PK is the natural per-doc TEXT path (figment_rid), identical in shape+intent
+// to keyphrases / figment_fts — a NON-TEMPORAL per-doc LOOKUP row, NOT a
+// time-ordered stream, so a synthetic UUIDv7 buys nothing. The vector is a plain
+// BLOB (named with the F32_BLOB convention for readers) of raw Float32 bytes:
+// libSQL @0.15.15 ships no native vector ops, so cosine is brute-forced in JS
+// over the loaded vectors (the proven prototype's approach) — this keeps the
+// table portable across every libSQL build with no vector-extension dependency.
+const lytMigration007Embeddings: VaultDbMigration = {
+  version: 7,
+  name: "init-embeddings",
+  sql: `
+CREATE TABLE IF NOT EXISTS embeddings (
+ figment_rid TEXT NOT NULL PRIMARY KEY,
+ dim INTEGER NOT NULL,
+ body_hash TEXT NOT NULL,
+ vec BLOB NOT NULL
+);
+`,
+};
+
 export const LYT_DB_MIGRATIONS: readonly VaultDbMigration[] = [
   lytMigration001Init,
   lytMigration002Rollup,
   lytMigration003FigmentEdges,
   lytMigration004FigmentMeta,
   lytMigration005FigmentMetaTopicTags,
+  lytMigration006Keyphrases,
+  lytMigration007Embeddings,
 ];
 
 export const LYT_DB_TABLES = Object.freeze([
@@ -268,6 +338,8 @@ export const LYT_DB_TABLES = Object.freeze([
   "rollup",
   "figment_edges",
   "figment_meta",
+  "keyphrases",
+  "embeddings",
 ] as const);
 
 // ---------------------------------------------------------------------------

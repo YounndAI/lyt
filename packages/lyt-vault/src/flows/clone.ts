@@ -32,8 +32,9 @@ import {
 } from "../registry/repo.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
 import { newUuidv7Bytes, uuid7BytesToDashedString } from "../util/uuid7.js";
-import { parseVaultRepoName } from "../util/federation-paths.js";
+import { assertSafeCloneName, isSlugSegment, parseVaultRepoName } from "../util/federation-paths.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
+import { assertMeshNameNotReserved } from "../util/identity.js";
 import { rmWithRetry } from "../scaffold/delete.js";
 import { renderVaultYon } from "../yon/vault.js";
 import { parseVaultYon } from "../yon/parse.js";
@@ -135,7 +136,29 @@ export class CloneTargetMeshNotFoundError extends Error {
 }
 
 export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
+  // fed-v2 Layer-2 P1 — git option-injection guard. A URL beginning
+  // with '-' would be consumed by `git clone` as an OPTION (e.g.
+  // `--upload-pack=<cmd>` → arbitrary command execution), not a positional URL.
+  // Refuse leading-dash URLs BEFORE any git spawn, with an actionable
+  // shape-error (NOT the raw `git clone failed` that proves the option reached
+  // git). Paired with the `--` argv terminator at the spawn below.
+  if (typeof opts.url === "string" && opts.url.startsWith("-")) {
+    throw new Error(
+      `Refusing to clone URL ${JSON.stringify(opts.url)}: a clone URL must not begin with '-'. ` +
+        `A leading dash is interpreted by git as a command-line option (option-injection), ` +
+        `not a repository URL. Provide a normal https:// or git@ URL.`,
+    );
+  }
+
+  // fed-v2 Layer-2 P1 — route BOTH the handler-supplied
+  // `opts.name` AND the URL-derived name through the clone-name containment
+  // allowlist BEFORE join(parent, name)/mkdirSync. A crafted `--name ../escape`
+  // (or a `..`-bearing derived name) would otherwise materialize a directory
+  // OUTSIDE the vaults root. deriveNameFromUrl now also rejects `..` segments at
+  // its own chokepoint, but assert here unconditionally so the handler-supplied
+  // name (which BYPASSES deriveNameFromUrl entirely) is contained too.
   const name = opts.name ?? deriveNameFromUrl(opts.url);
+  assertSafeCloneName(name);
   const parent = resolve(opts.parentDir ?? getDefaultVaultsRoot());
   const target = join(parent, name);
 
@@ -155,7 +178,10 @@ export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
   }
 
   try {
-    execFileSync("git", ["clone", opts.url, target], { stdio: "inherit" });
+    // fed-v2 Layer-2 P1 — `--` terminates git option parsing so the
+    // URL + target are always treated as positionals, never as options, even if
+    // a future code path lets a dash-leading value slip past the guard above.
+    execFileSync("git", ["clone", "--", opts.url, target], { stdio: "inherit" });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // We claimed the dir above, so it is ours to sweep (no
@@ -189,6 +215,21 @@ export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
     }
 
     // Default path: no --to-mesh; v1.B.2-identical behavior.
+    //
+    // fed-v2 Layer-2 P1 — the cloned vault.yon is
+    // FOREIGN (possibly hostile) content. joinVaultFlow → registerVaultFromYon
+    // parse it with the RAW parseVaultYon (join.ts), which leaks
+    // `@VAULT rid`/`parseVaultYon`/`fatal:` jargon up the default `lyt vault
+    // clone <url>` CLI surface on a malformed repo. Pre-validate the cloned
+    // vault.yon through the same actionable-refusal wrapper the --to-mesh path
+    // uses, BEFORE join, so the default path surfaces a field-named, remedy-
+    // bearing refusal instead of raw parser jargon (the over-long-name cap also
+    // fires here for free). A missing .lyt/vault.yon is left to joinVaultFlow's
+    // own actionable "Use 'lyt vault adopt'" message (join.ts:38-42).
+    const defaultYonPath = join(target, ".lyt", "vault.yon");
+    if (existsSync(defaultYonPath)) {
+      parseClonedVaultYonOrRefuse(readFileSync(defaultYonPath, "utf8"), target);
+    }
     const join_ = await joinVaultFlow(target);
     return { ...join_, cloneTargetPath: target, meshAssignment: null, originDetached: null };
   } catch (err) {
@@ -261,6 +302,179 @@ async function removeFailedCloneDir(target: string): Promise<void> {
   }
 }
 
+// fed-v2 Layer-2 P1 — cap the vault name parsed out of a FOREIGN
+// (cloned, possibly hostile) vault.yon. An unbounded name feeds registry rows,
+// path joins, and CLI surfaces; cap it at the parse/register chokepoint.
+// fed-v2 Layer-2 P3 — the SAME bound now also caps `desc` and each
+// `topics` value (assertCloneFieldHygiene below). All three @VAULT single-line
+// metadata fields share this one constant.
+// SEE ALSO (coupled-constant — keep these enforcement sites in sync; this
+// trail is bidirectional):
+//   - name + desc + topics cap enforced → assertCloneFieldHygiene (this file)
+//   - invoked from → parseClonedVaultYonOrRefuse (this file, post-parse)
+const CLONED_VAULT_NAME_MAX = 128;
+
+// fed-v2 Layer-2 P3 — a single-line @VAULT metadata field carrying an
+// embedded line-breaking control char is MALFORMED. YON is line-based
+// (yon/parse.ts splits on /\r?\n/ and reads fields with line-anchored regexes)
+// and escapeQuoted (yon/vault.ts:135) escapes only `\` and `"`, NOT control
+// chars — so a raw newline/CR inside a quoted desc/topic value SPLITS the
+// record on re-emit, breaking the round-trip and enabling forged-record
+// injection (a @TAG/@META smuggled in after a `\n` becomes its own top-level
+// record on re-parse). We refuse the whole C0 control set (U+0000–U+001F) plus
+// DEL (U+007F): none are legitimate in a single-line field, and any of them can
+// break the line-based parse or its anchored regexes. Deliberately NOT a
+// broadening into ordinary punctuation — a leading `|` (U+007C) is printable,
+// not a control char, so it is still accepted (its round-trip is contained).
+//
+// fed-v2 Layer-2 P3 residual — ALSO refuse the Unicode line terminators
+// U+0085 (NEL), U+2028 (LINE SEPARATOR), and U+2029 (PARAGRAPH SEPARATOR). The
+// JS regex engine's `m`-flag `^` treats U+2028/U+2029 as logical line-starts
+// (and `\s` matches them), which was WIDER than this guard's C0/DEL notion — a
+// forged @META/@TAG smuggled after a U+2028 inside a quoted desc value slipped
+// past this door yet was matched by the parser's anchored record readers
+// (gitUrl/ACL-retarget hijack). The parse layer is re-anchored on `\n`/BOF
+// (yon/parse.ts) as the primary fix; widening the guard here brings its
+// line-terminator notion into parity with the regex engine and closes it at the
+// clone boundary for ALL readers (incl. the @VAULT rid / @VAULT_HOME_MESH
+// headers) as defense-in-depth.
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f || c === 0x85 || c === 0x2028 || c === 0x2029) return true;
+  }
+  return false;
+}
+
+// fed-v2 Layer-2 P3 — unified
+// FIELD-HYGIENE refusal at the clone chokepoint for a FOREIGN cloned vault.yon's
+// single-line metadata fields. REFUSE the clone (throw) when a value is
+// over-length (> CLONED_VAULT_NAME_MAX, hardening pass) OR contains an embedded
+// line-breaking control char. The message names the field + the
+// remedy, in the same style as the original name-cap refusal. This is a
+// BOUNDARY refusal — it does NOT touch escapeQuoted/renderVaultYon (the
+// un-escaped-control-char root in shared YON serialization is a tracked residual
+// hardening pass, not fixed here).
+//
+// fed-v2 Layer-2 P3 (guard field-completeness) — the CONTROL-CHAR screen
+// is now applied to EVERY foreign single-line string field, not just
+// name/desc/topics. Rationale: each is a single-line value by format; a raw
+// line-breaker (`\n`/`\r`, U+2028/U+2029/NEL) in ANY of them is malformed and a
+// would-be forged-record carrier on re-emit. The LENGTH cap stays scoped to the
+// short-metadata fields where a 128-char bound is clearly correct (name/desc/
+// topics). gitUrl and version are NOT length-capped — URLs and version strings
+// can legitimately vary in length — but ARE control-char screened. tier_hint is
+// borderline; control-char-only is the conservative choice (no length cap).
+function assertCloneFieldHygiene(
+  parsed: ReturnType<typeof parseVaultYon>,
+  target: string,
+): void {
+  // LENGTH-CAPPED + control-char screened: short-metadata fields with a
+  // clearly-correct 128-char bound.
+  const cappedFields: Array<{ label: string; value: string }> = [];
+  if (typeof parsed.name === "string") cappedFields.push({ label: "name", value: parsed.name });
+  if (typeof parsed.desc === "string") cappedFields.push({ label: "desc", value: parsed.desc });
+  parsed.topics.forEach((t, i) => {
+    if (typeof t === "string") cappedFields.push({ label: `topic[${i}]`, value: t });
+  });
+
+  // CONTROL-CHAR ONLY (no length cap): the remaining foreign single-line string
+  // fields. URLs/versions/identity tokens can legitimately vary in length, so we
+  // screen them for line-breakers only — conservative: control-char everywhere,
+  // length-cap only where a bound is provably correct.
+  const ctrlOnlyFields: Array<{ label: string; value: string }> = [];
+  if (typeof parsed.tierHint === "string") {
+    ctrlOnlyFields.push({ label: "tier_hint", value: parsed.tierHint });
+  }
+  if (typeof parsed.version === "string") {
+    ctrlOnlyFields.push({ label: "version", value: parsed.version });
+  }
+  if (typeof parsed.parentVault === "string") {
+    ctrlOnlyFields.push({ label: "parent_vault", value: parsed.parentVault });
+  }
+  if (typeof parsed.memscopeRid === "string") {
+    ctrlOnlyFields.push({ label: "memscope", value: parsed.memscopeRid });
+  }
+  if (typeof parsed.gitUrl === "string") {
+    ctrlOnlyFields.push({ label: "git_url", value: parsed.gitUrl });
+  }
+  if (typeof parsed.primaryOwner === "string") {
+    ctrlOnlyFields.push({ label: "primary_owner", value: parsed.primaryOwner });
+  }
+  if (typeof parsed.lifecycle === "string") {
+    ctrlOnlyFields.push({ label: "lifecycle", value: parsed.lifecycle });
+  }
+  parsed.shareWith.forEach((s, i) => {
+    if (typeof s === "string") ctrlOnlyFields.push({ label: `share_with[${i}]`, value: s });
+  });
+  parsed.acceptsFrom.forEach((s, i) => {
+    if (typeof s === "string") ctrlOnlyFields.push({ label: `accepts_from[${i}]`, value: s });
+  });
+
+  const throwControlChar = (label: string): never => {
+    throw new Error(
+      `The cloned repository at ${target} declares a vault ${label} containing an embedded ` +
+        `line-breaking control character. Refusing — a single-line metadata field must not ` +
+        `carry control characters (a raw newline/CR would split the record and could inject a ` +
+        `forged YON record on re-emit). Verify the publisher, or republish the vault with a ` +
+        `single-line ${label}.`,
+    );
+  };
+
+  for (const f of cappedFields) {
+    if (f.value.length > CLONED_VAULT_NAME_MAX) {
+      throw new Error(
+        `The cloned repository at ${target} declares a vault ${f.label} of ${f.value.length} ` +
+          `characters, which exceeds the ${CLONED_VAULT_NAME_MAX}-character limit. Refusing — ` +
+          `an over-long ${f.label} is rejected at the clone/subscribe boundary. Verify the publisher.`,
+      );
+    }
+    if (hasControlChar(f.value)) throwControlChar(f.label);
+  }
+
+  for (const f of ctrlOnlyFields) {
+    if (hasControlChar(f.value)) throwControlChar(f.label);
+  }
+}
+
+// fed-v2 Layer-2 P1 — parse a cloned vault.yon at the post-clone
+// chokepoint, converting any raw parser failure (`@VAULT rid`/`@DOC`/parser
+// jargon) into an ACTIONABLE refusal that names the problem (the repo is not a
+// valid Lyt vault) + a remedy, and enforcing the name length cap. Both clone
+// paths route their cloned-yon parse through here so neither leaks raw jargon up
+// to the subscribe/CLI surface:
+//   - default `lyt vault clone <url>` — pre-validates the cloned vault.yon here
+//     BEFORE joinVaultFlow (which would otherwise raw-parseVaultYon it);
+//   - --to-mesh / subscribe (cloneIntoTargetMesh) — parses the cloned vault.yon
+//     here both for the external-mesh-record source read and the rid-rewrite.
+// A genuinely MISSING .lyt/vault.yon is handled by joinVaultFlow's own
+// actionable "use 'lyt vault adopt'" refusal, not here.
+function parseClonedVaultYonOrRefuse(
+  yonContent: string,
+  target: string,
+): ReturnType<typeof parseVaultYon> {
+  let parsed: ReturnType<typeof parseVaultYon>;
+  try {
+    parsed = parseVaultYon(yonContent);
+  } catch {
+    // Swallow the raw parser message (it carries @VAULT/@DOC/rid= jargon the
+    // handler can't act on) and surface a field-named, remedy-bearing refusal.
+    throw new Error(
+      `The cloned repository at ${target} is not a valid Lyt vault: its .lyt/vault.yon ` +
+        `is malformed or missing its required vault-identity declaration. Only well-formed ` +
+        `Lyt-published vaults can be cloned or subscribed; verify the publisher, or for a ` +
+        `plain repo clone it with git and run 'lyt vault adopt <path>' instead.`,
+    );
+  }
+  // fed-v2 Layer-2 P3 — unified field hygiene: the name length cap
+  // (P1/hardening pass) now lives alongside the desc/topics length cap + the
+  // control-char refusal, all enforced over the same FOREIGN parsed
+  // shape at this one chokepoint. Both clone paths (default + --to-mesh/
+  // subscribe) route through here, so they inherit the hygiene.
+  assertCloneFieldHygiene(parsed, target);
+  return parsed;
+}
+
 interface CloneIntoTargetMeshArgs {
   target: string;
   name: string;
@@ -276,6 +490,18 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
   const db = args.registryDb ?? (await openRegistry());
 
   try {
+    // Fed-v2 Layer-1 (Phase release review) — guard-bypass close. A USER-supplied
+    // `--to-mesh <reserved>` (the standalone graduate-a-template clone) could
+    // clone INTO an existing system bucket (`subscriptions/{owner}`), occupying
+    // the reserved namespace without routing through validateMeshName. Mirror the
+    // move guard's mesh-segment extraction. Gate ONLY the user path: the
+    // SUBSCRIBE / mesh-adopt internal callers pass autoRegisterExternalMesh:true
+    // and legitimately home into the (foreign) bucket namespace — they must NOT
+    // be blocked.
+    if (!args.autoRegisterExternalMesh) {
+      assertMeshNameNotReserved(args.toMeshName.split("/")[0]!);
+    }
+
     let meshRow: MeshRow | null = await getMeshByName(db, args.toMeshName);
     let externalMeshAutoRegistered = false;
     if (meshRow === null) {
@@ -300,7 +526,10 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
             `for a plain repo, clone it with git and run 'lyt vault adopt <path>' instead.`,
         );
       }
-      const sourceParsed = parseVaultYon(readFileSync(sourceYonPath, "utf8"));
+      const sourceParsed = parseClonedVaultYonOrRefuse(
+        readFileSync(sourceYonPath, "utf8"),
+        args.target,
+      );
       let externalRid: Uint8Array | null = null;
       if (sourceParsed.homeMesh !== null && sourceParsed.homeMesh.meshName === args.toMeshName) {
         const candidate = hexToUuid7Bytes(sourceParsed.homeMesh.meshRid);
@@ -379,7 +608,7 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
     // Rewrite the cloned vault.yon: fresh rid + @VAULT_HOME_MESH block.
     const vaultYonPath = join(args.target, ".lyt", "vault.yon");
     const oldContent = readFileSync(vaultYonPath, "utf8");
-    const parsed = parseVaultYon(oldContent);
+    const parsed = parseClonedVaultYonOrRefuse(oldContent, args.target);
 
     const freshRid = newUuidv7Bytes();
     const freshRidStr = uuid7BytesToDashedString(freshRid);
@@ -510,9 +739,31 @@ export function deriveNameFromUrl(url: string): string {
   // its `{mesh}/{vault}` NAME at the derive chokepoint, so subscribed/cloned
   // vaults register under their vault name, not their repo name. The parse
   // inverse can't false-positive: vault-name segments never contain `--`.
+  // parseVaultRepoName already enforces per-segment slug-safety internally, so
+  // a convention hit is containment-safe.
   const leaf = segments[segments.length - 1]!;
   const parsedRepoName = parseVaultRepoName(leaf);
   if (parsedRepoName !== null) return parsedRepoName;
-  if (segments.length === 1) return leaf;
-  return `${segments[segments.length - 2]!}/${leaf}`;
+
+  // fed-v2 Layer-2 P1 — the derived name feeds join(vaultsRoot, name)
+  // → mkdirSync at the clone target, so a `..` (or any non-slug) segment must
+  // NEVER round-trip into a traversal path. `.filter(Boolean)` above drops empty
+  // segments but KEEPS `..`, so a URL like `https://github.com/ext/..` would
+  // otherwise derive `ext/..`. Enforce an ALLOWLIST (per-segment slug check) —
+  // NOT a `..`-denylist — on the segments that compose the returned name, and
+  // REFUSE on any violation. assertSafeCloneName at the cloneVaultFlow boundary
+  // is the second layer; rejecting here keeps the unit chokepoint honest for
+  // direct callers.
+  const derived = segments.length === 1 ? leaf : `${segments[segments.length - 2]!}/${leaf}`;
+  for (const seg of derived.split("/")) {
+    if (!isSlugSegment(seg)) {
+      throw new Error(
+        `Cannot derive a safe vault name from URL ${JSON.stringify(url)}: the derived name ` +
+          `${JSON.stringify(derived)} contains a non-slug segment ${JSON.stringify(seg)} ` +
+          `(e.g. '..', a dot, or uppercase) that could escape the vaults root. ` +
+          `Pass an explicit '--name <mesh/vault>' with slug-safe segments instead.`,
+      );
+    }
+  }
+  return derived;
 }

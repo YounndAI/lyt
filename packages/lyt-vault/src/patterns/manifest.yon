@@ -1,6 +1,6 @@
 @DOC ver=2.0 | id=lyt-patterns-manifest | title="Lyt bundled-patterns manifest" | domain=yai.lyt | kind=cfg | profile=agent
 
 @PATTERN_MANIFEST id="decision-log" | version="0.1.0" | hash="b5d1679ec6876f327587a45221859e5bea0b2f8ffa8d6ace59a659917cb0c42d" | prior_hashes=""
-@PATTERN_MANIFEST id="knowledge-capture" | version="0.1.0" | hash="eaa11651c6a22bc0160a5d2e426992173673866254a78c765a2ef73ef8de9c8e" | prior_hashes="657d72136fc6935a81c3ddecc11ba625e94887686a6c70b3f12be5acc561636a"
+@PATTERN_MANIFEST id="knowledge-capture" | version="0.1.0" | hash="ad25383bfd1a208dfba941e2b52b055ddc7ed8eb230a4da0a8bac7bb3470f1e6" | prior_hashes="657d72136fc6935a81c3ddecc11ba625e94887686a6c70b3f12be5acc561636a,eaa11651c6a22bc0160a5d2e426992173673866254a78c765a2ef73ef8de9c8e"
 @PATTERN_MANIFEST id="project-lifecycle" | version="0.1.0" | hash="7f6cc6187afa5ce5380d8ce58a917c44414cc506b5829895b91b0b17613d6b3c" | prior_hashes="fd97beb3106e788cbfa09e0cd8b20ad58313392205dbcfc855c67410c5243b64"
 @PATTERN_MANIFEST id="work-management" | version="0.1.0" | hash="05fc8fe3550c4ac8f4029ddac04d76958be52ba49fb94a9c056d6465478345cb" | prior_hashes="c3e26dfad679f19547751917ab29546612899c6f4ebcc39bdad083ab61bac6ac"

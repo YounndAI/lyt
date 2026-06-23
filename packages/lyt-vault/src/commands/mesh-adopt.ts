@@ -49,7 +49,7 @@ interface MeshAdoptCliOpts {
 export function buildMeshAdoptSubcommand(): Command {
   return new Command("adopt")
     .description(
-      "v1.C.3: adopt an orphan-mesh cluster — scaffold the missing main vault locally + register each cluster member as a @MESH_HOME (federation-design §11:501-529 orphan-mesh recovery + master-plan §v1.C.3).",
+      "Adopt an orphan-mesh cluster — scaffold the missing main vault locally + register each cluster member as a @MESH_HOME (orphan-mesh recovery).",
     )
     .requiredOption(
       "--cluster <name>",

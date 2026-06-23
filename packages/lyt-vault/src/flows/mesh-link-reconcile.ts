@@ -16,7 +16,12 @@
 
 import type { Client } from "@libsql/client";
 
-import { addVaultToMesh, listVaultsInMesh } from "../registry/mesh-vaults-repo.js";
+import {
+  addVaultToMesh,
+  listMeshesForVault,
+  listVaultsInMesh,
+  removeVaultFromMesh,
+} from "../registry/mesh-vaults-repo.js";
 import { listMeshes, updateMeshMainVault, type MeshRow } from "../registry/meshes-repo.js";
 import { listVaults, type VaultRow } from "../registry/repo.js";
 import { ridsEqual } from "../util/uuid7.js";
@@ -192,6 +197,22 @@ export async function reconcileOneMesh(
   const homeRowsAdded: string[] = [];
   for (const v of candidates) {
     if (present.has(v.ridHex)) continue;
+    // S3 bug 4 — the `home` row is SINGLE-VALUED per vault (the partial
+    // unique index `idx_mesh_vaults_home_per_vault` ON vault_rid WHERE
+    // role='home' enforces it). A vault moved between meshes flips its
+    // vault-side `home_mesh_rid` to THIS mesh but can leave a STALE `home`
+    // row in its former mesh. Inserting this mesh's home row would then trip
+    // the index and throw. Reconcile is the corruption-repair surface, so it
+    // OWNS removing that stale cross-mesh home row first — additive insert
+    // alone cannot heal a move. Drop any `home` row the vault holds in a mesh
+    // OTHER than this one before inserting (subscribed rows are untouched —
+    // the index is gated WHERE role='home').
+    const existing = await listMeshesForVault(db, v.rid);
+    for (const row of existing) {
+      if (row.role === "home" && row.meshRidHex !== mesh.ridHex) {
+        await removeVaultFromMesh(db, row.meshRid, v.rid);
+      }
+    }
     await addVaultToMesh(db, mesh.rid, v.rid, "home");
     homeRowsAdded.push(v.name);
   }

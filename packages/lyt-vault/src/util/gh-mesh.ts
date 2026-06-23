@@ -18,6 +18,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { resolveRemoteUrl } from "./remote-url.js";
+
 // v1.B.1 — injectable client for mesh-repo GH + git operations. Mirrors
 // `util/gh-federation.ts` (v1.A.0) — same shape, different surface. Real
 // impl shells out via `gh` + `git`; tests pass a fake (FakeMeshGhClient)
@@ -70,7 +72,7 @@ export const realMeshGhClient: MeshGhClient = {
 
   async cloneRepo(handle, repoName, localDir): Promise<void> {
     mkdirSync(dirname(localDir), { recursive: true });
-    const url = `https://github.com/${handle}/${repoName}.git`;
+    const url = resolveRemoteUrl(handle, repoName);
     execFileSync("git", ["clone", url, localDir], {
       stdio: ["ignore", "ignore", "pipe"],
       shell: isWindows,

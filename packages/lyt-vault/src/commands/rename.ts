@@ -34,7 +34,7 @@ interface RenameCliOpts {
 export function buildRenameCommand(): Command {
   return new Command("rename")
     .description(
-      "v1.B.3: rename a vault. Refuses any name involving 'main' — main vaults are structurally locked per federation-design §3. Emits a @AUDIT vault.renamed ledger record.",
+      "Rename a vault. Refuses any name involving 'main' — main vaults are structurally locked. Emits a @AUDIT vault.renamed ledger record.",
     )
     .argument("<old>", "Existing vault name (e.g., 'personal/notes')")
     .argument("<new>", "New vault name (slug-safe; lowercase; depth 1)")

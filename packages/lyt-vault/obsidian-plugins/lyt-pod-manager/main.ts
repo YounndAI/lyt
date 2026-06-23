@@ -1,4 +1,20 @@
-// v1.G.10 — Lyt Pod Manager Obsidian plugin (TypeScript source).
+/*
+ * Copyright 2026 MARLINK TRADING SRL (YounndAI)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Lyt Pod Manager Obsidian plugin (TypeScript source).
 //
 // Activates on Obsidian startup. Detects whether the active vault is a
 // Lyt pod-map vault (presence of `.lyt/vault.yon` with `kind=pod-map`).
@@ -8,15 +24,14 @@
 //               badge for vault notes whose frontmatter declares
 //               `vault.writable: false`.
 //
-// the ratified default baseline (handler-ratified 2026-06-02): NO management-op buttons
-// (add-edge, subscribe, validate, repair) ship this phase. The extension
-// points are documented as stubs at the bottom of this file so the
-// future mgmt-ops phase lands purely additively.
+// The default baseline ships NO management-op buttons (add-edge, subscribe,
+// validate, repair). The extension points are documented as stubs at the
+// bottom of this file so a future mgmt-ops feature lands purely additively.
 //
-// Degrade-to-baseline contract (brief acceptance (b)(vi)): the pod-map
-// vault is a regular markdown vault with wikilinks. Obsidian's stock
-// graph view renders it without this plugin. The plugin is enhancement
-// only; uninstalling it does not break the pod-map.
+// Degrade-to-baseline contract: the pod-map vault is a regular markdown
+// vault with wikilinks. Obsidian's stock graph view renders it without this
+// plugin. The plugin is enhancement only; uninstalling it does not break the
+// pod-map.
 //
 // Build: `npm install && npm run build` from this folder. The pre-built
 // `main.js` ships alongside this source for Obsidian to load directly
@@ -70,9 +85,9 @@ export default class LytPodManagerPlugin extends Plugin {
       this.registerMeshColoring();
     }
 
-    // FUTURE mgmt-op extension points (the ratified default condition 1). Pure stubs;
-    // no behavior wired. Document the shape so the next phase lands
-    // additively without restructuring this file.
+    // FUTURE mgmt-op extension points. Pure stubs; no behavior wired.
+    // Document the shape so a future feature lands additively without
+    // restructuring this file.
     //
     // FUTURE: this.registerHoverButton(vaultNode, "Add edge", () => spawnLytCli(["mesh","add-edge", ...]))
     // FUTURE: this.registerHoverButton(meshNode, "Subscribe", () => spawnLytCli(["mesh","subscribe", ...]))

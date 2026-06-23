@@ -1,10 +1,10 @@
-# Ledgers — per-vault audit + provenance YON spines (v1.A.2)
+# Ledgers — per-vault audit + provenance YON spines
 
 A **ledger** is a chronologically-ordered, append-only YON file inside a vault
-that records what happened, who did it, and what produced the result. v1.A.2
-ships two ledgers per vault — **audit** and **provenance** — each backed by a
-libSQL cache for fast queries. Per Lock 0.2, the YON file is the source of
-truth; the `.db` is the regenerable cache.
+that records what happened, who did it, and what produced the result. Lyt keeps
+two ledgers per vault — **audit** and **provenance** — each backed by a
+libSQL cache for fast queries. The YON file is the source of truth; the `.db` is
+the regenerable cache.
 
 > Run `lyt help housekeep` for the monthly rotation flow that keeps ledger
 > files small.
@@ -24,7 +24,7 @@ append-only — Lyt never rewrites history.
 ```text
 <vault>/
 ├── .lyt/
-│   ├── ledgers/                     ← YON SoT (Lock 0.2; committed)
+│   ├── ledgers/                     ← YON source of truth (committed)
 │   │   ├── audit.yon                ← current-month audit ledger (open)
 │   │   ├── audit/                   ← rotated month archives
 │   │   │   ├── 2026-04.yon
@@ -82,7 +82,7 @@ lyt provenance trace <file|rid> [--vault <name>] [--json]
 
 Both verbs prefer the `.db` cache when fresh, but fall back to walking the YON
 SoT (`walkLedger`) when the cache is missing or empty (e.g., after a fresh
-clone before the first `lyt sync`). Lock 0.2 holds: the YON is enough.
+clone before the first `lyt sync`). The YON is always enough.
 
 ## Rebuilding the cache
 
@@ -98,7 +98,7 @@ The `--ledger <name>` form is non-destructive (surgically truncates one cache
 table); the unscoped form is destructive (drops all `.db` files + recreates
 schemas). Both re-walk YON SoT and re-insert via idempotent natural-key probe.
 
-## Doctor checks (v1.B.5)
+## Doctor checks
 
 `lyt doctor` includes a fast sanity probe:
 

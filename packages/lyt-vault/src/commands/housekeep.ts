@@ -29,7 +29,7 @@ interface HousekeepCliOpts {
 export function buildHousekeepCommand(): Command {
   return new Command("housekeep")
     .description(
-      "Month-boundary rotation for per-vault YON ledger files. Default: every active vault, every known ledger (audit, provenance). Idempotent — re-runs the same month skip silently. Lock 0.3 deterministic --json. (v1.A.2)",
+      "Month-boundary rotation for per-vault YON ledger files. Default: every active vault, every known ledger (audit, provenance). Idempotent — re-runs the same month skip silently. Deterministic --json.",
     )
     .option("--vault <name>", "Restrict to one vault by name")
     .option("--ledger <name>", `Restrict to one ledger (known: ${KNOWN_LEDGERS.join(", ")})`)

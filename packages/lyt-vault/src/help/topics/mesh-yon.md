@@ -1,8 +1,10 @@
-# `mesh.yon` — the mesh source of truth (v1.B.1 + v1.B.2)
+# `mesh.yon` — the mesh source of truth
 
 A **mesh.yon** is the YON document that defines a [Mesh](#) — its identity,
-its home vaults, its cross-mesh edges, and its cross-mesh subscriptions.
+its home vaults, and its cross-mesh edges.
 It lives at `.lyt/mesh.yon` inside the mesh's main vault, and only there.
+(Cross-mesh **subscriptions** no longer live in mesh.yon — they moved to a
+per-writer append-only **subscription ledger**; see below.)
 The main vault's `mesh.yon` is the **only**
 source of truth for what the mesh contains; everything else — the per-machine
 `registry.db`, the `★ {mesh}/main` markers in `lyt vault list`, the
@@ -19,16 +21,16 @@ federation primer — is derived state that can be regenerated.
 ├── .obsidian/
 ├── .lyt/
 │   ├── vault.yon       ← @VAULT (this vault's identity)
-│   └── mesh.yon        ← @MESH + @MESH_HOME + @MESH_EDGE + @MESH_SUBSCRIPTION
+│   └── mesh.yon        ← @MESH + @MESH_HOME + @MESH_EDGE
 │                         (this whole mesh's identity; only present in the main vault)
 ├── notes/
 └── lyt-overview.md
 ```
 
 Non-main vaults in the mesh do NOT carry a `mesh.yon`. They link back to the
-mesh via `@VAULT_HOME_MESH` inside their own `vault.yon` (v1.B.3).
+mesh via `@VAULT_HOME_MESH` inside their own `vault.yon`.
 
-## The four record types
+## The three record types
 
 ```text
 @DOC ver=2.0 | id=mesh:<dashed-uuidv7> | title="<mesh-name>" | domain=yai.lyt@1.0 | kind=cfg | profile=agent
@@ -51,26 +53,22 @@ mesh via `@VAULT_HOME_MESH` inside their own `vault.yon` (v1.B.3).
   | home_mesh_rid=mesh:<other-mesh-uuidv7>
   | home_vault_rid=vault:<other-vault-uuidv7>
   | kind=parent
-
-# Subscriptions — flat references to external vaults (no rollup)
-@MESH_SUBSCRIPTION mesh_rid=mesh:<dashed-uuidv7>
-  | external_vault_rid=vault:<other-vault-uuidv7>
-  | external_mesh_rid=mesh:<other-mesh-uuidv7>
-  | external_mesh_name="<other-mesh-name>"
 ```
 
-| Record               | Role                                                             | Verb that writes it                                                         |
-| -------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `@MESH`              | The mesh's own identity (rid, name, push target, main vault rid) | `lyt mesh init`                                                             |
-| `@MESH_HOME`         | A vault this mesh owns                                           | `lyt vault init` / `lyt vault clone --to-mesh` / `lyt vault move --to-mesh` |
-| `@MESH_EDGE`         | A parent-child link to an external vault (rollup propagates)     | `lyt mesh add-edge` (v1.C.1)                                                |
-| `@MESH_SUBSCRIPTION` | A flat reference to an external vault (no rollup)                | `lyt mesh subscribe` (v1.C.2)                                               |
+| Record       | Role                                                             | Verb that writes it                                                         |
+| ------------ | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `@MESH`      | The mesh's own identity (rid, name, push target, main vault rid) | `lyt mesh init`                                                             |
+| `@MESH_HOME` | A vault this mesh owns                                           | `lyt vault init` / `lyt vault clone --to-mesh` / `lyt vault move --to-mesh` |
+| `@MESH_EDGE` | A parent-child link to an external vault (rollup propagates)     | `lyt mesh add-edge`                                                         |
 
-`@MESH_EDGE` + `@MESH_SUBSCRIPTION` records ARE parsed + emitted today (v1.B.2)
-even though the verbs that write them ship in v1.C.1 + v1.C.2. Hand-authored
-edges and subscriptions round-trip cleanly.
+Hand-authored `@MESH_EDGE` records round-trip cleanly.
 
-## Round-trip preservation (v1.B.2 contract)
+> **Subscriptions are no longer a mesh.yon record.** `lyt mesh subscribe`
+> appends to a per-writer append-only **subscription ledger** (the source of
+> truth), and the `mesh_subscriptions` cache is reconstituted from that ledger —
+> mesh.yon is never written on subscribe.
+
+## Round-trip preservation
 
 The mesh.yon I/O surface guarantees two invariants:
 
@@ -81,13 +79,11 @@ The mesh.yon I/O surface guarantees two invariants:
    don't already match canonical ordering normalise on first re-render; the
    second pass is a fixed point.
 
-This contract holds because the writer enforces **Lock 0.3 deterministic
-output**:
+This contract holds because the writer enforces **deterministic output**:
 
 - Canonical key order inside each record (header → spec-order fields)
 - `@MESH_HOME` records sorted by `vault_rid` ASC (hex-string lex)
 - `@MESH_EDGE` records sorted by `(home_mesh_rid, home_vault_rid)` ASC
-- `@MESH_SUBSCRIPTION` records sorted by `external_vault_rid` ASC
 
 A second `renderMeshYon(...)` against the same `MeshDoc` produces byte-identical
 output. Consumers can rely on `mesh.yon` files being machine-comparable across
@@ -100,7 +96,8 @@ The per-machine registry caches mesh state for fast lookup:
 - `meshes` ← `@MESH` (one row per mesh)
 - `mesh_vaults` ← `@MESH_HOME` (one row per home vault)
 - `mesh_edges` ← `@MESH_EDGE` (one row per edge)
-- `mesh_subscriptions` ← `@MESH_SUBSCRIPTION` (one row per subscription)
+- `mesh_subscriptions` ← reconstituted from the subscription **ledger** (one
+  row per live subscription), not from mesh.yon
 
 The cache is **regenerable**. If `registry.db` is deleted, hand-corrupted, or
 falls out of sync with disk, the rebuild verb re-derives every row from the
@@ -114,7 +111,7 @@ lyt mesh rebuild-registry --mesh acme  # restricts to one mesh
 `rebuild-registry` is purely **read-only** against mesh.yon files — it never
 re-emits them. The disk SoT is authoritative; the cache catches up.
 
-## Doctor checks (v1.B.5)
+## Doctor checks
 
 `lyt doctor` includes two checks that probe `mesh.yon` health:
 
@@ -126,11 +123,10 @@ re-emits them. The disk SoT is authoritative; the cache catches up.
 
 Run `lyt help doctor` for the full check list.
 
-## What doesn't ship in v1.B.2
+## Not yet shipped
 
-- `lyt mesh add-edge` — writer for `@MESH_EDGE` (v1.C.1).
-- `lyt mesh subscribe` — writer for `@MESH_SUBSCRIPTION` (v1.C.2).
-- `mesh.yon` auto-heal on sync conflicts — record-level merge ships in v1.C+.
+- `mesh.yon` auto-heal on sync conflicts — record-level merge is planned. Until
+  then, resolve `mesh.yon` conflicts with Git and re-run `lyt mesh rebuild-registry`.
 
 ## See also
 

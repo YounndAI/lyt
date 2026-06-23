@@ -45,6 +45,11 @@ export interface ReindexArgs {
   threshold?: number;
   registryDb?: Client;
   nowIso?: string;
+  // C-1 — interactivity signal threaded to each rebuildVaultFlow's
+  // embeddings build gate. The CLI sets this true ONLY on an interactive TTY
+  // (not --json), so the build path may prompt + visibly fetch the ~23MB model;
+  // default-undefined (non-interactive) → never prompt, never auto-fetch.
+  embeddingsInteractive?: boolean;
 }
 
 export interface ReindexResult {
@@ -88,6 +93,9 @@ export async function reindexFlow(args: ReindexArgs): Promise<ReindexResult> {
           registryDb,
           ...(args.nowIso !== undefined ? { nowIso: args.nowIso } : {}),
           ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+          ...(args.embeddingsInteractive !== undefined
+            ? { embeddingsInteractive: args.embeddingsInteractive }
+            : {}),
         }),
       );
     }

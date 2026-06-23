@@ -234,6 +234,16 @@ export async function generatePodMapFlow(args: PodMapArgs): Promise<PodMapResult
 
       const outgoingEdges = await listEdgesByRefMesh(db, m.rid);
       const incomingSubs = await listSubscriptionsForMesh(db, m.rid);
+      // Fed-v2 D1c: the subscription cache row no longer carries the foreign
+      // mesh name (external_mesh_* dropped). Resolve each subscription's
+      // SUBSCRIBED VAULT name from external_vault_rid for the pod-map link
+      // (the subscribed vault is the meaningful target of an incoming
+      // subscription now that homing buckets replace foreign-mesh adoption).
+      const incomingSubVaultNames: string[] = [];
+      for (const s of incomingSubs) {
+        const sv = await getVaultByRid(db, s.externalVaultRid);
+        if (sv !== null) incomingSubVaultNames.push(sv.name);
+      }
 
       meshContexts.push({
         mesh: m,
@@ -244,7 +254,11 @@ export async function generatePodMapFlow(args: PodMapArgs): Promise<PodMapResult
         // mesh-NAME order (per release review fix; the prior code
         // sorted by ridHex which gave visually-arbitrary order).
         outgoingEdgeMeshRids: outgoingEdges.map((e) => e.homeMeshRidHex),
-        incomingSubMeshNames: incomingSubs.map((s) => s.externalMeshName).sort(),
+        // Fed-v2 D1c: these are SUBSCRIBED-VAULT names (resolved from
+        // external_vault_rid above), not mesh names — so they link to
+        // `vaults/` notes, not `meshes/`. The field name + link target +
+        // heading all carry the vault entity for internal consistency.
+        incomingSubVaultNames: incomingSubVaultNames.sort(),
       });
     }
 
@@ -347,7 +361,7 @@ export async function generatePodMapFlow(args: PodMapArgs): Promise<PodMapResult
         .filter((n): n is string => n !== undefined)
         .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
         .map((n) => slugifyVaultName(n));
-      const incomingSubLinks = ctx.incomingSubMeshNames.map((n) => slugifyVaultName(n));
+      const incomingSubLinks = ctx.incomingSubVaultNames.map((n) => slugifyVaultName(n));
       const meshNoteName = slugifyVaultName(ctx.mesh.name);
       const meshNoteContent = renderMeshNote({
         meshName: ctx.mesh.name,
@@ -498,7 +512,9 @@ interface MeshContext {
   homeRefs: VaultRef[];
   subscribedRefs: VaultRef[];
   outgoingEdgeMeshRids: string[];
-  incomingSubMeshNames: string[];
+  // Fed-v2 D1c: subscribed-VAULT names for incoming subscriptions (links
+  // resolve to `vaults/` notes, not `meshes/`).
+  incomingSubVaultNames: string[];
 }
 
 function derivePodMapPaths(vaultsRoot: string, ownerSlug: string): PodMapVaultPaths {
@@ -648,10 +664,10 @@ function renderMeshNote(args: MeshNoteArgs): string {
     (args.outgoingEdgeTargets.length === 0
       ? `- _(none)_\n`
       : args.outgoingEdgeTargets.map((n) => `- [[../meshes/${n}]]`).join("\n") + "\n") +
-    `\nIncoming subscriptions (this mesh is subscribed by):\n\n` +
+    `\nSubscribed vaults (external vaults this mesh subscribes to):\n\n` +
     (args.incomingSubLinks.length === 0
       ? `- _(none)_\n`
-      : args.incomingSubLinks.map((n) => `- [[../meshes/${n}]]`).join("\n") + "\n");
+      : args.incomingSubLinks.map((n) => `- [[../vaults/${n}]]`).join("\n") + "\n");
   return fm + body;
 }
 

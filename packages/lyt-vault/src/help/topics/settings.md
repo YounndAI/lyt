@@ -45,20 +45,25 @@ both safe to allowlist project-wide.
 | `.lyt/vault.yon`                                  | yes        | Vault identity + mesh edges                                                              |
 | `.lyt/memscope.yon`                               | yes        | Access policy                                                                            |
 | `.lyt/mesh-context.md`                            | yes        | Auto-regenerated mesh context (transcluded in `lyt-overview.md`)                         |
-| `.lyt/ledgers/audit.yon`                          | yes        | Audit ledger SoT (Lock 0.2) — committed                                                  |
-| `.lyt/ledgers/provenance.yon`                     | yes        | Provenance ledger SoT (Lock 0.2) — committed                                             |
+| `.lyt/ledgers/audit.yon`                          | yes        | Audit ledger source of truth — committed                                                 |
+| `.lyt/ledgers/provenance.yon`                     | yes        | Provenance ledger source of truth — committed                                            |
 | `.lyt/indexes/lyt.db`                             | no         | libSQL cache for `vault_state` + `automator_runs` + `automator_run_events` (rebuildable) |
 | `.lyt/indexes/audit.db`                           | no         | libSQL cache for `audit_log` (rebuildable from `.lyt/ledgers/audit.yon`)                 |
 | `.lyt/indexes/provenance.db`                      | no         | libSQL cache for `provenance` (rebuildable from `.lyt/ledgers/provenance.yon`)           |
 | `.lyt/indexes/*.db-shm` / `.lyt/indexes/*.db-wal` | no         | libSQL WAL artifacts                                                                     |
 | `.lyt/outbox.db`                                  | no         | Queued offline writes                                                                    |
 
-The vault's `.gitignore` excludes `.lyt/indexes/` (post-v1.A.2c DB SPLIT)
-plus legacy `.lyt/lyt.db*` retention lines (covering stale dev vaults
-predating the layout pivot). The `.lyt/ledgers/` subdir is explicitly
-un-ignored so the YON ledger SoT files commit cleanly.
+The vault's `.gitignore` excludes the regenerable `.lyt/indexes/` caches. The
+`.lyt/ledgers/` subdir is explicitly un-ignored so the YON ledger source-of-truth
+files commit cleanly.
 
-## Forward-doc config
+## Environment variables
 
-A `~/lyt/lyt.config.yon` per-machine config file ships in Phase 8+ for tunable
-sync cadence + LLM-provider config. v1.0.0 hard-codes both.
+A few environment variables tune per-machine behavior:
+
+| Variable                    | Effect                                                                       |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `LYT_HOME`                  | Override the default `~/lyt/` root (registry, vaults, caches).               |
+| `LYT_EMBEDDINGS`            | `0` disables semantic search; `1` forces it on.                              |
+| `LYT_EMBEDDINGS_CACHE_DIR`  | Override where the semantic-search model caches (default `~/lyt/.embeddings-cache/`). |
+| `LYT_TOMBSTONE_THRESHOLD`   | Consecutive failed `verify` runs before a missing vault is tombstoned (default 3). |

@@ -46,7 +46,7 @@ interface AddMeshEdgeCliOpts {
 export function buildMeshAddEdgeSubcommand(): Command {
   return new Command("add-edge")
     .description(
-      "v1.C.1: write a parent-child @MESH_EDGE into the parent's home mesh's mesh.yon (asymmetric — referenced child's mesh.yon untouched). Both vaults must be in the local registry; the parent's home mesh main vault must exist locally (mesh.yon writes only land on main vaults per naming-convention).",
+      "Write a parent-child @MESH_EDGE into the parent's home mesh's mesh.yon (asymmetric — referenced child's mesh.yon untouched). Both vaults must be in the local registry; the parent's home mesh main vault must exist locally (mesh.yon writes only land on main vaults per naming-convention).",
     )
     .requiredOption(
       "--child <name>",

@@ -1,10 +1,10 @@
-# `lyt federation` — Your Pod (v1.A.0)
+# `lyt federation` — Your Pod
 
-> v1.B.4 update — `lyt init` is the canonical bootstrap and will forge Your
-> Pod automatically when the local registry is empty. The
-> `lyt federation init` verb below remains the explicit surface, but most
-> handlers should run `lyt init` instead. Run `lyt help multi-mesh` for the
-> vault/mesh/federation model and how `lyt init` composes them.
+> `lyt init` is the canonical bootstrap and forges Your Pod automatically when
+> the local registry is empty. The `lyt federation init` verb below remains the
+> explicit surface, but most handlers should run `lyt init` instead. Run
+> `lyt help multi-mesh` for the vault/mesh/federation model and how `lyt init`
+> composes them.
 
 The **federation repo** (user-facing: **Your Pod**) is the per-user GitHub
 repo `{handle}/lyt-pod` that anchors which meshes you participate
@@ -72,7 +72,7 @@ Reads cached `pod.yon` and prints meshes deterministically
 ```
 $ lyt federation list
 Your Pod spans 0 meshes:
-  (no meshes yet — multi-mesh tables ship in v1.A.1)
+  (no meshes yet)
 ```
 
 `--json` mode emits a structured object every consumer can read identically.
@@ -106,19 +106,20 @@ one globally-unique, stable property a shared vault has: its git origin.
 `lyt vault info <name>` surfaces a vault's origin coordinate (or `null` when the
 vault is local-only). Use the coordinate for replayable cross-pod references.
 
+## Publishing Your Pod
+
+`lyt sync` regenerates `pod.yon` and pushes Your Pod as part of its publish pass
+(running `lyt sync` is the consent for that outward step). To regenerate and push
+the manifest on its own, run `lyt federation rebuild --push`.
+
 ## Not yet shipped
 
-- Pushing `pod.yon` to the remote pod repo on every mutation — today the
-  manifest regenerates LOCALLY; the automatic commit/push round-trip ships
-  with the publish/sync engine. Until then, run `lyt federation rebuild --push`.
-- `@FED_AUTOMATOR` / `@FED_PRIMER` / `@FED_CANVAS` records — schema
-  shapes are reserved; full writes land in later phases (v1.E.5, v1.D.4,
-  v1.D.5 respectively).
-- Formal yai.lyt JSON schema validation — v1.A.3.
+- `@FED_AUTOMATOR` / `@FED_PRIMER` / `@FED_CANVAS` records — the schema shapes
+  are reserved; full writes land in a later release.
 - Public-mesh-aware federation primer (browse-only / pin-commit / cadence
-  override) — those land in v1.D.4 + v1.5 Lane Pm.
+  override).
 
 ## See also
 
-- `lyt help machine` — machine roles drive automator dispatch (block-B
-  consumer).
+- `lyt help machine` — machine roles drive automator dispatch.
+- `lyt help sync` — how the pod publish pass works.

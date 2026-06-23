@@ -62,7 +62,7 @@ lyt vault init alex/main       # vault primitive   (@younndai/lyt-vault)
 lyt alias home alex/main       # pod-local name → vault rid (survives rename + move)
 lyt mesh status                # federation layer  (@younndai/lyt-mesh)
 lyt pattern list               # patterns + skills (@younndai/lyt-vault)
-lyt mcp serve                  # MCP server        (@younndai/lyt-mcp)
+lyt mcp start                  # MCP server        (@younndai/lyt-mcp)
 lyt doctor --json              # diagnostics       (@younndai/lyt-vault)
 ```
 

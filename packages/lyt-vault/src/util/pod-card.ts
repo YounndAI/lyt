@@ -149,9 +149,22 @@ export function renderPodCard(data: PodCardData): string {
   void vaultUrl; // GitHub vault URL reserved for when vault push lands in the card
 
   // Pod repo.
+  // C1 (init honesty) — the live github.com URL is HONEST whenever the repo
+  // actually exists on GitHub. gh-wired init creates the pod repo up front
+  // (federation/init.ts → ghClient.createRepo), so BOTH "staged" (repo created,
+  // content not yet pushed) AND "published" (round-trip complete) have a real
+  // repo at that URL — a live link is correct for both. ONLY "local-only" (a
+  // no-gh / provisional init) has NO repo yet; there the link would 404, so we
+  // show the bare `{handle}/lyt-pod` identity + an honest "created on `lyt sync`"
+  // qualifier and no live link. (The earlier wording wrongly said "not on
+  // GitHub yet" for staged too — staged DOES have the repo.)
   lines.push("│");
   const podUrl = `${GH_BASE}/${data.podRepoFullName}`;
-  lines.push(`│ lyt-pod:   ${link(podUrl, data.podRepoFullName)}`);
+  lines.push(
+    localOnly
+      ? `│ lyt-pod:   ${data.podRepoFullName} (created on \`lyt sync\` — not on GitHub yet)`
+      : `│ lyt-pod:   ${link(podUrl, data.podRepoFullName)}`,
+  );
   if (data.podLocalPath !== undefined && data.podLocalPath.length > 0) {
     lines.push(`│   path:    ${link(data.podLocalPath, data.podLocalPath)}`);
   }

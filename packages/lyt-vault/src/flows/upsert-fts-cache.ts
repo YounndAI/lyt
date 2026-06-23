@@ -169,6 +169,15 @@ function walkMarkdownFiles(root: string): string[] {
   return out;
 }
 
+// feat/keyphrase-boost — exported full-walk over `<vault>/notes/**/*.md` for the
+// keyphrases cache, so the keyphrase index walks the IDENTICAL file set the FTS
+// index walks (same scaffold exclusion, same sort order). Sharing the walk
+// guarantees a result the FTS tier can surface always has a keyphrase row to
+// match against — no path the boost silently can't reach.
+export function walkVaultMarkdownFiles(vaultPath: string): string[] {
+  return walkMarkdownFiles(join(vaultPath, "notes"));
+}
+
 // Exported (Lane M Wave 0) so the incremental per-write reconcile path
 // (flows/reconcile-figment-write.ts) computes the SAME vault-relative
 // POSIX FTS key as this full-walk reconcile — divergence would let a

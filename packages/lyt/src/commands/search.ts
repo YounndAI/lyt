@@ -60,6 +60,11 @@ interface SearchCliOpts {
   json?: boolean;
   // commander negatable flag: `selfHeal` defaults true; `--no-self-heal` → false.
   selfHeal?: boolean;
+  // dense-retrieval fusion. Commander negatable flag: `semantic` defaults
+  // true; `--no-semantic` → false. The flow's gate (semantic ?? embeddingsEnabled())
+  // still decides whether fusion actually runs, so a pod with embeddings off
+  // stays byte-identical (ARC-D2) even with the default-on flag.
+  semantic?: boolean;
 }
 
 const DEFAULT_LIMIT = 20;
@@ -68,17 +73,21 @@ const MAX_LIMIT = 1000;
 export function buildSearchCommand(): Command {
   return new Command("search")
     .description(
-      "v1.D.3: tiered-cascade search across vaults. Cascade: Tier 0 arcs (0.95) → Tier 1 lanes (0.9) → Tier 2 FTS5 (0.7) → Tier 3 edges (0.5). Default scope = federation (every vault across every mesh per §v1.D.3:786). Use --vault / --mesh for narrower scope; --all is the explicit federation alias.",
+      "Tiered-cascade search across vaults. Cascade: Tier 0 arcs (0.95) → Tier 1 lanes (0.9) → Tier 2 FTS5 (0.7) → Tier 3 edges (0.5). Default scope = federation (every vault across every mesh). Use --vault / --mesh for narrower scope; --all is the explicit federation alias.",
     )
     .argument("<query>", "Search query (multi-word: implicit AND)")
     .option("--vault <name>", "Search only the named vault (skips Tier 3)")
     .option("--mesh <name>", "Search only vaults home-to OR referenced-by the named mesh")
     .option("--all", "Explicit alias for federation scope (default behavior)")
     .option("--limit <n>", `Max results (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`)
-    .option("--json", "Emit deterministic Lock 0.3 JSON instead of human-readable lines")
+    .option("--json", "Emit deterministic JSON instead of human-readable lines")
     .option(
       "--no-self-heal",
       "Disable the empty-result self-heal (on 0 hits, search reindexes stale vaults + re-queries). Auto-disabled under --json.",
+    )
+    .option(
+      "--no-semantic",
+      "Disable local dense-embedding fusion (on by default). By default search fuses dense retrieval into the cascade when embeddings are enabled + a vector cache is built; it already falls back to lexical search when the model/cache is unavailable. Pass --no-semantic to force the pure lexical cascade.",
     )
     .action(async (query: string, opts: SearchCliOpts) => {
       // Resolve scope from mutually-exclusive flags.
@@ -152,6 +161,14 @@ export function buildSearchCommand(): Command {
           limit,
           ...(scopeTarget !== undefined ? { scopeTarget } : {}),
           ...(selfHeal ? { selfHeal: true } : {}),
+          // the semantic DEFAULT now lives in the FLOW (semantic ??
+          // embeddingsEnabled()), so CLI and MCP are consistent. The CLI only
+          // forwards the EXPLICIT opt-out: --no-semantic sets opts.semantic=false
+          // → semantic:false (forces the pure lexical cascade). When the user
+          // does NOT pass --no-semantic we leave `semantic` UNSPECIFIED so the
+          // flow applies the embeddingsEnabled() default (an embeddings-off pod
+          // is byte-unchanged either way).
+          ...(opts.semantic === false ? { semantic: false } : {}),
         };
         // V-DX-1 — liveness spinner over the silent DB-open + cascade window.
         // --json stays spinner-free (mirror init: useSpinner = json !== true);

@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 
 import { resolveConfig } from "../../util/config.js";
 import { vaultRepoName } from "../../util/federation-paths.js";
+import { resolveRemoteUrl } from "../../util/remote-url.js";
 import { isValidGhHandle } from "../../util/identity.js";
 import {
   realFederationGhClient,
@@ -198,7 +199,7 @@ export async function materializeVaultPublishable(
   // a no-gh LOCAL init passes setRemote=false so the provisional handle
   // never lands in a remote URL; connect re-materializes with setRemote=true.
   if (setRemote) {
-    const originUrl = `https://github.com/${handle}/${repoName}.git`;
+    const originUrl = resolveRemoteUrl(handle, repoName);
     const origin = await git(["remote", "get-url", "origin"], {
       cwd: vault.path,
       allowFailure: true,

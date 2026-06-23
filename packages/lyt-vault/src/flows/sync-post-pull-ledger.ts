@@ -25,15 +25,13 @@
 // Idempotent — natural-key probes prevent duplicate injection. Safe to
 // re-run on every sync.
 
-import { reinjectAuditRecord } from "../registry/audit-write.js";
+import { reinjectAuditRecord, walkAllAuditShards } from "../registry/audit-write.js";
 import {
   mapAuditYonToCacheArgs,
   mapProvenanceYonToCacheArgs,
 } from "../registry/_helpers/ledger-yon-mapper.js";
-import { reinjectProvenanceRecord } from "../registry/provenance-write.js";
+import { reinjectProvenanceRecord, walkAllProvenanceShards } from "../registry/provenance-write.js";
 import { closeVaultDb, openAuditDb, openProvenanceDb } from "../registry/vault-db.js";
-import { walkLedger } from "../yon/ledger-read.js";
-import { join } from "node:path";
 
 export interface UpsertLedgerCacheResult {
   vaultPath: string;
@@ -52,14 +50,14 @@ export async function upsertLedgerCache(vaultPath: string): Promise<UpsertLedger
   const auditDb = await openAuditDb(vaultPath);
   const provenanceDb = await openProvenanceDb(vaultPath);
   try {
-    const ledgerDir = join(vaultPath, ".lyt", "ledgers");
-    for (const r of walkLedger(ledgerDir, "audit")) {
+    // Slice 2b: walk all per-writerId shards + legacy flat file.
+    for (const r of walkAllAuditShards(vaultPath)) {
       // sync defaults "vault.access.lost" preserved verbatim.
       const fields = mapAuditYonToCacheArgs(r, "vault.access.lost");
       if (fields === null) continue;
       if (await reinjectAuditRecord(auditDb, fields)) auditUpserted += 1;
     }
-    for (const r of walkLedger(ledgerDir, "provenance")) {
+    for (const r of walkAllProvenanceShards(vaultPath)) {
       const fields = mapProvenanceYonToCacheArgs(r);
       if (fields === null) continue;
       if (await reinjectProvenanceRecord(provenanceDb, fields)) provenanceUpserted += 1;

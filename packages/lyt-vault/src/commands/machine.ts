@@ -33,11 +33,11 @@ interface MachineCliOpts {
 // block-B's automator runtime reads from this table for requires_role checks.
 export function buildMachineCommand(): Command {
   const cmd = new Command("machine").description(
-    "Inspect + configure per-machine state — roles (client | automator-runner | mesh-syncer | llm-host) + region (handler-declared, arc §7 + §7.10).",
+    "Inspect + configure per-machine state — roles (client | automator-runner | mesh-syncer | llm-host) + region (handler-declared).",
   );
 
   const role = new Command("role").description(
-    "Enable / disable a machine role (4-role enum from arc §7).",
+    "Enable / disable a machine role (4-role enum).",
   );
   role
     .command("enable")
@@ -60,11 +60,11 @@ export function buildMachineCommand(): Command {
   cmd.addCommand(role);
 
   const config = new Command("config").description(
-    "Per-machine handler-declared configuration. Currently: region (arc §7.10).",
+    "Per-machine handler-declared configuration. Currently: region.",
   );
   config
     .command("region")
-    .description("Set the machine's region (handler-declared per arc §7.10). Empty string clears.")
+    .description("Set the machine's region (handler-declared). Empty string clears.")
     .argument("<region>", 'Region tag, e.g. "EU", "US", "APAC"')
     .action(async (region: string) => {
       const r = await machineRegionConfigFlow({ region });

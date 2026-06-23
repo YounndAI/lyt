@@ -17,11 +17,11 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
+import { walkAllAuditShards } from "../registry/audit-write.js";
 import { type VaultRow } from "../registry/repo.js";
 import { closeVaultDb, openAuditDb } from "../registry/vault-db.js";
 import { parseIsoDateStrict } from "../util/iso-date.js";
 import { resolveVaults } from "../util/vault-resolve.js";
-import { walkLedger } from "../yon/ledger-read.js";
 
 export interface AuditExportArgs {
   since: string;
@@ -121,7 +121,8 @@ export async function auditExportFlow(args: AuditExportArgs): Promise<AuditExpor
       }
       continue;
     }
-    const yonRows = walkLedger(join(v.path, ".lyt", "ledgers"), "audit");
+    // Slice 2b: walk all per-writerId shards + legacy flat file.
+    const yonRows = walkAllAuditShards(v.path);
     for (const r of yonRows) {
       if (r.recordType !== "AUDIT") continue;
       const tsRaw = r.fields.get("ts") ?? r.stampTs;

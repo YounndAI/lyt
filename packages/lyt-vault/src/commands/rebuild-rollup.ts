@@ -36,7 +36,7 @@ interface RebuildRollupCliOpts {
 export function buildRebuildRollupCommand(): Command {
   return new Command("rebuild-rollup")
     .description(
-      `v1.E.2: rebuild transitive keyword rollup for a vault. Walks descendants via @MESH_EDGE chains (ref=parent, home=child); aggregates each descendant's lanes keywords into this vault's rollup cache. Disconnected descendants surface as soft-tombstones (default threshold ${ROLLUP_DISCONNECTED_DAYS} days) via 'lyt vault list --include-tombstones'.`,
+      `Rebuild transitive keyword rollup for a vault. Walks descendants via @MESH_EDGE chains (ref=parent, home=child); aggregates each descendant's lanes keywords into this vault's rollup cache. Disconnected descendants surface as soft-tombstones (default threshold ${ROLLUP_DISCONNECTED_DAYS} days) via 'lyt vault list --include-tombstones'.`,
     )
     .requiredOption("--vault <name>", "Vault name (must be registered)")
     .option(

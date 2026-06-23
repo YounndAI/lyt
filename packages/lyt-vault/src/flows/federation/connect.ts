@@ -30,6 +30,7 @@ import {
   getFederationRepoDir,
 } from "../../util/federation-paths.js";
 import { realFederationGhClient, type FederationGhClient } from "../../util/gh-federation.js";
+import { resolveRemoteUrl } from "../../util/remote-url.js";
 import {
   runGit as defaultRunGit,
   type GitRunOptions,
@@ -286,7 +287,7 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
     // (d) Wire `origin` on the local pod (LOCAL git config write). Never
     // clobber an existing origin — set-url if present (a re-run after a
     // prior provisional remote), else add.
-    const originUrl = `https://github.com/${realHandle}/${federationRepoName()}.git`;
+    const originUrl = resolveRemoteUrl(realHandle, federationRepoName());
     const hasOrigin = await git(["remote", "get-url", "origin"], {
       cwd: podDir,
       allowFailure: true,

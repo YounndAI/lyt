@@ -24,21 +24,23 @@ import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
 // this table is v1.C.2). Composite PK (mesh_rid, external_vault_rid) means
 // a single mesh can subscribe to the same external vault at most once.
 
+// Fed-v2 Layer-1 (Phase D1c) — the `external_mesh_rid` / `external_mesh_name`
+// columns were dropped (migration 005). abolished foreign-mesh adoption and
+// the subscription SoT moved to the per-writer ledger reconstituted by
+// rebuildFederationCacheFlow, which homes every live subscription into a
+// reserved owner-bucket mesh — so the subscribed vault's foreign home-mesh
+// identity is no longer carried in the cache. The surviving row shape is the
+// composite key (mesh_rid, external_vault_rid).
 export interface MeshSubscriptionRow {
   meshRid: Uint8Array;
   meshRidHex: string;
   externalVaultRid: Uint8Array;
   externalVaultRidHex: string;
-  externalMeshRid: Uint8Array;
-  externalMeshRidHex: string;
-  externalMeshName: string;
 }
 
 export interface AddSubscriptionArgs {
   meshRid: Uint8Array;
   externalVaultRid: Uint8Array;
-  externalMeshRid: Uint8Array;
-  externalMeshName: string;
 }
 
 function bytesOrThrow(raw: unknown, column: string): Uint8Array {
@@ -51,24 +53,20 @@ function bytesOrThrow(raw: unknown, column: string): Uint8Array {
 function rowToSubscription(row: Record<string, unknown>): MeshSubscriptionRow {
   const meshRid = bytesOrThrow(row["mesh_rid"], "mesh_rid");
   const extVault = bytesOrThrow(row["external_vault_rid"], "external_vault_rid");
-  const extMesh = bytesOrThrow(row["external_mesh_rid"], "external_mesh_rid");
   return {
     meshRid,
     meshRidHex: uuid7BytesToHex(meshRid),
     externalVaultRid: extVault,
     externalVaultRidHex: uuid7BytesToHex(extVault),
-    externalMeshRid: extMesh,
-    externalMeshRidHex: uuid7BytesToHex(extMesh),
-    externalMeshName: String(row["external_mesh_name"]),
   };
 }
 
 export async function addSubscription(db: Client, args: AddSubscriptionArgs): Promise<void> {
   await db.execute({
     sql: `INSERT OR IGNORE INTO mesh_subscriptions
- (mesh_rid, external_vault_rid, external_mesh_rid, external_mesh_name)
-          VALUES (?, ?, ?, ?)`,
-    args: [args.meshRid, args.externalVaultRid, args.externalMeshRid, args.externalMeshName],
+ (mesh_rid, external_vault_rid)
+          VALUES (?, ?)`,
+    args: [args.meshRid, args.externalVaultRid],
   });
 }
 
@@ -77,8 +75,24 @@ export async function listSubscriptionsForMesh(
   meshRid: Uint8Array,
 ): Promise<MeshSubscriptionRow[]> {
   const r = await db.execute({
-    sql: "SELECT * FROM mesh_subscriptions WHERE mesh_rid = ? ORDER BY external_mesh_name ASC",
+    sql: "SELECT * FROM mesh_subscriptions WHERE mesh_rid = ? ORDER BY external_vault_rid ASC",
     args: [meshRid],
+  });
+  return r.rows.map((row) => rowToSubscription(row as unknown as Record<string, unknown>));
+}
+
+// keystone Phase C — list every mesh_subscriptions row referencing
+// `externalVaultRid` (i.e. every local mesh that subscribes to this vault),
+// across ALL meshes. Read-only; used by `vault access` to reconcile gh's live
+// collaborator list against LYT's local subscription view. Composite PK
+// (mesh_rid, external_vault_rid) means at most one row per (mesh, vault).
+export async function listSubscriptionsForExternalVault(
+  db: Client,
+  externalVaultRid: Uint8Array,
+): Promise<MeshSubscriptionRow[]> {
+  const r = await db.execute({
+    sql: "SELECT * FROM mesh_subscriptions WHERE external_vault_rid = ? ORDER BY mesh_rid ASC",
+    args: [externalVaultRid],
   });
   return r.rows.map((row) => rowToSubscription(row as unknown as Record<string, unknown>));
 }
@@ -94,12 +108,12 @@ export async function removeSubscription(
   });
 }
 
-// v1.B.2 — wipe every mesh_subscriptions row owned by a mesh. Used by
-// `lyt mesh rebuild-registry` inside its per-mesh transaction before
-// re-INSERTing the @MESH_SUBSCRIPTION rows parsed from disk mesh.yon.
-export async function deleteAllSubscriptionsByMesh(db: Client, meshRid: Uint8Array): Promise<void> {
-  await db.execute({
-    sql: "DELETE FROM mesh_subscriptions WHERE mesh_rid = ?",
-    args: [meshRid],
-  });
+// Fed-v2 Layer-1 (Phase D1b) — wipe the ENTIRE mesh_subscriptions cache. Used by
+// `rebuildFederationCacheFlow` as the DELETE half of the idempotent full-replace
+// reconstitution (ledger shards are the SoT; this table is a derived cache). The
+// caller holds the reconstitution txn. Column-shape-agnostic (touches no
+// external_mesh_* column) so the later migration 005 column-drop does not affect
+// it.
+export async function deleteAllSubscriptions(db: Client): Promise<void> {
+  await db.execute("DELETE FROM mesh_subscriptions");
 }

@@ -14,181 +14,71 @@
  * limitations under the License.
  */
 
+import { readFileSync } from "node:fs";
+import { resolve as pathResolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
 
-import {
-  infoVaultFlow,
-  listVaultsFlow,
-  reconnectVaultFlow,
-  verifyVaultsFlow,
-} from "@younndai/lyt-vault";
-import {
-  addSource,
-  listSources,
-  parseScope,
-  removeSource,
-  serializeScope,
-  withRegistry,
-} from "@younndai/lyt-mesh";
+import { buildOpRegistry } from "./registry.js";
+import { registerTools } from "./generate-tools.js";
 
 export const SERVER_NAME = "lyt-mcp";
-export const SERVER_VERSION = "0.1.0";
+
+/**
+ * fed-v2 L2 Governance Phase 2 — Unit 2: the out-of-band handler-approval read.
+ *
+ * The MCP-dispatch gate for `handlerGated` mutations (generate-tools.ts) is
+ * satisfied ONLY by this launch-time signal, resolved ONCE at server
+ * construction from the process environment — NEVER from a tool-call `args`
+ * object. Because it is read here, before any transport is connected and any
+ * CallTool can arrive, and is threaded into `registerTools` as an explicit
+ * parameter, it is structurally impossible for a tool caller to set it: the
+ * value lives outside the agent's tool-call reach.
+ *
+ * Why env/profile and NOT MCP `elicitInput`: elicitInput would route the
+ * approval prompt back through the issuing (possibly compromised) client — the
+ * very surface we are trying to gate. The approval MUST come from outside the
+ * client's control. An operator launches the server with this variable set; the
+ * agent that issues tool calls has no path to it.
+ *
+ * Truthy values ("1", "true", "yes", "on", case-insensitive) enable the gate;
+ * anything else (incl. unset) leaves it default-deny — every handler-gated op
+ * fails closed.
+ */
+export function resolveHandlerApproval(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env["LYT_MCP_HANDLER_APPROVAL"];
+  if (typeof raw !== "string") return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+// C1 (0.9.x Phase A) — report the REAL package version, never a hardcoded stub
+// (was pinned at "0.1.0" while the package shipped 0.9.5). Reads
+// packages/lyt-mcp/package.json relative to the compiled file: src/server.ts →
+// dist/server.js, so 2 levels up reaches the package root in both layouts.
+function readPackageVersion(): string {
+  try {
+    const here = fileURLToPath(import.meta.url);
+    const candidate = pathResolve(here, "..", "..", "package.json");
+    const raw = readFileSync(candidate, "utf8");
+    const json = JSON.parse(raw) as { version?: string };
+    if (typeof json.version === "string" && json.version.length > 0) return json.version;
+  } catch {
+    /* fall through — a packaging defect must not crash the server */
+  }
+  return "0.0.0";
+}
+
+export const SERVER_VERSION = readPackageVersion();
 
 export function buildLytMcpServer(): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-
-  // ---- vault tools ----
-
-  server.registerTool(
-    "vault.list",
-    {
-      title: "List Lyt vaults",
-      description:
-        "List all registered Lyt vaults on this machine. Returns rid, name, path, status, edges-count, etc.",
-      inputSchema: {
-        includeTombstones: z
-          .boolean()
-          .optional()
-          .describe("Include tombstoned vaults in the result (default: true)"),
-      },
-    },
-    async ({ includeTombstones }) => {
-      const noTombstones = includeTombstones === false;
-      const { vaults } = await listVaultsFlow({ noTombstones });
-      return {
-        content: [{ type: "text", text: JSON.stringify({ vaults }, null, 2) }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "vault.info",
-    {
-      title: "Vault info",
-      description:
-        "Show metadata for a registered vault: path, mesh edges (outbound + inbound), size, file count.",
-      inputSchema: {
-        name: z.string().describe("Registered vault name"),
-      },
-    },
-    async ({ name }) => {
-      const result = await infoVaultFlow(name);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "vault.verify",
-    {
-      title: "Verify vaults",
-      description:
-        "Walk the registry, stat each path, flip missing vaults to status='missing'. Read-only on files. Auto-promotes 'missing' rows to 'tombstoned' after threshold N failures (default 3; override via LYT_TOMBSTONE_THRESHOLD).",
-      inputSchema: {
-        thresholdN: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe("Auto-promotion threshold; defaults to env LYT_TOMBSTONE_THRESHOLD or 3"),
-      },
-    },
-    async ({ thresholdN }) => {
-      const result = await verifyVaultsFlow(thresholdN === undefined ? {} : { thresholdN });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "vault.reconnect",
-    {
-      title: "Reconnect vault",
-      description:
-        "Heal a missing or disconnected vault by repointing the registry row to a new filesystem path. Validates .lyt/vault.yon rid matches the registry row.",
-      inputSchema: {
-        name: z.string().describe("Registered vault name"),
-        newPath: z.string().describe("New filesystem path containing the vault"),
-      },
-    },
-    async ({ name, newPath }) => {
-      const result = await reconnectVaultFlow({ name, newPath });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    },
-  );
-
-  // ---- mesh source tools ----
-
-  server.registerTool(
-    "mesh.source.list",
-    {
-      title: "List mesh sources",
-      description: "List configured vault sources (where Lyt looks for vaults to clone).",
-      inputSchema: {},
-    },
-    async () => {
-      const sources = await withRegistry(listSources);
-      const serialized = sources.map((s) => ({ ...s, scope: serializeScope(s.scope) }));
-      return {
-        content: [{ type: "text", text: JSON.stringify({ sources: serialized }, null, 2) }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "mesh.source.add",
-    {
-      title: "Add mesh source",
-      description: "Register a new vault source.",
-      inputSchema: {
-        name: z.string().describe("Soft label, e.g. 'younndai', 'acme', 'personal'"),
-        host: z.string().describe("Git host hostname, e.g. 'github.com'"),
-        owner: z.string().describe("Org or user under that host"),
-        scope: z
-          .string()
-          .optional()
-          .describe(
-            "Which repos count: 'all' | 'topic=<tag>' | 'repos=<a,b,c>' (default: topic=lyt-vault)",
-          ),
-      },
-    },
-    async ({ name, host, owner, scope }) => {
-      const parsed = parseScope(scope ?? "topic=lyt-vault");
-      const row = await withRegistry((db) => addSource(db, { name, host, owner, scope: parsed }));
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ ...row, scope: serializeScope(row.scope) }, null, 2),
-          },
-        ],
-      };
-    },
-  );
-
-  server.registerTool(
-    "mesh.source.remove",
-    {
-      title: "Remove mesh source",
-      description: "Remove a configured vault source by name.",
-      inputSchema: {
-        name: z.string().describe("Source name to remove"),
-      },
-    },
-    async ({ name }) => {
-      const removed = await withRegistry((db) => removeSource(db, name));
-      return {
-        content: [{ type: "text", text: JSON.stringify({ name, removed }, null, 2) }],
-      };
-    },
-  );
-
+  // fed-v2 L2 Phase 2 — resolve the out-of-band handler approval at launch and
+  // thread it into registerTools so handlerGated mutations are gated at
+  // dispatch. Default-deny: absent/falsy env → every gated op fails closed.
+  registerTools(server, buildOpRegistry(), { handlerApproved: resolveHandlerApproval() });
   return server;
 }
 

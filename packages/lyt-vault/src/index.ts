@@ -73,6 +73,8 @@ export { disconnectVaultFlow } from "./flows/disconnect.js";
 export type { DisconnectFlowResult } from "./flows/disconnect.js";
 export { deleteVaultFlow } from "./flows/delete.js";
 export type { DeleteFlowResult } from "./flows/delete.js";
+export { abandonVaultFlow } from "./flows/abandon.js";
+export type { AbandonFlowResult, AbandonVaultOpts } from "./flows/abandon.js";
 export { registryRebuildFlow } from "./flows/rebuild.js";
 export type { RebuildFlowResult } from "./flows/rebuild.js";
 export { registryResetFlow } from "./flows/registry-reset.js";
@@ -117,6 +119,7 @@ export {
   subscribeFlow,
   SubscribeMainVaultMissingError,
   SubscribeVaultNotFoundError,
+  SubscribeNoCoordinateError,
 } from "./flows/subscribe.js";
 export type {
   SubscribeArgs,
@@ -437,6 +440,13 @@ export type {
 // 0.9.3 — `lyt vault refresh`: force a live gh re-probe of write access.
 export { refreshVaultWritableFlow } from "./flows/vault-refresh.js";
 export type { RefreshWritabilityResult } from "./flows/vault-refresh.js";
+// keystone Phase B — the AccessProvider port (auth-primitive seam) +
+// its gh-backed default impl. Interface only in B-auth.0: GhAccessProvider is
+// behavior-preserving delegation onto deriveWriteGate / resolveVault /
+// getIdentity; no callers are moved onto the port yet (later phase). The
+// grant/revoke mutate seam is declared but throws until Phase C.
+export { GhAccessProvider } from "./access/gh-access-provider.js";
+export type { AccessProvider, Caller } from "./access/access-provider.js";
 // hardening pass / C1 (Cohort-1 fix-pass release review) — the ONE shared `git push`
 // permission-denied classifier. Both push paths (lyt-mesh `sync` + lyt-vault
 // `reconcile-publish`) import THIS copy; the duplicate in-file copies were
@@ -461,13 +471,53 @@ export {
   SEARCH_CONFIDENCE_TIER_1,
   SEARCH_CONFIDENCE_TIER_2,
   SEARCH_CONFIDENCE_TIER_3,
+  KEYPHRASE_BETA,
+  FUSION_BLEND_HI,
+  FUSION_BLEND_MID,
+  FUSION_KEEP_N_FALLBACK,
+  FUSION_ADAPTIVE,
 } from "./flows/search-cascade.js";
+// feat/microrag-semantic — OPTIONAL local dense-embedding retrieval arm.
+export {
+  loadEmbedder,
+  cosine,
+  vectorToBlob,
+  blobToVector,
+  embeddingsCacheDir,
+  modelCachePresent,
+  isEmbeddingsInteractive,
+  __resetEmbedderCache,
+  EMBEDDING_DIM,
+  EMBEDDING_MODEL_ID,
+} from "./util/embeddings.js";
+export type { Embedder, EmbedderLoad } from "./util/embeddings.js";
+export { embeddingsEnabled } from "./util/config.js";
+export {
+  deleteAllEmbeddings,
+  deleteEmbeddingByPath,
+  upsertEmbeddingForFigment,
+  countEmbeddings,
+  loadAllEmbeddings,
+} from "./registry/embeddings-repo.js";
+export type { EmbeddingRow } from "./registry/embeddings-repo.js";
+export { rebuildEmbeddingsFlow } from "./flows/rebuild-embeddings.js";
+export type {
+  RebuildEmbeddingsArgs,
+  RebuildEmbeddingsResult,
+} from "./flows/rebuild-embeddings.js";
+export { upsertEmbeddingsCache } from "./flows/upsert-embeddings-cache.js";
+export type {
+  UpsertEmbeddingsCacheResult,
+  UpsertEmbeddingsCacheOpts,
+} from "./flows/upsert-embeddings-cache.js";
+export { fuseDense } from "./flows/search-cascade.js";
 export type {
   SearchCascadeArgs,
   SearchCascadeResult,
   SearchCascadeScope,
   SearchResult,
   SearchTrace,
+  DenseCandidate,
 } from "./flows/search-cascade.js";
 export { createQueryEngine, searchMesh, searchPod, searchVault } from "./flows/query-engine.js";
 export type { Hits, QueryEngine } from "./flows/query-engine.js";
@@ -617,7 +667,6 @@ export {
   insertMeshEdge as insertMeshEdgeFromRepo,
   listEdgesByRefMesh,
 } from "./registry/mesh-edges-repo.js";
-export { deleteAllSubscriptionsByMesh } from "./registry/mesh-subscriptions-repo.js";
 export { deleteAllVaultsByMesh } from "./registry/mesh-vaults-repo.js";
 export type { GhClient, GhRepoInfo } from "./util/gh.js";
 export { parseOwnerRepoFromUrl } from "./util/gh.js";
@@ -802,6 +851,25 @@ export type {
   MaterializePodOptions,
   MaterializePodResult,
 } from "./flows/federation/materialize-pod.js";
+// Fed-v2 Layer-1 (Phase D1d) — the pod-repo `ledger/` git-sync leg + the
+// reconstitution it triggers. `lyt sync` (lyt-mesh) calls these after the
+// per-vault sync so the per-writer subscription/alias shards converge
+// cross-machine and the local cache is rebuilt from the union.
+export { syncPodLedgerFlow } from "./flows/federation/sync-pod-ledger.js";
+export type {
+  SyncPodLedgerArgs,
+  SyncPodLedgerResult,
+  PodLedgerSyncStatus,
+} from "./flows/federation/sync-pod-ledger.js";
+export {
+  rebuildFederationCacheFlow,
+  SUBSCRIPTION_BUCKET_MESH,
+  SHARED_BUCKET_MESH,
+} from "./flows/federation/rebuildFederationCacheFlow.js";
+export type {
+  RebuildFederationCacheArgs,
+  RebuildFederationCacheResult,
+} from "./flows/federation/rebuildFederationCacheFlow.js";
 // Brief B (B.2) — the reconcile/publish engine + the resumable outbox.
 export { reconcilePublishFlow } from "./flows/federation/reconcile-publish.js";
 export type {
@@ -916,61 +984,24 @@ export {
   checkMarkersRender,
 } from "./flows/doctor.js";
 
-// v1.B.6 — public-mesh hygiene check + publish/info flows + commands.
-export { checkPublicMeshHygiene, DEFAULT_PUBLIC_MESH_HYGIENE_PATTERNS } from "./flows/doctor.js";
-export type { PublicMeshHygieneOptions } from "./flows/doctor.js";
-export {
-  publishMeshFlow,
-  isMeshPublic,
-  PublishMeshNotFoundError,
-  PublishMeshStrictFailureError,
-} from "./flows/mesh-publish.js";
-export type {
-  PublishMeshArgs,
-  PublishMeshResult,
-  PublishSubActionResult,
-  PublishSubActionStatus,
-} from "./flows/mesh-publish.js";
+// Fed-v2 Slice 1b (#13 DELETE) — mesh-publish/unpublish/update-cadence
+// and @MESH_PUBLIC/@UPDATE_CADENCE removed. mesh-info survives (simplified).
 export {
   meshInfoFlow,
   MeshInfoNotFoundError,
   MeshInfoRemoteGhUnavailableError,
   MeshInfoRemoteMeshYonMissingError,
+  realMeshInfoGhClient,
 } from "./flows/mesh-info.js";
 export type {
   MeshInfoArgs,
   MeshInfoResult,
-  MeshInfoPublicMeta,
-  MeshInfoUpdateCadence,
   MeshInfoHomeVault,
+  MeshInfoGhClient,
 } from "./flows/mesh-info.js";
-export { realPublishGhClient, makeFakePublishGhClient } from "./util/gh-mesh-publish.js";
-export type {
-  PublishGhClient,
-  FakePublishGhClient,
-  FakePublishGhClientInit,
-} from "./util/gh-mesh-publish.js";
 export { detectLicenseFromContent } from "./util/license-detect.js";
 export type { DetectedLicense, LicenseBucket } from "./util/license-detect.js";
-// v1.B.6 Commit 3 — cadence + license-warnings + extended info.
-export {
-  setVaultUpdateCadenceFlow,
-  VaultUpdateCadenceNotFoundError,
-  VaultUpdateCadenceNoHomeMeshError,
-  VaultUpdateCadenceFlagComboError,
-} from "./flows/vault-update-cadence.js";
-export type {
-  VaultUpdateCadenceArgs,
-  VaultUpdateCadenceResult,
-} from "./flows/vault-update-cadence.js";
-export {
-  setMeshDefaultCadenceFlow,
-  MeshUpdateCadenceNotFoundError,
-} from "./flows/mesh-update-cadence.js";
-export type {
-  MeshUpdateCadenceArgs,
-  MeshUpdateCadenceResult,
-} from "./flows/mesh-update-cadence.js";
+// Fed-v2 Slice 1b (#13 DELETE): vault-update-cadence removed (wrote @UPDATE_CADENCE, deleted).
 export { checkFederationLicenseCompatibility } from "./util/license-warnings.js";
 export type { LicenseFederationWarning, LicenseWarningKind } from "./util/license-warnings.js";
 export type { VaultLicensePosture } from "./flows/info.js";
@@ -1007,7 +1038,14 @@ export {
   insertAuditLog,
   insertAutomatorWriteAuditLog,
 } from "./registry/vault-db-repo.js";
-export { recordAudit, reinjectAuditRecord, getAuditLedgerPath } from "./registry/audit-write.js";
+export {
+  recordAudit,
+  reinjectAuditRecord,
+  getAuditLedgerPath,
+  getAuditLedgerDir,
+  listAuditShards,
+  walkAllAuditShards,
+} from "./registry/audit-write.js";
 export type {
   RecordAuditArgs,
   RecordAuditResult,
@@ -1017,6 +1055,9 @@ export {
   recordProvenance,
   reinjectProvenanceRecord,
   getProvenanceLedgerPath,
+  getProvenanceLedgerDir,
+  listProvenanceShards,
+  walkAllProvenanceShards,
 } from "./registry/provenance-write.js";
 export type {
   RecordProvenanceArgs,
@@ -1052,6 +1093,26 @@ export type { AppendLedgerRecordArgs, AppendLedgerRecordResult } from "./yon/led
 export { walkLedger, parseLedgerFile } from "./yon/ledger-read.js";
 export type { WalkLedgerOptions } from "./yon/ledger-read.js";
 export type { LedgerRecord } from "./yon/ledger-read.js";
+// Fed-v2 Layer-1 (Phase C) — per-writer append-only subscription store.
+export { getWriterId, getWriterIdPath, parseWriterYon } from "./util/writer-id.js";
+export {
+  appendSubscriptionRecord,
+  appendSubscriptionActive,
+  appendSubscriptionTombstone,
+  getSubscriptionsLedgerDir,
+} from "./yon/subscription-ledger-write.js";
+export type {
+  AppendSubscriptionArgs,
+  SubscriptionEntryMode,
+  SubscriptionState,
+} from "./yon/subscription-ledger-write.js";
+export {
+  foldSubscriptions,
+  liveSubscriptions,
+  readAllSubscriptionRecords,
+  listSubscriptionShards,
+} from "./yon/subscription-ledger-read.js";
+export type { SubscriptionRecord, LiveSubscription } from "./yon/subscription-ledger-read.js";
 export { renderLanesYon, writeLanesDoc, getLanesYonPath } from "./yon/lanes-write.js";
 export type { LaneRecord, LaneMemberRecord, LanesDoc } from "./yon/lanes-write.js";
 export { parseLanesFile } from "./yon/lanes-read.js";
@@ -1062,7 +1123,7 @@ export { renderMemscopeYon } from "./yon/memscope.js";
 export type { MemscopeDoc, MemscopeRecord } from "./yon/memscope.js";
 export { parseVaultYon } from "./yon/parse.js";
 export type { ParsedVaultYon, ParsedVaultHomeMesh } from "./yon/parse.js";
-export { parseMeshYon, parseMeshPublic, parseMeshUpdateCadences } from "./yon/mesh-read.js";
+export { parseMeshYon } from "./yon/mesh-read.js";
 export { renderMeshYon } from "./yon/mesh-write.js";
 export { meshInitFlow } from "./flows/mesh-init.js";
 export type { MeshInitOptions, MeshInitResult } from "./flows/mesh-init.js";
@@ -1078,14 +1139,9 @@ export type {
 export type { MeshGhClient } from "./util/gh-mesh.js";
 export type {
   MeshDoc,
-  MeshEdgeRecord,
   MeshHomeRecord,
-  MeshPublicRecord,
   MeshPushKind as MeshDocPushKind,
   MeshRecord,
-  MeshSubscriptionRecord,
-  MeshUpdateCadenceRecord,
-  MeshUpdateCadenceType,
 } from "./yon/mesh-write.js";
 export { parseMeshManifest, applyGhPrefix } from "./yon/manifest.js";
 export type {
@@ -1113,6 +1169,34 @@ export { patternVerbsFlow } from "./flows/pattern-verbs.js";
 export type { PatternVerbsResult } from "./flows/pattern-verbs.js";
 export { patternRunFlow } from "./flows/pattern-run.js";
 export type { PatternRunArgs, PatternRunResult } from "./flows/pattern-run.js";
+// keystone Phase C C8 — the vault share/unshare access verbs (gh-as-SoT).
+export { shareVaultFlow, unshareVaultFlow } from "./flows/share.js";
+export type {
+  ShareLevel,
+  ShareVaultArgs,
+  ShareVaultResult,
+  UnshareVaultArgs,
+  UnshareVaultResult,
+  ShareVaultFlowOpts,
+} from "./flows/share.js";
+// keystone Phase C — the vault access (read-only) + invites (list/accept)
+// verbs (gh-as-SoT, through the AccessProvider port).
+export { vaultAccessFlow } from "./flows/access.js";
+export type {
+  VaultAccessArgs,
+  VaultAccessFlowOpts,
+  VaultAccessResult,
+  AccessDrift,
+  SubscriberView,
+} from "./flows/access.js";
+export { vaultInvitesFlow } from "./flows/invites.js";
+export type {
+  VaultInvitesArgs,
+  VaultInvitesFlowOpts,
+  VaultInvitesResult,
+  VaultInvitesListResult,
+  VaultInvitesAcceptResult,
+} from "./flows/invites.js";
 export { relinkAllPatternsForVault } from "./flows/pattern-relink-vault.js";
 export {
   getUserPatternsDir,

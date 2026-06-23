@@ -19,6 +19,7 @@ import { removeKnownPath } from "../registry/known-paths.js";
 import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
 import { deleteVaultDerivedState } from "../scaffold/delete.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
+import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
 
@@ -32,6 +33,12 @@ export interface DeleteFlowResult {
   lytDirPath: string;
   tombstoned: boolean;
   removedKnownPath: boolean;
+  // Phase E item 1 (#9) — pod-local alias names that POINTED at this vault
+  // and were dropped (tombstoned) because the delete orphans them. Empty when
+  // the vault had no aliases. The CLI surfaces this as the pre-warning + outcome
+  // (this flow is the confirmed path: delete has no interactive gate, so the
+  // warning is reported alongside the action rather than before a prompt).
+  orphanedAliases: string[];
 }
 
 export async function deleteVaultFlow(
@@ -49,6 +56,12 @@ export async function deleteVaultFlow(
       throw new Error(`Vault '${name}' is already tombstoned.`);
     }
     await enforceNotFrozen(vault.path, vault.name);
+    // Phase E item 1 (#9 — warn-then-drop). Discover the pod-local aliases
+    // this delete would ORPHAN (live aliases whose target is this vault's rid)
+    // BEFORE the destructive registry mutation, so the outcome carries the
+    // warning list. The actual drop happens AFTER the vault is removed (the
+    // confirmed path); discovery here just snapshots the affected names.
+    const orphanedAliases = liveAliasNamesForTargetRid(vault.ridHex);
     const { removedLytDir, lytDirPath } = await deleteVaultDerivedState(vault.path);
     let result: DeleteFlowResult;
     if (noTombstone) {
@@ -64,6 +77,7 @@ export async function deleteVaultFlow(
         lytDirPath,
         tombstoned: false,
         removedKnownPath,
+        orphanedAliases,
       };
     } else {
       await tombstoneVault(db, vault.rid);
@@ -73,7 +87,14 @@ export async function deleteVaultFlow(
         lytDirPath,
         tombstoned: true,
         removedKnownPath: false,
+        orphanedAliases,
       };
+    }
+    // Drop the orphaned aliases on the confirmed path — tombstone each via the
+    // existing removeAliasFlow / appendAliasTombstone path (HLC-stamped, own
+    // shard, idempotent). Reuses the open registry client.
+    if (orphanedAliases.length > 0) {
+      await dropAliasesForTargetRid(vault.ridHex, db);
     }
     // (Brief A) — delete mutates the registry's vault set; regenerate the
     // derived pod manifest so pod.yon reflects the removal. Non-fatal; reuses

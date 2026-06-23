@@ -24,17 +24,10 @@ import { uuid7BytesToDashedString, uuid7BytesToHex } from "../util/uuid7.js";
 // - Rids serialised as 8-4-4-4-12 dashed UUIDv7 strings via
 // `uuid7BytesToDashedString` (canonical RFC 9562 string form).
 //
-// v1.B.6 extension — adds two PUBLIC-MESH record types: @MESH_PUBLIC (single
-// record per mesh, publisher-declared discoverable metadata; emitted when
-// MeshDoc.publicMeta is defined) and @UPDATE_CADENCE (zero-or-more per
-// mesh; one per home vault with publisher-declared sync rhythm). The
-// existing @MESH header gains an optional `default_vault_update_cadence`
-// cron-string field. Determinism per the ratified default: @MESH_PUBLIC trivially sorted
-// (one record); @UPDATE_CADENCE sorted by vault_rid ASC (hex-lex). Per
-// no new yai.lyt parser primitives — CSV-string for topics and
-// peak_hours rather than array (reconciles lyt-public-mesh.md §2.3 example
-// which showed array syntax; v1.B.6 ships CSV to fit the existing
-// readQuotedField primitive).
+// fed-v2 Slice 1b (#13 DELETE) — the v1.B.6 PUBLIC-MESH record types
+// @MESH_PUBLIC and @UPDATE_CADENCE (and the @MESH `default_vault_update_cadence`
+// field) were removed here; the vault-scoped publish surface is rebuilt in a
+// later layer.
 //
 // v1.B.2 hardening:
 // - Emits ALL FOUR record types: @MESH, @MESH_HOME, @MESH_EDGE,
@@ -80,53 +73,6 @@ export interface MeshRecord {
   pushKind?: MeshPushKind | undefined;
   mainVaultRid: Uint8Array;
   createdAt: string;
-  // v1.B.6 — optional mesh-level default cadence applied to home vaults
-  // without their own @UPDATE_CADENCE row. Cron expression (POSIX 5-field).
-  // Set via `lyt mesh update-cadence <mesh> --default-vault-cadence <spec>`.
-  defaultVaultUpdateCadence?: string | undefined;
-}
-
-// v1.B.6 — @MESH_PUBLIC record. Publisher-declared discoverable metadata
-// for a mesh advertised as a public mesh. Single record per mesh; the
-// publish surface is a property of the mesh's identity. Required:
-// mesh_rid, description. All other fields optional. Field shapes derived
-// from lyt-public-mesh.md §2.3.
-export interface MeshPublicRecord {
-  meshRid: Uint8Array;
-  description: string;
-  // CSV-string per v1.B.6 (lyt-public-mesh.md §2.3 example shows array;
-  // ships as CSV to fit existing readQuotedField). Empty string = absent.
-  topics?: string | undefined;
-  maintainerContact?: string | undefined;
-  maintainerHandle?: string | undefined;
-  licenseOverride?: string | undefined;
-  acceptContributions?: boolean | undefined;
-  contributionUrl?: string | undefined;
-  homepageUrl?: string | undefined;
-  chatUrl?: string | undefined;
-  // ISO 8601 timestamp the mesh was first published. Defaults at first
-  // write time (the publishMeshFlow stamps this). May be omitted in
-  // hand-authored mesh.yon files.
-  createdAt?: string | undefined;
-}
-
-// v1.B.6 — @UPDATE_CADENCE record. Publisher-declared sync rhythm for a
-// specific home vault. Zero-or-more per mesh; one per vault. Required:
-// vault_rid, cadence_type. cron required when cadence_type=cron;
-// interval_seconds required when cadence_type=interval. Field shapes
-// derived from lyt-public-mesh.md §2.3.
-export type MeshUpdateCadenceType = "cron" | "interval" | "on-demand";
-
-export interface MeshUpdateCadenceRecord {
-  vaultRid: Uint8Array;
-  cadenceType: MeshUpdateCadenceType;
-  cron?: string | undefined;
-  intervalSeconds?: number | undefined;
-  timezone?: string | undefined;
-  // CSV string per v1.B.6 (lyt-public-mesh.md §2.3 showed array; ships as
-  // CSV). Hours 0-23 separated by commas.
-  peakHours?: string | undefined;
-  onDemandAllowed?: boolean | undefined;
 }
 
 export interface MeshHomeRecord {
@@ -135,40 +81,31 @@ export interface MeshHomeRecord {
   vaultName: string;
 }
 
-// v1.B.2 — @MESH_EDGE record. Field shape per lyt-federation-design.md
-// §3:139-145. `kind` narrows to `parent` in v1; v1.C.1 may widen.
-export interface MeshEdgeRecord {
-  refMeshRid: Uint8Array;
-  refVaultRid: Uint8Array;
-  homeMeshRid: Uint8Array;
-  homeVaultRid: Uint8Array;
-  kind: "parent";
-}
+// Slice 2a — the @MESH_EDGE record TYPE was DELETED from mesh.yon. mesh.yon
+// is no longer the edge SoT; the per-writer ledger shards
+// (`<podRoot>/ledger/mesh-edges/<writerId>/`, yon/mesh-edge-ledger-{write,read})
+// are, reconstituted into the `mesh_edges` cache by rebuildFederationCacheFlow.
+// The writer stopped EMITTING @MESH_EDGE rows; the reader silently IGNORES any
+// legacy @MESH_EDGE block (same tolerance any unknown @TAG gets). (Former
+// interface MeshEdgeRecord removed here — mirror of the D1c @MESH_SUBSCRIPTION
+// removal below.)
 
-// v1.B.2 — @MESH_SUBSCRIPTION record. Field shape per
-// lyt-federation-design.md §3:147-150.
-export interface MeshSubscriptionRecord {
-  meshRid: Uint8Array;
-  externalVaultRid: Uint8Array;
-  externalMeshRid: Uint8Array;
-  externalMeshName: string;
-}
+// Fed-v2 Layer-1 (Phase D1c) — the @MESH_SUBSCRIPTION record TYPE was DELETED
+// (no-legacy, design §5). mesh.yon is no longer the subscription SoT; the
+// per-writer ledger shards are, reconstituted into the mesh_subscriptions cache
+// by rebuildFederationCacheFlow. The Phase-C writer had already stopped EMITTING
+// the record; D1c removes the dangling type + parser + the MeshDoc.subscriptions
+// field. (Former interface MeshSubscriptionRecord removed here.)
 
 export interface MeshDoc {
   mesh: MeshRecord;
   homeVaults: readonly MeshHomeRecord[];
-  // v1.B.2 — edges/subscriptions default to empty (v1.B.1 initial-state
-  // shape). Populated when the reader extracts them from disk or a
-  // future v1.C.1 / v1.C.2 verb builds them.
-  edges: readonly MeshEdgeRecord[];
-  subscriptions: readonly MeshSubscriptionRecord[];
-  // v1.B.6 — publisher metadata for public meshes. Absent (undefined)
-  // when the mesh has not been published. Single record per mesh.
-  publicMeta?: MeshPublicRecord | undefined;
-  // v1.B.6 — zero-or-more @UPDATE_CADENCE rows, one per home vault that
-  // has a publisher-declared sync rhythm. Empty array = no vault-specific
-  // cadences declared.
-  updateCadences: readonly MeshUpdateCadenceRecord[];
+  // Fed-v2 D1c: the `subscriptions` field was removed (no-legacy) — mesh.yon no
+  // longer carries subscriptions; the ledger does.
+  // Fed-v2 Slice 1b: `publicMeta` and `updateCadences` removed (#13 DELETE).
+  // Slice 2a: the `edges` field was removed (no-legacy) — mesh.yon no longer
+  // carries @MESH_EDGE; the per-writer ledger does, reconstituted into the
+  // mesh_edges cache by rebuildFederationCacheFlow.
 }
 
 export function renderMeshYon(doc: MeshDoc): string {
@@ -188,51 +125,7 @@ export function renderMeshYon(doc: MeshDoc): string {
   }
   lines.push(`  | main_vault_rid=vault:${uuid7BytesToDashedString(m.mainVaultRid)}`);
   lines.push(`  | created_at:ts=${m.createdAt}`);
-  if (m.defaultVaultUpdateCadence !== undefined && m.defaultVaultUpdateCadence.length > 0) {
-    lines.push(`  | default_vault_update_cadence="${escapeQuoted(m.defaultVaultUpdateCadence)}"`);
-  }
   lines.push(``);
-
-  // v1.B.6 — @MESH_PUBLIC emitted directly after the @MESH header so the
-  // publisher metadata is co-located with the mesh identity. Single record
-  // per mesh (the publish surface is a property of the mesh's identity);
-  // sort is trivial. Canonical key order: header `mesh_rid`, then
-  // description, topics, maintainer_contact, maintainer_handle,
-  // license_override, accept_contributions, contribution_url,
-  // homepage_url, chat_url, created_at — emitted only when defined.
-  if (doc.publicMeta !== undefined) {
-    const p = doc.publicMeta;
-    lines.push(`@MESH_PUBLIC mesh_rid=mesh:${uuid7BytesToDashedString(p.meshRid)}`);
-    lines.push(`  | description="${escapeQuoted(p.description)}"`);
-    if (p.topics !== undefined && p.topics.length > 0) {
-      lines.push(`  | topics="${escapeQuoted(p.topics)}"`);
-    }
-    if (p.maintainerContact !== undefined && p.maintainerContact.length > 0) {
-      lines.push(`  | maintainer_contact="${escapeQuoted(p.maintainerContact)}"`);
-    }
-    if (p.maintainerHandle !== undefined && p.maintainerHandle.length > 0) {
-      lines.push(`  | maintainer_handle="${escapeQuoted(p.maintainerHandle)}"`);
-    }
-    if (p.licenseOverride !== undefined && p.licenseOverride.length > 0) {
-      lines.push(`  | license_override="${escapeQuoted(p.licenseOverride)}"`);
-    }
-    if (p.acceptContributions !== undefined) {
-      lines.push(`  | accept_contributions:bool=${p.acceptContributions ? "true" : "false"}`);
-    }
-    if (p.contributionUrl !== undefined && p.contributionUrl.length > 0) {
-      lines.push(`  | contribution_url="${escapeQuoted(p.contributionUrl)}"`);
-    }
-    if (p.homepageUrl !== undefined && p.homepageUrl.length > 0) {
-      lines.push(`  | homepage_url="${escapeQuoted(p.homepageUrl)}"`);
-    }
-    if (p.chatUrl !== undefined && p.chatUrl.length > 0) {
-      lines.push(`  | chat_url="${escapeQuoted(p.chatUrl)}"`);
-    }
-    if (p.createdAt !== undefined && p.createdAt.length > 0) {
-      lines.push(`  | created_at:ts=${p.createdAt}`);
-    }
-    lines.push(``);
-  }
 
   // @MESH_HOME records sorted by vault_rid ASC (hex-string lex) for
   // cross-platform stable ordering. Same canonical key order as v1.B.1
@@ -245,64 +138,25 @@ export function renderMeshYon(doc: MeshDoc): string {
     lines.push(``);
   }
 
-  // v1.B.6 — @UPDATE_CADENCE records sorted by vault_rid ASC. Emitted
-  // after @MESH_HOME so each cadence sits near its vault's home row in
-  // the canonical order. Canonical key order: header `vault_rid`, then
-  // cadence_type, cron (when cadence_type=cron), interval_seconds (when
-  // cadence_type=interval), timezone, peak_hours, on_demand_allowed —
-  // each emitted only when defined.
-  const sortedCadences = [...doc.updateCadences].sort((a, b) => compareHex(a.vaultRid, b.vaultRid));
-  for (const c of sortedCadences) {
-    lines.push(`@UPDATE_CADENCE vault_rid=vault:${uuid7BytesToDashedString(c.vaultRid)}`);
-    lines.push(`  | cadence_type=${c.cadenceType}`);
-    if (c.cron !== undefined && c.cron.length > 0) {
-      lines.push(`  | cron="${escapeQuoted(c.cron)}"`);
-    }
-    if (c.intervalSeconds !== undefined) {
-      lines.push(`  | interval_seconds:int=${c.intervalSeconds}`);
-    }
-    if (c.timezone !== undefined && c.timezone.length > 0) {
-      lines.push(`  | timezone="${escapeQuoted(c.timezone)}"`);
-    }
-    if (c.peakHours !== undefined && c.peakHours.length > 0) {
-      lines.push(`  | peak_hours="${escapeQuoted(c.peakHours)}"`);
-    }
-    if (c.onDemandAllowed !== undefined) {
-      lines.push(`  | on_demand_allowed:bool=${c.onDemandAllowed ? "true" : "false"}`);
-    }
-    lines.push(``);
-  }
+  // Fed-v2 Slice 1b (#13 DELETE) — @MESH_PUBLIC and @UPDATE_CADENCE writer
+  // sections removed. Legacy mesh.yon files carrying those blocks parse with them
+  // silently IGNORED.
 
-  // @MESH_EDGE records sorted by (home_mesh_rid ASC, home_vault_rid ASC).
-  // Canonical key order: header `ref_mesh_rid`, then `ref_vault_rid`,
-  // `home_mesh_rid`, `home_vault_rid`, `kind`.
-  const sortedEdges = [...doc.edges].sort((a, b) => {
-    const byHomeMesh = compareHex(a.homeMeshRid, b.homeMeshRid);
-    if (byHomeMesh !== 0) return byHomeMesh;
-    return compareHex(a.homeVaultRid, b.homeVaultRid);
-  });
-  for (const e of sortedEdges) {
-    lines.push(`@MESH_EDGE ref_mesh_rid=mesh:${uuid7BytesToDashedString(e.refMeshRid)}`);
-    lines.push(`  | ref_vault_rid=vault:${uuid7BytesToDashedString(e.refVaultRid)}`);
-    lines.push(`  | home_mesh_rid=mesh:${uuid7BytesToDashedString(e.homeMeshRid)}`);
-    lines.push(`  | home_vault_rid=vault:${uuid7BytesToDashedString(e.homeVaultRid)}`);
-    lines.push(`  | kind=${e.kind}`);
-    lines.push(``);
-  }
+  // Slice 2a — the @MESH_EDGE writer section was removed (no-legacy).
+  // mesh.yon no longer carries edges; the per-writer append-only ledger does
+  // (`<podRoot>/ledger/mesh-edges/<writerId>/`,
+  // yon/mesh-edge-ledger-{write,read}.ts), reconstituted into the `mesh_edges`
+  // cache by rebuildFederationCacheFlow. A legacy mesh.yon carrying @MESH_EDGE
+  // rows now parses with those blocks IGNORED.
 
-  // @MESH_SUBSCRIPTION records sorted by external_vault_rid ASC. Canonical
-  // key order: header `mesh_rid`, then `external_vault_rid`,
-  // `external_mesh_rid`, `external_mesh_name`.
-  const sortedSubs = [...doc.subscriptions].sort((a, b) =>
-    compareHex(a.externalVaultRid, b.externalVaultRid),
-  );
-  for (const s of sortedSubs) {
-    lines.push(`@MESH_SUBSCRIPTION mesh_rid=mesh:${uuid7BytesToDashedString(s.meshRid)}`);
-    lines.push(`  | external_vault_rid=vault:${uuid7BytesToDashedString(s.externalVaultRid)}`);
-    lines.push(`  | external_mesh_rid=mesh:${uuid7BytesToDashedString(s.externalMeshRid)}`);
-    lines.push(`  | external_mesh_name="${escapeQuoted(s.externalMeshName)}"`);
-    lines.push(``);
-  }
+  // Fed-v2 Layer-1 (Phase D1c) — @MESH_SUBSCRIPTION is fully RETIRED (no-legacy,
+  // design §5). The Phase-C writer stopped EMITTING it; D1c deleted the
+  // record type, the parser, the YON tag, and the MeshDoc.subscriptions field.
+  // Subscriptions now live ONLY in the per-writer append-only ledger
+  // (`<podRoot>/ledger/subscriptions/<writerId>/`,
+  // yon/subscription-ledger-{write,read}.ts), reconstituted into the
+  // mesh_subscriptions cache by rebuildFederationCacheFlow. A legacy mesh.yon
+  // carrying @MESH_SUBSCRIPTION rows now parses with those blocks IGNORED.
 
   return lines.join("\n");
 }

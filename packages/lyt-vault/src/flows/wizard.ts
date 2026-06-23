@@ -279,9 +279,30 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     "\nPhase 5 — Install Lyt skills\nSymlinks the bundled Lyt skills tri-runtime " +
       "(Claude Code / Codex / .agents) so the agent-manual writer can enumerate them.",
   );
+  // skills are an agent CONVENIENCE; they must NEVER gate pod creation.
+  // A failed `lyt skills install` (e.g. divergent `~/.claude|.codex|.agents/
+  // skills/lyt-*` symlinks → exit 2) previously short-circuited Phases 6–12 and
+  // left the user with NO pod. phase4b_installSkills now degrades any non-zero
+  // exit / spawn-error to a non-fatal warn (ok:true, skipped:true) carrying the
+  // actionable `lyt skills install --force` remedy, so the early `halted` return
+  // is gone. Belt-and-braces: even a residual ok:false is converted to a
+  // non-fatal warn here and the wizard CONTINUES — there is intentionally NO
+  // `return { status: "halted" }` for the skills phase.
   const p4b = await phase4b_installSkills(opts.dryRun, spawn);
-  phases.push(p4b);
-  if (!p4b.ok && !p4b.skipped) return { status: "halted", phases };
+  // Track a degraded skills install so the end-of-wizard tail can re-surface it
+  // (the inline ⚠ scrolls off-screen under Phases 6–12 — a non-technical user
+  // must still learn, at the end, that they're in a degraded state).
+  let skillsDegraded = false;
+  if (!p4b.ok && !p4b.skipped) {
+    emit(`  ⚠ ${p4b.message}`);
+    phases.push({ ...p4b, ok: true, skipped: true, message: `(non-fatal) ${p4b.message}` });
+    skillsDegraded = true;
+  } else {
+    phases.push(p4b);
+    // A non-dry-run `skipped` skills phase is a degrade warn (dry-run is gated
+    // out of the end-of-wizard recap below); a clean success is skipped:undefined.
+    if (!opts.dryRun && p4b.skipped === true) skillsDegraded = true;
+  }
 
   // P6 — agent-manual injection (G.5 verb-signature contract LOCKED).
   // Now reads the populated catalog written by P5 above. v1.GP F5: inject
@@ -444,6 +465,16 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   if (!opts.dryRun) {
     const localMode = mode === "local";
     emitPodCard(firstVaultPath, localMode);
+    if (skillsDegraded) {
+      // hardening pass recap — the pod is ready WITHOUT the agent skills; re-surface the
+      // remedy at the end so it isn't lost in scrollback. Plain language; the
+      // `--force` hint is conditional (it only helps the conflict case).
+      emit(
+        "⚠ Heads up: the Lyt agent skills didn't finish installing (see the Phase 5 note above). " +
+          "Your pod is ready without them — run `lyt skills install` anytime to add them " +
+          "(add `--force` if it reports a conflict).\n",
+      );
+    }
     if (localMode) {
       // a local pod has no gh to publish to. NO publish
       // prompt; nudge to CONNECT instead (the self-heal lives in `lyt sync`).
@@ -945,6 +976,14 @@ export async function phase4_ghAuthLogin(
 // NO handler input concatenated into argv. Function name retains the
 // "phase4b_" prefix per brief verify-script bullet 5 (greps for
 // `phase4b_installSkills|phase4b_install`).
+//
+// hardening pass (cohort-test finding) — skills are an agent CONVENIENCE and must NEVER
+// block pod creation. This function therefore NEVER returns a fatal (ok:false)
+// result: a non-zero exit or a spawn-error degrades to a non-fatal warn
+// (ok:true, skipped:true) so the wizard proceeds to Phases 6–12 and finishes
+// with a healthy pod. The warn captures BOTH stdout and stderr (the actionable
+// `divergent-symlink … re-run with --force` hint prints to stdout) and surfaces
+// the `lyt skills install --force` remedy on the divergent-symlink path.
 export async function phase4b_installSkills(
   dryRun: boolean,
   spawn: typeof spawnSync,
@@ -958,43 +997,64 @@ export async function phase4b_installSkills(
       message: "[dry-run] would invoke: lyt skills install",
     };
   }
-  // F3 (console-DX): CAPTURE the sub-command output instead of inheriting it.
-  // `lyt skills install` prints one line per skill × runtime (~45 lines) which
+  // F3 (console-DX): CAPTURE both streams instead of inheriting them. `lyt
+  // skills install` prints one line per skill × runtime (~45 lines) which
   // previously dominated the wizard. The one-line phase message below is the
-  // summary the user sees; on failure a short stderr tail is surfaced.
+  // summary the user sees.
   const result = spawn("lyt", ["skills", "install"], {
     stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
     shell: process.platform === "win32",
   });
   if (result.error !== undefined) {
+    // skills are an agent CONVENIENCE — `lyt` not resolving here must NOT
+    // block pod creation (the downstream phases call flows directly, not via the
+    // `lyt` binary). Degrade to a non-fatal warn; the user can add skills later.
+    const msg =
+      `lyt skills install not found on PATH (npm install -g @younndai/lyt). ${result.error.message} ` +
+      "— skipping (agent skills are optional; run `lyt skills install` later to add them).";
+    emit(`  ⚠ ${msg}`);
+    return { phase: 5, name: "skills-install", ok: true, skipped: true, message: msg };
+  }
+  if (result.status === 0) {
     return {
       phase: 5,
       name: "skills-install",
-      ok: false,
-      message: `lyt skills install not found on PATH (npm install -g @younndai/lyt). ${result.error.message}`,
+      ok: true,
+      message: "Lyt skills installed tri-runtime (symlink/copy).",
     };
   }
-  if (result.status !== 0) {
-    const errTail = String(result.stderr ?? "")
-      .trim()
-      .split(/\r?\n/)
-      .filter((l) => l.length > 0)
-      .slice(-3)
-      .join("; ");
-    return {
-      phase: 5,
-      name: "skills-install",
-      ok: false,
-      message: `lyt skills install exited ${result.status}${errTail.length > 0 ? ` — ${errTail}` : ""}`,
-    };
-  }
-  return {
-    phase: 5,
-    name: "skills-install",
-    ok: true,
-    message: "Lyt skills installed tri-runtime (symlink/copy).",
-  };
+  // Non-zero exit. NON-BLOCKING — degrade to a warn, never halt.
+  // Combine BOTH streams for the tail + remedy detection: the actionable
+  // `divergent-symlink … re-run with --force` hint prints to STDOUT (the
+  // per-skill line in skills-install.ts:printHuman), so the prior stderr-only
+  // tail dropped it and the user saw a bare "exited 2".
+  const combined = `${String(result.stdout ?? "")}\n${String(result.stderr ?? "")}`;
+  // exit 2 (skills-install.ts:pickExitCode) — or the stdout marker — means a
+  // divergent skill symlink: a `~/.claude|.codex|.agents/skills/lyt-*` link
+  // points somewhere other than the bundled package. Lyt owns those names, so
+  // `--force` safely adopts them. We surface the remedy rather than auto-forcing
+  // (handler-leads: a divergent link may be a deliberate fork — let the user run
+  // `--force` themselves instead of silently clobbering it). exit 4
+  // (target-not-a-directory) and any other non-zero exit carry no `--force`
+  // remedy (it wouldn't help) — they degrade to the same non-fatal warn with
+  // the captured tail, so pod creation still proceeds.
+  const divergent = result.status === 2 || /divergent-symlink|re-run with --force/i.test(combined);
+  const tail = combined
+    .trim()
+    .split(/\r?\n/)
+    .filter((l) => l.length > 0)
+    .slice(-3)
+    .join("; ");
+  // Plain-language remedy for a non-technical user (the resilience persona):
+  // name the situation without jargon ("divergent symlinks"), reassure that
+  // `--force` is safe (Lyt owns these skill names), and give the exact command.
+  const remedy = divergent
+    ? " — some Lyt skills already point elsewhere on your system; Lyt owns these skill names, so run `lyt skills install --force` to safely replace them"
+    : "";
+  const msg = `lyt skills install exited ${result.status}${remedy}${tail.length > 0 ? ` — ${tail}` : ""}`;
+  emit(`  ⚠ ${msg}`);
+  return { phase: 5, name: "skills-install", ok: true, skipped: true, message: msg };
 }
 
 export async function phase5_runAgentManualInject(

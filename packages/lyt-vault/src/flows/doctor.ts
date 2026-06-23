@@ -24,7 +24,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { cwd } from "node:process";
-import { join, sep } from "node:path";
+import { join } from "node:path";
 
 import type { Client } from "@libsql/client";
 
@@ -248,10 +248,8 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
   // probe). If registry.db is missing the new checks emit `info` rows so
   // the JSON shape stays stable per the ratified default (additive checks[]).
   //
-  // v1.B.6 — extended with checkPublicMeshHygiene (5th threaded check).
-  // Auto-folded into the doctorFlow when ANY mesh has @MESH_PUBLIC
-  // declared per the ratified default; if no mesh is public, emits a single info
-  // row so the JSON shape stays stable.
+  // Fed-v2 Slice 1b (#13 DELETE) — checkPublicMeshHygiene removed (the
+  // @MESH_PUBLIC surface it guarded no longer exists).
   const registryDbPath = join(getLytHome(), "registry.db");
   if (existsSync(registryDbPath)) {
     const db = await openRegistry();
@@ -262,7 +260,6 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
         checks.push(r);
       }
       for (const r of await checkMarkersRender(db, { sampleLimit })) checks.push(r);
-      for (const r of await checkPublicMeshHygiene(db, {})) checks.push(r);
       // hardening fix-pass (2026-06-10) — the index-tier canary doctor was
       // blind to (the F15 shape one level up): per-vault lyt.db integrity +
       // behavioral FTS smoke + duplicate-origin (F8 defense-in-depth) +
@@ -302,13 +299,6 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
       id: "markers.render",
       group: "mesh",
       label: "★ main-vault markers render",
-      status: "info",
-      message: "skipped (no registry yet)",
-    });
-    checks.push({
-      id: "public_mesh_hygiene",
-      group: "mesh",
-      label: "public mesh hygiene (no leaked secrets)",
       status: "info",
       message: "skipped (no registry yet)",
     });
@@ -1334,215 +1324,11 @@ export async function checkMarkersRender(
   return out;
 }
 
-// v1.B.6 — public-mesh hygiene scan. Walks every mesh that has a
-// @MESH_PUBLIC declaration in its mesh.yon; scans the content of each
-// home vault for filenames matching the configurable suspicious-content
-// pattern set; emits ONE CheckResult per matched file (per the ratified default —
-// per-file granularity gives precise remediation guidance).
-//
-// Default pattern set per DQ-new-21 + brief
-// `.secret`, `credentials`, `.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`,
-// `id_rsa*`
-//
-// Configurable via `~/lyt/config.yon` `doctor.public_mesh_patterns` key (v1
-// ships the in-process opts.patterns override; YON config-file wiring lands
-// when the v1.E.6 `~/lyt/config.yon` reader surface ships — for v1.B.6 the
-// flag-only override is enough).
-//
-// Modes (per the ratified default):
-// - default (strict=false): status='warn' per match → exitCode 2 unless
-// other checks fail
-// - --strict (strict=true): status='fail' per match → exitCode 1 on the
-// first match (effective short-circuit at the doctorFlow summary layer
-// where failures > 0 dominates)
-//
-// Skip rules: never walks `.git/`, `node_modules/`, or `.lyt/` (the .lyt
-// dir is Lyt's internal state — the patterns shouldn't false-positive on
-// audit/provenance ledger YONs that happen to contain the literal string
-// "credentials" in an audit row).
 
-export const DEFAULT_PUBLIC_MESH_HYGIENE_PATTERNS: readonly string[] = [
-  ".secret",
-  "credentials",
-  ".env",
-  "*.pem",
-  "*.key",
-  "*.p12",
-  "*.pfx",
-  "id_rsa*",
-];
+// Fed-v2 Slice 1b (#13 DELETE) — DEFAULT_PUBLIC_MESH_HYGIENE_PATTERNS,
+// PublicMeshHygieneOptions, and checkPublicMeshHygiene removed.
+// The @MESH_PUBLIC surface they guarded no longer exists.
 
-export interface PublicMeshHygieneOptions {
-  patterns?: readonly string[] | undefined;
-  strict?: boolean | undefined;
-}
-
-export async function checkPublicMeshHygiene(
-  db: Client,
-  opts: PublicMeshHygieneOptions,
-): Promise<CheckResult[]> {
-  const meshes = await listMeshes(db);
-  const patterns = opts.patterns ?? DEFAULT_PUBLIC_MESH_HYGIENE_PATTERNS;
-  const strict = opts.strict === true;
-  const matchers = patterns.map(compileSimpleGlob);
-
-  // First pass: which meshes have @MESH_PUBLIC declared? Walking only
-  // those meshes' home vaults keeps the scan bounded (private meshes are
-  // skipped entirely; a private mesh's "secrets" are by-design not a
-  // hygiene concern).
-  type PublicMeshSubject = {
-    meshName: string;
-    homeVaultPaths: { vaultName: string; path: string }[];
-  };
-  const subjects: PublicMeshSubject[] = [];
-  for (const m of meshes) {
-    if (m.mainVaultRid === null) continue;
-    const mainVault = await getVaultByRid(db, m.mainVaultRid);
-    if (mainVault === null || !existsSync(mainVault.path)) continue;
-    const meshYonPath = join(mainVault.path, ".lyt", "mesh.yon");
-    if (!existsSync(meshYonPath)) continue;
-    let isPublic = false;
-    try {
-      const content = readFileSync(meshYonPath, "utf8");
-      const parsed = parseMeshYon(content);
-      isPublic = parsed.publicMeta !== undefined;
-    } catch {
-      // parse failures already surface via checkMeshYonParses; skip hygiene
-      // for this mesh to avoid double-reporting the same root cause.
-      continue;
-    }
-    if (!isPublic) continue;
-    const homeVaultPaths: { vaultName: string; path: string }[] = [];
-    homeVaultPaths.push({ vaultName: mainVault.name, path: mainVault.path });
-    // Other home vaults registered to this mesh. listVaultsInMesh would
-    // give a deterministic list, but for v1.B.6 (and to keep the import
-    // surface minimal) we re-derive via listVaults filtered by
-    // home_mesh_rid.
-    const allVaults = await listVaults(db);
-    for (const v of allVaults) {
-      if (v.status !== "active") continue;
-      if (v.homeMeshRid === null) continue;
-      // Skip the main vault double-counting guard via path comparison
-      // (already added to homeVaultPaths above). Then keep only vaults
-      // whose home_mesh_rid matches this mesh's rid (membership filter).
-      if (v.path === mainVault.path) continue;
-      if (!uint8Equal(v.homeMeshRid, m.rid)) continue;
-      if (!existsSync(v.path)) continue;
-      homeVaultPaths.push({ vaultName: v.name, path: v.path });
-    }
-    subjects.push({ meshName: m.name, homeVaultPaths });
-  }
-
-  if (subjects.length === 0) {
-    return [
-      {
-        id: "public_mesh_hygiene",
-        group: "mesh",
-        label: "public mesh hygiene (no leaked secrets)",
-        status: "info",
-        message: "no public meshes declared (no @MESH_PUBLIC blocks)",
-      },
-    ];
-  }
-
-  const out: CheckResult[] = [];
-  let totalMatches = 0;
-  for (const subject of subjects) {
-    for (const home of subject.homeVaultPaths) {
-      const matches = scanForHygieneMatches(home.path, matchers);
-      for (const relPath of matches) {
-        totalMatches++;
-        out.push({
-          id: `public_mesh_hygiene:${home.vaultName}:${relPath.replace(/\\/g, "/")}`,
-          group: "mesh",
-          label: `hygiene match (${home.vaultName}/${relPath.replace(/\\/g, "/")})`,
-          status: strict ? "fail" : "warn",
-          message: `${home.vaultName}/${relPath.replace(/\\/g, "/")} matches a public-mesh hygiene pattern (likely-leaked secret)`,
-          remediation: `Delete or move the file out of the public mesh: ${join(home.path, relPath)}`,
-          detail: {
-            meshName: subject.meshName,
-            vaultName: home.vaultName,
-            relPath: relPath.replace(/\\/g, "/"),
-          },
-        });
-      }
-    }
-  }
-
-  if (totalMatches === 0) {
-    out.push({
-      id: "public_mesh_hygiene",
-      group: "mesh",
-      label: "public mesh hygiene (no leaked secrets)",
-      status: "pass",
-      message: `scanned ${subjects.length} public mesh(es); no hygiene matches`,
-    });
-  }
-
-  return out;
-}
-
-// Walk a vault's content for filenames matching the compiled glob set.
-// Returns vault-relative POSIX paths (string with platform separator;
-// callers normalise via .replace(/\\/g, '/') for display).
-// Skips .git/, node_modules/, and .lyt/.
-function scanForHygieneMatches(
-  vaultPath: string,
-  matchers: ReadonlyArray<(name: string) => boolean>,
-): string[] {
-  const out: string[] = [];
-  walk(vaultPath, "");
-  return out;
-
-  function walk(absDir: string, relDir: string): void {
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = readdirSync(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".lyt")
-          continue;
-        walk(
-          join(absDir, entry.name),
-          relDir.length > 0 ? `${relDir}${sep}${entry.name}` : entry.name,
-        );
-      } else if (entry.isFile()) {
-        for (const m of matchers) {
-          if (m(entry.name)) {
-            out.push(relDir.length > 0 ? `${relDir}${sep}${entry.name}` : entry.name);
-            break;
-          }
-        }
-      }
-    }
-  }
-}
-
-// Compile a simple glob pattern into a name-matcher predicate. Supports
-// `*` (wildcard) anywhere; treats `.` and other regex meta as literal.
-// Case-sensitive (matches POSIX semantics; users on case-insensitive FS
-// like Windows-default-NTFS still hit the right files because the
-// readdirSync entry.name preserves the on-disk case).
-function compileSimpleGlob(pattern: string): (name: string) => boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  const re = new RegExp(`^${escaped}$`);
-  return (name: string) => re.test(name);
-}
-
-// Internal Uint8Array equality — local to doctor.ts to keep the import
-// surface minimal. Mirrors ridsEqual in util/uuid7.ts but doesn't pull
-// the utility in just for one helper.
-function uint8Equal(a: Uint8Array | null | undefined, b: Uint8Array | null | undefined): boolean {
-  if (a === null || a === undefined || b === null || b === undefined) return false;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
 
 // ---------------------------------------------------------------------------
 // hardening fix-pass (2026-06-10) — index-tier + registry-shape

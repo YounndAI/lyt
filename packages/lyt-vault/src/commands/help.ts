@@ -74,7 +74,7 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt vault rebuild-index <name> [--force] [--json]",
         summary:
-          "Drop + rebuild the per-vault libSQL from the markdown YON source-of-truth (arc §8.5)",
+          "Drop + rebuild the per-vault libSQL from the markdown YON source-of-truth",
       },
       {
         verb: "lyt vault add-edge <name> --peer <rid> --edge share_with|parent",
@@ -204,7 +204,7 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt audit export --since <date> [--until <date>] [--vault <name>] [--output <path>] [--json]",
         summary:
-          "Render per-vault audit_log window as markdown (arc §8.4 — handler-shareable via git)",
+          "Render per-vault audit_log window as markdown (handler-shareable via git)",
       },
     ],
   },
@@ -219,7 +219,7 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt friction report [--window 28d] [--exclude-false-positive]",
         summary:
-          "Count unresolved sync.friction.* incidents in window; warns at Tier A threshold (≥3 per arc §10.1)",
+          "Count unresolved sync.friction.* incidents in window; warns at Tier A threshold (≥3)",
       },
       {
         verb: "lyt friction resolve <id> [--note <text>]",
@@ -238,7 +238,7 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt provenance trace <file|rid> [--vault <name>] [--json]",
         summary:
-          "Render the chronological chain of @STAMP records from per-vault provenance (arc §11.5)",
+          "Render the chronological chain of @STAMP records from per-vault provenance",
       },
     ],
   },
@@ -248,7 +248,7 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt machine role enable <role>",
         summary:
-          "Add a per-machine role (client | automator-runner | mesh-syncer | llm-host; arc §7)",
+          "Add a per-machine role (client | automator-runner | mesh-syncer | llm-host)",
       },
       {
         verb: "lyt machine role disable <role>",
@@ -257,7 +257,7 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt machine config region <region>",
         summary:
-          'Handler-declared region (e.g. "EU", "US", "APAC") — read by memscope.data_residency at automator dispatch (arc §7.10)',
+          'Handler-declared region (e.g. "EU", "US", "APAC") — read by memscope.data_residency at automator dispatch',
       },
       {
         verb: "lyt machine status [--json]",
@@ -290,7 +290,7 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt housekeep [--vault <name>] [--ledger <name>] [--rotate-now] [--dry-run] [--json]",
         summary:
-          "v1.A.2 — month-boundary rotation for per-vault YON ledgers (audit, provenance). Idempotent; default scope = every active vault × every known ledger.",
+          "Month-boundary rotation for per-vault YON ledgers (audit, provenance). Idempotent; default scope = every active vault × every known ledger.",
       },
     ],
   },

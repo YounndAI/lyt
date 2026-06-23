@@ -13,8 +13,8 @@ requires_writable_vault: false
 
 Render an agent-facing overview of the user's Lyt **pod** — every mesh and every vault on this machine — by composing two CLI verbs:
 
-1. `lyt mesh list --json` (shipped v1.B.1) — enumerates meshes the user participates in, including each mesh's main vault, home vaults, and subscribed vaults. Canonical mesh-enumeration verb per `packages/lyt-vault/src/commands/mesh.ts:277` (`buildMeshListSubcommand`).
-2. `lyt vault list --json` (shipped pre-v1.G.1) — enumerates every registered vault on the machine, with status, path, and per-vault metadata (mesh role, parent vault, tier hint). Canonical vault-enumeration verb per `packages/lyt-vault/src/commands/list.ts:6` (`buildListCommand`).
+1. `lyt mesh list --json` — enumerates meshes the user participates in, including each mesh's main vault, home vaults, and subscribed vaults. This is the canonical mesh-enumeration verb.
+2. `lyt vault list --json` — enumerates every registered vault on the machine, with status, path, and per-vault metadata (mesh role, parent vault, tier hint). This is the canonical vault-enumeration verb.
 
 The skill is pure prose around two existing CLI verbs — there is no new CLI verb, no new helper, no lyt-vault change. Both verbs always run on every invocation (default = full pod overview); user signal can narrow the synthesis focus post-facto but does NOT change which verbs run.
 
@@ -35,7 +35,7 @@ When the user runs `/lyt-pod`, or says something like:
 
 Invoke this skill **proactively** as the first move whenever the user asks a pod-scoped enumeration question or seems to want a survey of what's installed. Don't bypass it and start grep'ing the filesystem — the registry is the source of truth.
 
-If the user wants to drill into a single mesh (vault list + edges for one mesh), prefer `/lyt-mesh-explore` (post-Wave-3 G.9) once it ships. If the user wants per-vault writable status or agent priming, use `/lyt-primer-context`.
+If the user wants to drill into a single mesh (vault list + edges for one mesh), prefer `/lyt-mesh-explore`. If the user wants per-vault writable status or agent priming, use `/lyt-primer-context`.
 
 ## Phase 1 — Determine pod-scope intent
 
@@ -43,7 +43,7 @@ The default is **full pod overview** — both verbs run, every mesh and vault re
 
 - **Default — full pod overview.** Use when the user says "my pod", "show me everything", "list all vaults", "what meshes do I have", or omits scope entirely. Run both verbs (Phase 2 + Phase 3) and synthesize a complete pod summary in Phase 4.
 - **Narrow framing on a single mesh.** Use when the user says "focus on the `<name>` mesh", "just show me the `<name>` mesh's vaults", "what's in the `<name>` mesh". **Still run BOTH `lyt mesh list --json` and `lyt vault list --json`** — the CLI verbs do not support `--mesh` filtering on `lyt vault list`. Apply the user's narrow framing at **synthesis time** (Phase 4) by filtering the rendered output. Do NOT invent a CLI flag.
-- **Tombstoned-vault inclusion.** Default = hide soft-tombstoned rollup aggregates (matches CLI default per `packages/lyt-vault/src/commands/list.ts:11-19`). Pass `--include-tombstones` ONLY when the user explicitly says "show tombstoned vaults too", "include deleted vaults", "show buried vaults". Hard-tombstoned vaults (`status='tombstoned'`) are included in the default `lyt vault list` output already; `--no-tombstones` filters them out (do NOT pass by default — they are part of the pod's recent history).
+- **Tombstoned-vault inclusion.** Default = hide soft-tombstoned rollup aggregates (matches the CLI default). Pass `--include-tombstones` ONLY when the user explicitly says "show tombstoned vaults too", "include deleted vaults", "show buried vaults". Hard-tombstoned vaults (`status='tombstoned'`) are included in the default `lyt vault list` output already; `--no-tombstones` filters them out (do NOT pass by default — they are part of the pod's recent history).
 
 The skill never invents mesh or vault names. If the user names one and the post-Phase-2/3 synthesis can't match it, surface the available names and stop — do not guess.
 
@@ -59,7 +59,7 @@ lyt mesh list --json
 spawnSync("lyt", ["mesh", "list", "--json"]);
 ```
 
-The CLI emits Lock 0.3 stable-key-ordered JSON on stdout (exit 0 on success). The actual emitted shape (per `packages/lyt-vault/src/commands/mesh.ts:283-317`):
+The CLI emits stable, deterministically key-ordered JSON on stdout (exit 0 on success). The emitted shape:
 
 ```json
 {
@@ -105,7 +105,7 @@ spawnSync("lyt", ["vault", "list", "--json"]);
 spawnSync("lyt", ["vault", "list", "--json", "--include-tombstones"]);
 ```
 
-The CLI emits Lock 0.3 stable-key-ordered JSON on stdout (per `packages/lyt-vault/src/commands/list.ts:46-49` + `packages/lyt-vault/src/flows/list.ts:32-40`):
+The CLI emits stable, deterministically key-ordered JSON on stdout:
 
 ```json
 {
@@ -136,7 +136,7 @@ The CLI emits Lock 0.3 stable-key-ordered JSON on stdout (per `packages/lyt-vaul
 }
 ```
 
-**Field-type note (release review).** The four byte-typed fields (`rid`, `memscopeRid`, `parentVault`, `homeMeshRid`) are `Uint8Array` instances at the source (`packages/lyt-vault/src/registry/repo.ts:22-32`) and pass through `JSON.stringify(result, null, 2)` raw at `commands/list.ts:48`. `JSON.stringify` serializes a `Uint8Array` as a **byte-indexed object** (`{"0": 123, "1": 45, ..., "15": 254}`), NOT a hex string. **Always match on the `*Hex` companion fields** (`ridHex`, `memscopeRidHex`, `parentVaultHex`, `homeMeshRidHex`) — those are guaranteed-string and stable. Treat the raw byte-fields as opaque implementation detail.
+**Field-type note.** The four byte-typed fields (`rid`, `memscopeRid`, `parentVault`, `homeMeshRid`) are `Uint8Array` instances at the source and pass through `JSON.stringify(result, null, 2)` raw. `JSON.stringify` serializes a `Uint8Array` as a **byte-indexed object** (`{"0": 123, "1": 45, ..., "15": 254}`), NOT a hex string. **Always match on the `*Hex` companion fields** (`ridHex`, `memscopeRidHex`, `parentVaultHex`, `homeMeshRidHex`) — those are guaranteed-string and stable. Treat the raw byte-fields as opaque implementation detail.
 
 The vault-list output is the source of truth for **per-vault mesh membership** — match each vault's `homeMeshRidHex` (string) against each mesh's `rid_hex` (string) from Phase 2 to group vaults under their mesh in Phase 4. A vault with `homeMeshRidHex === null` is an **orphan** (registered but not adopted into any mesh — see Phase 4's orphan section).
 
@@ -174,7 +174,7 @@ Render the pod summary as a markdown block. The handler-facing layout:
 Synthesis rules:
 
 - **Summary line.** `N meshes` = `meshes.length` from Phase 2. `M vaults` = `vaults.length` from Phase 3 (filter out `status='tombstoned'` unless the user explicitly asked for tombstoned inclusion). The `(P pushable · S subscriber · O orphan)` breakdown counts each vault **once** by primary role, with precedence **home > subscriber > orphan** (a vault appearing in BOTH a `home_vaults` array AND any `subscribed_vaults` array is counted as **home**, not subscriber): a vault is **pushable** if it appears in any mesh's `home_vaults` AND that mesh has a non-null `push_target`; **subscriber** if it appears ONLY in `subscribed_vaults` arrays across all meshes (never as a home vault); **orphan** if its `homeMeshRidHex === null` (no mesh role at all).
-- **Mesh grouping.** Sort meshes by name (alphabetical) for stable rendering. Within each mesh: main vault first (marked `★` per `commands/mesh.ts:333` precedent), then other home vaults sorted alphabetically (exclude the main-vault entry from this alphabetic list — it already rendered above with `★`; `home_vaults` includes the main vault per Phase 2 shape, so an LLM iterating the array verbatim would otherwise double-render the main vault), then subscribed vaults grouped at the end with a "subscribed (cross-mesh)" hint.
+- **Mesh grouping.** Sort meshes by name (alphabetical) for stable rendering. Within each mesh: main vault first (marked `★`), then other home vaults sorted alphabetically (exclude the main-vault entry from this alphabetic list — it already rendered above with `★`; `home_vaults` includes the main vault per Phase 2 shape, so an LLM iterating the array verbatim would otherwise double-render the main vault), then subscribed vaults grouped at the end with a "subscribed (cross-mesh)" hint.
 - **Push-target hint.** Surface `push target: <push_kind>:<push_target>` next to the main vault when `push_target !== null`. Skip the hint when null (mesh is local-only).
 - **Orphan section.** Always include the heading even when empty (rendering "(none)" under it) — handlers parsing the output can rely on the section's presence. Each orphan vault gets a one-line heal suggestion: `lyt repair --target <orphan-vault-name> --apply --mesh <mesh>` (the canonical heal — binds a registered vault to a known mesh). A vault that is _registered-but-mesh-unlinked_ (the adopt mesh-link drift) heals via `lyt repair --apply` with **no args** (`lyt doctor` flags it). `lyt mesh adopt` remains for gh **cluster-discovery** of un-registered repos — not for re-linking an already-registered vault.
 - **User narrow framing.** If the user signaled a single mesh in Phase 1, render only that mesh's section under `## Meshes` plus the orphan section. Surface a one-line "(showing 1 of N meshes — re-invoke /lyt-pod for full overview)" hint.
@@ -189,8 +189,8 @@ Synthesis rules:
 - **MUST run BOTH verbs on every invocation.** The default is full pod overview; even when the user signals a narrow mesh framing, the vault list is needed to compute the orphan section and the summary-line counts. Do not skip one verb to "save time" — synthesis quality drops.
 - **MUST use "pod" framing in user-facing output.** Never write "federation" in handler-facing prose; "federation" is internal data-layer vocabulary only.
 - **MUST surface the orphan-vault section** even when empty (render "(none)" under the heading) so handlers can rely on its presence.
-- **MUST cite `lyt mesh list` as the canonical mesh-enumeration verb.** Some sibling SKILL.md files cite a different mesh-enumeration verb that does not exist; the canonical verb is `lyt mesh list` per `packages/lyt-vault/src/commands/mesh.ts:277`. Do not propagate the sibling error here.
-- **MUST cite `lyt vault info <name>` with a positional argument only.** The verb accepts a positional `<name>` per `packages/lyt-vault/src/commands/info.ts:20-26`; the only flag is `--json`. The pod skill does not call `vault info` at all (per-vault writable status is `/lyt-primer-context`'s job — pulling it here would duplicate that surface).
+- **MUST cite `lyt mesh list` as the canonical mesh-enumeration verb.** The canonical verb is `lyt mesh list`. Do not invent a different mesh-enumeration verb.
+- **MUST cite `lyt vault info <name>` with a positional argument only.** The verb accepts a positional `<name>`; the only flag is `--json`. The pod skill does not call `vault info` at all (per-vault writable status is `/lyt-primer-context`'s job — pulling it here would duplicate that surface).
 - **MUST NOT pass `--include-tombstones` by default.** Pass only on explicit user signal ("show tombstoned vaults", "include deleted vaults", "show buried vaults"). Default = hide soft-tombstoned rollup aggregates per CLI default.
 - **MUST NOT pass `--no-tombstones` by default.** Hard-tombstoned vaults (`status='tombstoned'`) are part of the pod's recent history; rendering them with a `[tombstoned]` status marker is the correct default. Pass `--no-tombstones` only on explicit user signal ("hide tombstones", "skip buried vaults").
 - **MUST NOT modify or write any file.** This is a read-only skill (`requires_writable_vault: false`). If the user wants the pod overview persisted to a Figment, run `/lyt-capture` separately on the formatted output.
@@ -199,7 +199,7 @@ Synthesis rules:
 
 ## Companion skills
 
-- **/lyt-mesh-explore** — drill into a single mesh (vault list + edges + subscriptions). Pair after `/lyt-pod` when the user picks one mesh to investigate (post-Wave-3 G.9).
+- **/lyt-mesh-explore** — drill into a single mesh (vault list + edges + subscriptions). Pair after `/lyt-pod` when the user picks one mesh to investigate.
 - **/lyt-primer-context** — prime an agent with Lyt-scoped context (top keywords, active arcs, writable status). Pair after `/lyt-pod` when the user wants the agent to start working in a specific vault — use `--scope vault --target <name>` per the chosen vault.
 - **/lyt-search** — query across the pod with the tiered-cascade engine. Pair after `/lyt-pod` when the user wants to look up specific content rather than survey what exists.
 - **/lyt-sync** — pull/commit/push a vault. Run before `/lyt-pod` if the user has unpushed local edits and wants the registry to reflect them (registry rows update on vault init/adopt; `/lyt-sync` doesn't change the pod shape but does freshen `lastVerifiedAt`).

@@ -33,7 +33,9 @@
 
 ## What is Lyt?
 
-**Lyt** turns a folder of markdown notes into a Git-native vault that can join a mesh of other vaults across people and organizations — **mint vaults you own, weave meshes you share, forge Your Pod.** Each vault is one Git repo. The mesh is the graph of declared edges across vaults. A small libSQL index sits beside the markdown for fast `lyt vault list` / `lyt mesh status` reads, and a YON declaration file (`.lyt/vault.yon`) is the source of truth for the mesh shape.
+**Lyt** turns a folder of markdown notes into a Git-native vault that can join a mesh of other vaults across people and organizations — **mint vaults you own, weave meshes you share, forge Your Pod.** Each vault is one Git repo. The mesh is the graph of declared edges across vaults. A small libSQL index sits beside the markdown for fast `lyt vault list` / `lyt mesh status` reads and for search, and a YON declaration file (`.lyt/vault.yon`) is the source of truth for the mesh shape.
+
+A vault's identity is its **`rid`** (a UUIDv7 minted on this machine); the human-readable `{mesh}/{vault}` name is *computed* from the vault's home mesh plus its leaf, so renaming or moving a vault updates the name automatically while the `rid` stays stable. Names, bare leaves, pod-local aliases, and `lyt:vault:<host>/<owner>/<repo>` origin coordinates all resolve to the `rid`.
 
 Lyt is **AI-first by design**: an AI agent is a first-class operator of your knowledge, not a bolted-on feature. Every vault and mesh speaks [YON](https://yon.younndai.com) — structured records any agent reads directly — and the same operation set is exposed to you via the CLI and to agents via harness skills and an MCP server. Lyt is the reference implementation of the AI-first standard we're defining.
 
@@ -69,23 +71,32 @@ Pass `--dry-run` to preview every phase without filesystem writes or spawn invoc
 ## Manual walkthrough (without the wizard)
 
 ```bash
-# 1. Initialize a vault. The {owner}/{repo} shape is the recommended convention.
+# 1. Initialize a vault. `{mesh}/{vault}` is create-if-missing: it makes the
+#    `alex` mesh if absent, then the `main` vault.
 lyt vault init alex/main \
     --description "Alex's master vault" \
     --topic personal
 
-# 2. Push to GitHub.
-cd ~/lyt/vaults/alex/main
-gh repo create alex/main --public --source . --push
+# 2. Capture and find knowledge.
+lyt capture "an idea worth keeping"
+lyt search "idea"          # ranked across your whole pod
 
-# 3. On another machine, clone the whole mesh.
-lyt mesh clone-all --owner alex
+# 3. On another machine, clone your configured vault sources.
+lyt mesh clone-all
 
-# 4. Open it.
+# 4. Open it in any markdown editor.
 obsidian ~/lyt/vaults/alex/main
 ```
 
 For a deeper tour, run `lyt help getting-started` after install.
+
+## Search
+
+`lyt search "<query>"` ranks results across your whole pod (or a single `--mesh` / `--vault`) through a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — each tier carrying a confidence score.
+
+On top of the lexical cascade, Lyt adds **optional on-device semantic search** to surface notes that keyword matching misses (different words, same meaning). It runs a small local embedding model (`bge-small-en-v1.5`, ~23 MB, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) and fuses its results into the cascade under a confidence gate. Semantic search is **on by default when the model is available**, and degrades silently to the lexical cascade when it isn't — no errors, no cloud calls, nothing leaves your machine.
+
+The one-time ~23 MB model download is **handler-gated**: on an interactive terminal, `lyt reindex` asks before fetching and shows progress; in non-interactive, scripted, or MCP contexts Lyt never auto-downloads and simply uses lexical search. Disable semantic fusion any time with `lyt search --no-semantic` or globally via `LYT_EMBEDDINGS=0`.
 
 ## Storage
 
@@ -94,12 +105,24 @@ Lyt vaults live under `~/lyt/vaults/` by default. To place a vault elsewhere —
 ## CLI surface
 
 ```text
-lyt vault init|adopt|join|clone|forget|disconnect|delete|list|info
-lyt vault add-edge|reconnect|verify|sync-metadata|regen-context
-lyt mesh status|clone-all|validate|init --from <manifest.yon>
-lyt help [<topic>] [--markdown]      lyt doctor [--json|--quiet|--full]
+lyt init                             # interactive bootstrap wizard
+lyt capture "<text>"                 lyt search "<query>" [--vault|--mesh|--all]
+lyt primer --scope vault|mesh|federation
+lyt reindex [--all|--mesh <m>|--vault <v>]
+
+lyt vault init|adopt|join|clone|move|rename|forget|disconnect|delete|list|info
+lyt vault add-edge|refresh|verify|sync-metadata|regen-context|snapshot|freeze
+lyt vault share|unshare|access|invites|abandon
+lyt alias <name> <target> [--list|--remove]
+
+lyt mesh init|join|list|info|subscribe|add-edge|validate|adopt|rebuild-registry
+lyt mesh status|clone-all|rebuild-rollup
+lyt federation init|list|rebuild     lyt discover     lyt repair [--dry-run|--apply]
+lyt identity|machine|provenance|audit|housekeep
+
 lyt pattern list|install|uninstall|link|unlink|fork|verbs|run
-lyt registry reset                   lyt mcp serve
+lyt skills install                   lyt agent-manual --install
+lyt help [<topic>] [--markdown]      lyt doctor [--json|--full]   lyt mcp start
 ```
 
 Run `lyt help` for the full verb-group view, `lyt help <topic>` for any of the topic docs, and `lyt doctor` to confirm your environment is healthy.
@@ -109,8 +132,8 @@ Run `lyt help` for the full verb-group view, `lyt help <topic>` for any of the t
 | Package | Purpose |
 |---|---|
 | [`@younndai/lyt`](packages/lyt/README.md) | Meta package — pulls in the others and ships the unified `lyt` binary. |
-| [`@younndai/lyt-vault`](packages/lyt-vault/README.md) | Vault primitive: `init`, `adopt`, `sync-metadata`, `help`, `doctor`, `pattern`, the priming-file scaffold. |
-| [`@younndai/lyt-mesh`](packages/lyt-mesh/README.md) | Mesh layer: `mesh status`, `clone-all`, `validate`, `init --from <manifest>`. |
+| [`@younndai/lyt-vault`](packages/lyt-vault/README.md) | Vault primitive: `init`, `adopt`, `capture`, `search`, the libSQL index, `help`, `doctor`, `pattern`, the priming-file scaffold. |
+| [`@younndai/lyt-mesh`](packages/lyt-mesh/README.md) | Mesh layer: `mesh status`, `clone-all`, `subscribe`, `validate`, `init`/`join`. |
 | [`@younndai/lyt-skills`](packages/lyt-skills/README.md) | Harness skills (Claude Code, Codex, MCP clients) wrapping the pattern runtime. |
 | [`@younndai/lyt-mcp`](packages/lyt-mcp/README.md) | MCP server exposing the operation set as MCP tools for local agent use. |
 | [`@younndai/lyt-runner`](packages/lyt-runner/README.md) | Automator runtime — the operation registry the CLI and skills dispatch against. |

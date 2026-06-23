@@ -40,7 +40,7 @@ interface RebuildLanesCliOpts {
 export function buildRebuildLanesCommand(): Command {
   return new Command("rebuild-lanes")
     .description(
-      "v1.D.1a: rebuild the tag-frequency lanes index from notes/**/*.md frontmatter tags. Writes `.lyt/indexes/lanes.yon` (YON SoT per Lock 0.2) — each tag with ≥threshold member notes becomes a @LANE record + @LANE_MEMBER rows. Pair with `lyt sync` (post-pull lanes-cache upsert) or with `lyt automator run lane-builder --run-now` (v1.D.1c scheduled wrapper).",
+      "Rebuild the tag-frequency lanes index from notes/**/*.md frontmatter tags. Writes `.lyt/indexes/lanes.yon` (YON SoT) — each tag with ≥threshold member notes becomes a @LANE record + @LANE_MEMBER rows. Pair with `lyt sync` (post-pull lanes-cache upsert) or with `lyt automator run lane-builder --run-now` (scheduled wrapper).",
     )
     .requiredOption("--vault <name>", "Vault name (must be registered)")
     .option(

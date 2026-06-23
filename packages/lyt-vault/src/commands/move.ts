@@ -52,7 +52,7 @@ interface MoveCliOpts {
 export function buildMoveCommand(): Command {
   return new Command("move")
     .description(
-      "v1.B.3: relocate a vault to a different mesh. Rid stable; mesh.yon files atomically updated. Branch-vs-solo prompt fires when the vault has children (use --solo or --branch to bypass; --json refuses to prompt and exits 3 if neither flag set).",
+      "Relocate a vault to a different mesh. Rid stable; mesh.yon files atomically updated. Branch-vs-solo prompt fires when the vault has children (use --solo or --branch to bypass; --json refuses to prompt and exits 3 if neither flag set).",
     )
     .argument("<name>", "Vault name (e.g., 'alex/lyt')")
     .requiredOption("--to-mesh <name>", "Target mesh (must be registered locally)")

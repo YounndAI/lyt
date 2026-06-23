@@ -40,6 +40,41 @@ export function isValidGhHandle(handle: string): boolean {
   return GH_HANDLE_REGEX.test(handle);
 }
 
+// Fed-v2 Layer-1 (Phase ) — RESERVED mesh-name namespace. These names are
+// owned by the SYSTEM: federation reconstitution
+// (flows/federation/rebuildFederationCacheFlow.ts) homes subscriptions into
+// owner-bucket meshes named `subscriptions/{owner}` and shared-RW into
+// `shared/{owner}`; `agents` + `published` are reserved for the agent-fleet +
+// publish lanes. A USER must not be able to create/rename a mesh INTO one of
+// these (it would collide with — or shadow — the system's own buckets), so the
+// USER-facing name validators (validateMeshName + validateVaultName's mesh
+// segment) reject them. The SYSTEM's own bucket creation goes through
+// registry/meshes-repo.ts insertMesh DIRECTLY (which does NOT call these
+// validators), so it is naturally exempt — no escape-hatch flag is needed.
+export const RESERVED_MESH_NAMES = ["subscriptions", "shared", "agents", "published"] as const;
+
+// True when `name` is exactly one of the reserved mesh names (case-insensitive,
+// matching the slug-safe lowercasing the mesh-name grammar enforces).
+export function isReservedMeshName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (RESERVED_MESH_NAMES as readonly string[]).includes(lower);
+}
+
+// Throw a descriptive, remedy-bearing error when a USER tries to occupy a
+// reserved mesh name. Centralised so the three user-facing call sites (mesh
+// create, vault init's mesh segment, rename) emit identical guidance.
+export function assertMeshNameNotReserved(name: string): void {
+  if (isReservedMeshName(name)) {
+    throw new Error(
+      `Mesh name ${JSON.stringify(name)} is reserved for Lyt's own federation buckets ` +
+        `(${RESERVED_MESH_NAMES.join(", ")}). The system homes subscriptions into ` +
+        `'subscriptions/{owner}' and shared vaults into 'shared/{owner}' automatically; ` +
+        `a user mesh cannot occupy one of these names. Pick a different mesh name ` +
+        `(e.g. 'team', 'work', 'archive').`,
+    );
+  }
+}
+
 // (2026-06-04) — derive the DEFAULT provisional handle for a
 // no-gh `lyt init`: the OS username, sanitized toward a valid GitHub handle
 // (lowercase, `[a-z0-9-]`, collapse + trim hyphens, cap 39). The result is
@@ -196,6 +231,16 @@ export function validateVaultName(name: string): void {
       `Vault name cannot start with '/': ${JSON.stringify(name)}. Use 'owner/repo' (e.g. 'alex/main') or a bare name (e.g. 'notes').`,
     );
   }
+  // federation-v2 F1 (release review): reject a leading '@', symmetric with
+  // validateAliasName's '@' guard. The '@' sigil belongs to the alias
+  // namespace (vault-addressing.resolveVault step 0); a vault must never own
+  // it, or the bare-vault and @-alias namespaces would overlap. Keeps the two
+  // resolution routes disjoint at BOTH write boundaries.
+  if (name.startsWith("@")) {
+    throw new Error(
+      `Vault name cannot start with '@': ${JSON.stringify(name)}. The '@' sigil is reserved for aliases. Use 'owner/repo' (e.g. 'alex/main') or a bare name (e.g. 'notes').`,
+    );
+  }
   if (name.endsWith("/")) {
     throw new Error(
       `Vault name cannot end with '/': ${JSON.stringify(name)}. Use 'owner/repo' (e.g. 'alex/main') or a bare name (e.g. 'notes').`,
@@ -222,6 +267,15 @@ export function validateVaultName(name: string): void {
         `Vault name has an empty segment: ${JSON.stringify(name)}. Use 'owner/repo' (e.g. 'alex/main') or a bare name.`,
       );
     }
+  }
+  // Fed-v2 Layer-1 (Phase ) — when the name is qualified `{mesh}/{leaf}`, the
+  // FIRST segment is a mesh name; block a USER homing a vault into (or renaming
+  // a vault under) a system-reserved mesh namespace. This is the rename + qualified
+  // vault-init guard sibling of validateMeshName's reserved check. A bare name has
+  // no mesh segment, so it is unaffected. The system's bucket creation never
+  // routes through validateVaultName.
+  if (segments.length === 2) {
+    assertMeshNameNotReserved(segments[0]!);
   }
 }
 
@@ -271,6 +325,10 @@ export function validateMeshName(name: string): void {
         `Validated on all platforms so cross-OS mesh members can clone the mesh's main vault.`,
     );
   }
+  // Fed-v2 Layer-1 (Phase ) — block USER occupation of a system-reserved mesh
+  // namespace. The system's own bucket creation (insertMesh) bypasses this
+  // validator, so only handler input is gated. See assertMeshNameNotReserved.
+  assertMeshNameNotReserved(name);
   // hardening pass/26 fix-pass release review — the error text below always
   // promised "no consecutive hyphens" but the regex accepted them; the ban
   // became LOAD-BEARING when scheme D (federation-paths.ts) made `--` the

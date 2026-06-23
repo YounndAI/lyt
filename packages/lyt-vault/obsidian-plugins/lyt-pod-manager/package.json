@@ -1,6 +1,6 @@
 {
   "name": "lyt-pod-manager",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "Obsidian community plugin — Pod Manager for Lyt pod-map vaults (mesh-boundary coloring + write-permission badges).",
   "private": true,
   "main": "main.js",

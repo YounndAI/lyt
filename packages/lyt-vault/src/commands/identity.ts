@@ -25,7 +25,7 @@ import { getIdentity, refreshIdentity } from "../util/identity.js";
 
 export function buildIdentityCommand(): Command {
   const cmd = new Command("identity").description(
-    "Manage this machine's GitHub-handle cache at ~/lyt/machine.yon (arc §12.2)",
+    "Manage this machine's GitHub-handle cache at ~/lyt/machine.yon",
   );
   cmd.addCommand(buildShowCommand());
   cmd.addCommand(buildRefreshCommand());

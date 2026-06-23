@@ -34,7 +34,7 @@ export function buildCloneCommand(): Command {
     .option("--into <dir>", "Parent directory to clone into (defaults to ~/lyt/vaults)")
     .option(
       "--to-mesh <name>",
-      "v1.B.3: assign the cloned vault to a registered mesh — generates a FRESH rid (NOT the source rid), writes @VAULT_HOME_MESH into the clone's vault.yon, and appends a @MESH_HOME row to the target mesh's mesh.yon. The source vault is untouched. Detaches the source origin by default (F8 — the new vault earns its own repo at first publish); pass --keep-origin to keep tracking the source as upstream.",
+      "Assign the cloned vault to a registered mesh — generates a FRESH rid (NOT the source rid), writes @VAULT_HOME_MESH into the clone's vault.yon, and appends a @MESH_HOME row to the target mesh's mesh.yon. The source vault is untouched. Detaches the source origin by default (the new vault earns its own repo at first publish); pass --keep-origin to keep tracking the source as upstream.",
     )
     .option(
       "--keep-origin",

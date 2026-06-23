@@ -16,6 +16,7 @@
 
 import { Command } from "commander";
 
+import { buildAbandonCommand } from "./commands/abandon.js";
 import { buildAddEdgeCommand } from "./commands/add-edge.js";
 import { buildAdoptCommand } from "./commands/adopt.js";
 import { buildCloneCommand } from "./commands/clone.js";
@@ -42,10 +43,13 @@ import { buildRefreshCommand } from "./commands/refresh.js";
 import { buildRegenContextCommand } from "./commands/regen-context.js";
 import { buildRegistryCommand } from "./commands/registry.js";
 import { buildRestoreCommand } from "./commands/restore.js";
+import { buildAccessCommand } from "./commands/access.js";
+import { buildInvitesCommand } from "./commands/invites.js";
+import { buildShareCommand } from "./commands/share.js";
 import { buildSnapshotCommand } from "./commands/snapshot.js";
 import { buildSyncMetadataCommand } from "./commands/sync-metadata.js";
+import { buildUnshareCommand } from "./commands/unshare.js";
 import { buildUnfreezeCommand } from "./commands/unfreeze.js";
-import { buildVaultUpdateCadenceCommand } from "./commands/vault-update-cadence.js";
 import { buildVerifyCommand } from "./commands/verify.js";
 
 export function buildVaultSubcommand(): Command {
@@ -61,6 +65,7 @@ export function buildVaultSubcommand(): Command {
   vault.addCommand(buildForgetCommand());
   vault.addCommand(buildDisconnectCommand());
   vault.addCommand(buildDeleteCommand());
+  vault.addCommand(buildAbandonCommand());
   vault.addCommand(buildVerifyCommand());
   vault.addCommand(buildReconnectCommand());
   vault.addCommand(buildRebuildIndexCommand());
@@ -79,7 +84,10 @@ export function buildVaultSubcommand(): Command {
   vault.addCommand(buildSnapshotCommand());
   vault.addCommand(buildRestoreCommand());
   vault.addCommand(buildListSnapshotsCommand());
-  vault.addCommand(buildVaultUpdateCadenceCommand());
+  vault.addCommand(buildShareCommand());
+  vault.addCommand(buildUnshareCommand());
+  vault.addCommand(buildAccessCommand());
+  vault.addCommand(buildInvitesCommand());
   return vault;
 }
 

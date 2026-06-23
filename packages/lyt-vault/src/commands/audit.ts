@@ -35,7 +35,7 @@ export function buildAuditCommand(): Command {
   audit
     .command("export")
     .description(
-      "Render a window of per-vault audit_log rows to a markdown file at .lyt/audit/<YYYY-MM>.md (arc §8.4).",
+      "Render a window of per-vault audit_log rows to a markdown file at .lyt/audit/<YYYY-MM>.md.",
     )
     .requiredOption("--since <date>", "Window start (YYYY-MM-DD or ISO-8601). Required.")
     .option("--until <date>", "Window end (default: now). YYYY-MM-DD or ISO-8601.")

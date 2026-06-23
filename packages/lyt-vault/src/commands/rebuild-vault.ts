@@ -17,6 +17,7 @@
 import { Command } from "commander";
 
 import { rebuildVaultFlow } from "../flows/rebuild-vault.js";
+import { isEmbeddingsInteractive } from "../util/embeddings.js";
 import { withSpinner } from "../util/spinner.js";
 
 interface RebuildVaultCliOpts {
@@ -43,9 +44,20 @@ export function buildRebuildVaultCommand(): Command {
       try {
         const threshold =
           opts.threshold !== undefined ? Number.parseInt(opts.threshold, 10) : undefined;
+        // C-1 — the build path may prompt + visibly fetch the ~23MB model
+        // ONLY from an interactive terminal: BOTH stdin AND stdout a real TTY,
+        // AND not --json. stdin must be a TTY too — the prompt reads
+        // process.stdin, so a redirected-stdin + TTY-stdout invocation must NOT
+        // prompt nor fetch (release review Major fold).
+        const embeddingsInteractive = isEmbeddingsInteractive({
+          json: opts.json,
+          stdinTTY: process.stdin.isTTY === true,
+          stdoutTTY: process.stdout.isTTY === true,
+        });
         const rebuildArgs = {
           vault: opts.vault!,
           ...(threshold !== undefined && Number.isFinite(threshold) ? { threshold } : {}),
+          ...(embeddingsInteractive ? { embeddingsInteractive: true } : {}),
         };
         // V-DX-1 — liveness spinner over the all-tiers rebuild window.
         // --json stays spinner-free; non-TTY prints "Reindexing…" once.

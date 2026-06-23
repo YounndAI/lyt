@@ -14,26 +14,20 @@
  * limitations under the License.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { addSubscription } from "../registry/mesh-subscriptions-repo.js";
 import { getMeshByName, getMeshByRid } from "../registry/meshes-repo.js";
 import { getVaultByName, getVaultByRid } from "../registry/repo.js";
+import { canonicalizeCoordinate, vaultOriginCoordinate } from "../registry/vault-addressing.js";
 import { resolveVaultRef, type ResolvedVaultRef } from "../util/federation-paths.js";
-import { ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
-import { parseMeshYon } from "../yon/mesh-read.js";
-import { renderMeshYon, type MeshDoc, type MeshSubscriptionRecord } from "../yon/mesh-write.js";
+import { resolveRemoteUrl, resolveRemoteUrlFromSlug } from "../util/remote-url.js";
+import { uuid7BytesToHex } from "../util/uuid7.js";
+import { liveSubscriptions } from "../yon/subscription-ledger-read.js";
+import { appendSubscriptionActive } from "../yon/subscription-ledger-write.js";
 import { cloneVaultFlow } from "./clone.js";
 import { reindexInboundVault } from "./reindex-inbound.js";
 
@@ -171,6 +165,26 @@ export class SubscribeVaultNotFoundError extends Error {
   }
 }
 
+// Fed-v2 Layer-1 (Phase C) — fail-closed when the subscribed vault has no
+// resolvable git origin, so no cross-pod coordinate can be derived. The
+// coordinate is the subscription store's identity + dedup key; a record
+// without one would be unmergeable across writers. Refuse rather than write a
+// keyless record.
+export class SubscribeNoCoordinateError extends Error {
+  readonly errorCode = "no-coordinate";
+  readonly vaultName: string;
+  constructor(vaultName: string) {
+    super(
+      `lyt mesh subscribe: subscribed vault '${vaultName}' has no resolvable git origin, ` +
+        `so no cross-pod coordinate (lyt:vault:<host>/<owner>/<repo>) can be derived. ` +
+        `A subscription record requires a coordinate as its identity key — refusing to ` +
+        `subscribe a vault with no origin. Set the vault's remote and retry.`,
+    );
+    this.name = "SubscribeNoCoordinateError";
+    this.vaultName = vaultName;
+  }
+}
+
 // Name-based URL construction per the ratified default + lyt-naming-convention. Hardening pass
 // (subscriber-onboarding fix-pass, 2026-06-11): the URL now routes through
 // the repo-name convention SoT (util/federation-paths.ts) — a vault NAMED
@@ -180,12 +194,12 @@ export class SubscribeVaultNotFoundError extends Error {
 // legacy literal URL (defensive — subscribeFlow refuses such input upstream).
 export function defaultGhUrlForVaultName(vaultName: string): string {
   const ref = resolveVaultRef(vaultName);
-  if (ref === null) return `https://github.com/${vaultName}.git`;
+  if (ref === null) return resolveRemoteUrlFromSlug(vaultName);
   return ghUrlForVaultRef(ref);
 }
 
 function ghUrlForVaultRef(ref: ResolvedVaultRef): string {
-  return `https://github.com/${ref.owner}/${ref.repoName}.git`;
+  return resolveRemoteUrl(ref.owner, ref.repoName);
 }
 
 const defaultCloneFn: SubscribeCloneFn = async (args) => {
@@ -323,17 +337,17 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       );
     }
 
-    // 3. Read + parse the subscribing mesh's mesh.yon.
-    const before = readFileSync(meshYonPath, "utf8");
-    const doc = parseMeshYon(before);
-
-    // 4. Build the @MESH_SUBSCRIPTION record + idempotence check.
-    const newSub: MeshSubscriptionRecord = {
-      meshRid: subMesh.rid,
-      externalVaultRid: subscribedVault.rid,
-      externalMeshRid: subscribedHomeMesh.rid,
-      externalMeshName: subscribedHomeMesh.name,
-    };
+    // 3. Resolve the subscribed vault's cross-pod coordinate — the
+    // subscription store's IDENTITY + DEDUP key. Fed-v2 Layer-1 (Phase C)
+    // re-keys subscription identity OFF the self-asserted rid and ONTO the
+    // origin coordinate (`lyt:vault:<host>/<owner>/<repo>`): a forged rid can
+    // no longer collide a distinct vault, and two writers naming the same
+    // upstream repo converge. FAIL-CLOSED: a vault with no resolvable origin
+    // has no coordinate, so refuse — a keyless record is unmergeable.
+    const coordinate = vaultOriginCoordinate(subscribedVault);
+    if (coordinate === null) {
+      throw new SubscribeNoCoordinateError(args.subscribedVaultName);
+    }
 
     const subscribingSummary = {
       ridHex: uuid7BytesToHex(subMesh.rid),
@@ -347,15 +361,26 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       homeMeshName: subscribedHomeMesh.name,
     };
 
-    const alreadyPresent = doc.subscriptions.some(
-      (s) =>
-        ridsEqual(s.meshRid, newSub.meshRid) &&
-        ridsEqual(s.externalVaultRid, newSub.externalVaultRid),
-    );
+    // 4. Idempotence — re-keyed onto the coordinate. The live set is the
+    // OR-Set fold over every writer's append-only shard; a coordinate already
+    // live (active in some shard, not tombstone-superseded) means this
+    // subscribe is a no-op. (Per the locked record shape, two records with the
+    // same coordinate but different added_at are still one subscription —
+    // added_at is audit-only.)
+    //
+    // deferred-E — compare on the CANONICAL coordinate on BOTH sides.
+    // `liveSubscriptions()` already emits canonical coordinates (the fold dedups
+    // on the canonical key), and `vaultOriginCoordinate` is built from the same
+    // `gitUrlToCoordinate` canonicalizer — but canonicalize the local
+    // `coordinate` here too so an idempotent re-subscribe under a spelling
+    // variant (e.g. a case-different remote URL) is correctly a no-op rather
+    // than appending a duplicate active record for the same logical vault.
+    const canonicalCoordinate = canonicalizeCoordinate(coordinate);
+    const alreadyPresent = liveSubscriptions().some((s) => s.coordinate === canonicalCoordinate);
     if (alreadyPresent) {
       // Even on idempotent re-emit, refresh the local index so a previous
-      // partial subscribe that never reached step 8 still ends up searchable.
-      // reindexInboundVault (all tiers) is itself idempotent.
+      // partial subscribe that never reached the index build still ends up
+      // searchable. reindexInboundVault (all tiers) is itself idempotent.
       const indexBuilt = await buildLocalIndex(subscribedVault.name, subscribedVault.path, db);
       return {
         status: "subscription-already-present",
@@ -368,48 +393,23 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       };
     }
 
-    // 5. Render the updated MeshDoc → tmp file.
-    const updatedDoc: MeshDoc = {
-      ...doc,
-      subscriptions: [...doc.subscriptions, newSub],
-    };
-    const rendered = renderMeshYon(updatedDoc);
-    const tmpPath = `${meshYonPath}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmpPath, rendered, "utf8");
+    // 5. Write the @SUBSCRIPTION record to THIS writer's own append-only
+    // shard (`<podRoot>/ledger/subscriptions/<writerId>/`). This is the
+    // durable side-effect — the convergent store. The legacy @MESH_SUBSCRIPTION
+    // mesh.yon write and the `mesh_subscriptions` cache insert are RETIRED here
+    // (begin no-legacy, Phase C): the mesh.yon SoT no longer carries
+    // subscriptions and the cache is EXPECTED to go stale on this branch until
+    // the reconstitution phase. We do not wire reconstitution here.
+    appendSubscriptionActive({
+      coordinate,
+      rid: subscribedSummary.ridHex,
+      entryMode: "subscribe",
+    });
 
-    // 6. Registry tx + cache insert. On failure: ROLLBACK + abandon tmp.
-    try {
-      await db.execute("BEGIN");
-      try {
-        await addSubscription(db, {
-          meshRid: newSub.meshRid,
-          externalVaultRid: newSub.externalVaultRid,
-          externalMeshRid: newSub.externalMeshRid,
-          externalMeshName: newSub.externalMeshName,
-        });
-        await db.execute("COMMIT");
-      } catch (innerErr) {
-        try {
-          await db.execute("ROLLBACK");
-        } catch {
-          /* best-effort */
-        }
-        throw innerErr;
-      }
-    } catch (err) {
-      cleanupTmp(tmpPath);
-      throw err;
-    }
-
-    // 7. Atomic rename tmp → mesh.yon.
-    mkdirSync(dirname(meshYonPath), { recursive: true });
-    renameSync(tmpPath, meshYonPath);
-
-    // 8. Local libSQL index build (clause-a). Best-effort: upsert*Cache
-    // flows open the per-vault .lyt/lyt.db; failure logs but does not
-    // fail the subscribe (mirrors the lyt-mesh sync post-pull hook
-    // pattern). The subscription is the durable side-effect; index
-    // refresh follows.
+    // 6. Local libSQL index build. Best-effort: upsert*Cache flows open the
+    // per-vault .lyt/lyt.db; failure logs but does not fail the subscribe
+    // (mirrors the lyt-mesh sync post-pull hook pattern). The subscription
+    // record is the durable side-effect; index refresh follows.
     const indexBuilt = await buildLocalIndex(subscribedVault.name, subscribedVault.path, db);
 
     return {
@@ -448,12 +448,4 @@ async function buildLocalIndex(
   // All tiers rebuild together via rebuildVaultFlow, so the three flags move in
   // lockstep with the rebuild's success.
   return { lanesRan: idx.reindexed, arcsRan: idx.reindexed, ftsRan: idx.reindexed };
-}
-
-function cleanupTmp(path: string): void {
-  try {
-    if (existsSync(path)) unlinkSync(path);
-  } catch {
-    // best-effort
-  }
 }

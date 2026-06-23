@@ -80,6 +80,55 @@ export interface InsertVaultArgs {
   createdAt?: string | null;
 }
 
+// fed-v2 Layer-2 P1 — refusal raised when an incoming upsert would
+// OVERWRITE a registry row already owning the same rid but recorded under a
+// DIFFERENT name. The ON CONFLICT(rid) DO UPDATE SET name,path clause would
+// silently re-home the victim row (rid-impersonation: a hostile published
+// vault.yon asserts a victim's rid). The name-mismatch refusal is the
+// LOAD-BEARING defense and is UNCONDITIONAL — `trustedReconstruction` only
+// relaxes the same-name/path-change arm (legitimate cross-machine
+// reconstitution / rebuild), it can NEVER authorize a name re-home.
+export class VaultRidImpersonationError extends Error {
+  readonly errorCode = "vault-rid-impersonation";
+  readonly ridHex: string;
+  readonly existingName: string;
+  readonly incomingName: string;
+  constructor(ridHex: string, existingName: string, incomingName: string) {
+    super(
+      `Refusing to register vault '${incomingName}': rid ${ridHex} is already owned by a ` +
+        `different registered vault '${existingName}' on this machine. A vault that asserts ` +
+        `an identity (rid) already held by another local vault under a DIFFERENT name is an ` +
+        `impersonation hazard (it would silently overwrite the existing vault's registry row). ` +
+        `If this is a genuine re-import of '${existingName}', re-clone it under its own fresh ` +
+        `identity, or 'lyt vault forget ${existingName}' first if you intend to replace it.`,
+    );
+    this.name = "VaultRidImpersonationError";
+    this.ridHex = ridHex;
+    this.existingName = existingName;
+    this.incomingName = incomingName;
+  }
+}
+
+export interface UpsertVaultOptions {
+  // fed-v2 Layer-2 P1 — INERT today; pre-wired for the future P5
+  // same-name-arm gate. The ONLY gate in the current discriminator
+  // (upsertVault :261-268) is the UNCONDITIONAL name-mismatch refusal: an
+  // incoming rid that a DIFFERENT-named local row owns is rejected
+  // (VaultRidImpersonationError) regardless of this flag — an attacker cannot
+  // fake the victim's name. A same-rid + same-name upsert (whether the path
+  // changes or is identical) is ALLOWED on every axis: it falls through the
+  // discriminator to the ON CONFLICT(rid) DO UPDATE, which re-homes the path
+  // (matches the accurate inline comment at :244-250 — the default URL-clone
+  // path, which preserves the source rid, re-registers the same vault at a new
+  // path and lands here legitimately). So `trustedReconstruction` does NOT
+  // change behavior today — it is threaded only to mark the genuine
+  // identity-PRESERVING restore axis (recover-pod / rebuild) explicitly, so a
+  // future P5 tightening (gating the same-name path-CHANGE arm on the untrusted
+  // ingest axis, allowing it only when this flag is set) has the capability
+  // already in place. Until P5 wires it, `void`-consumed at :267.
+  trustedReconstruction?: boolean | undefined;
+}
+
 export interface InsertMeshEdgeArgs {
   refMeshRid: Uint8Array;
   refVaultRid: Uint8Array;
@@ -180,10 +229,51 @@ export async function insertVault(db: Client, args: InsertVaultArgs): Promise<vo
   });
 }
 
-export async function upsertVault(db: Client, args: InsertVaultArgs): Promise<void> {
+export async function upsertVault(
+  db: Client,
+  args: InsertVaultArgs,
+  opts: UpsertVaultOptions = {},
+): Promise<void> {
   if (!isUuidv7Bytes(args.rid)) {
     throw new Error("upsertVault: rid must be a 16-byte UUIDv7 BLOB.");
   }
+
+  // fed-v2 Layer-2 P1 — context-aware refuse-on-rid guard BEFORE the
+  // unconditional ON CONFLICT(rid) DO UPDATE. Discriminate the cases an incoming
+  // rid-collision can take:
+  //   (rid live, name DIFFERS)      → REFUSE (impersonation). This is the
+  //                                    LOAD-BEARING, UNCONDITIONAL defense — no
+  //                                    flag can authorize re-homing a rid to a
+  //                                    DIFFERENT name (an attacker can't fake the
+  // victim's name, so the hardening pass hostile clone
+  //                                    — ext/attacker asserting personal/victim's
+  //                                    rid — is refused here regardless of flag).
+  //   (rid live, same name, path ≠) → ALLOW. A legitimate cross-machine
+  //                                    reconstitution / move re-homes the SAME
+  //                                    vault (same identity + name) to a new
+  //                                    on-disk path; the default URL-clone path
+  //                                    (which preserves the source rid) also
+  //                                    lands here when the same source is
+  //                                    re-registered at a new path.
+  //   (rid live, same name + path)  → idempotent no-op (ON CONFLICT re-writes
+  //                                    identical values harmlessly).
+  // A brand-new rid (no live row) always proceeds.
+  //
+  // `opts.trustedReconstruction` marks the genuine identity-PRESERVING restore
+  // axis (recover-pod / rebuild). In the current discriminator the name-mismatch
+  // refusal is the sole gate, so the flag does NOT relax any refusal — it is
+  // threaded so the restore axis is explicit and so a future tightening (e.g.
+  // gating the same-name path-change arm on the untrusted ingest axis) has the
+  // capability already wired. The name-mismatch refusal stays unconditional.
+  const existing = await getVaultByRid(db, args.rid);
+  if (existing !== null) {
+    const incomingName = args.name;
+    if (existing.name !== incomingName) {
+      throw new VaultRidImpersonationError(existing.ridHex, existing.name, incomingName);
+    }
+    void opts.trustedReconstruction;
+  }
+
   await db.execute({
     sql: `INSERT INTO vaults
  (rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint, status, git_url, created_at, registered_at, last_verified_at, verify_fail_count)
@@ -372,6 +462,16 @@ export async function deleteAllVaults(db: Client): Promise<void> {
   // explicit DELETE FROM mesh_edges is retained for the (rare) case where
   // a row's home FKs point at a vault row already drained by the cascade.
   await db.execute("DELETE FROM vaults");
+  await db.execute("DELETE FROM mesh_edges");
+}
+
+// Slice 2a — full-table wipe of the mesh_edges cache. Used by
+// rebuildFederationCacheFlow's mesh-edge reconstitution half (DELETE+reINSERT
+// idempotent full-replace from the ledger fold), mirroring deleteAllSubscriptions
+// / deleteAllAliases. mesh.yon is no longer the edge SoT, so the per-mesh
+// deleteAllEdgesByRefMesh (mesh.yon rebuild) no longer owns this cache; the
+// ledger reconstitution does, and it full-replaces.
+export async function deleteAllMeshEdges(db: Client): Promise<void> {
   await db.execute("DELETE FROM mesh_edges");
 }
 

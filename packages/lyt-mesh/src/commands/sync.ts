@@ -21,9 +21,11 @@ import {
   connectPodFlow,
   podNeedsConnect,
   reconcilePublishFlow,
+  syncPodLedgerFlow,
   withSpinner,
   type ConnectPodResult,
   type ReconcilePublishResult,
+  type SyncPodLedgerResult,
 } from "@younndai/lyt-vault";
 
 import { syncCheckFlow, type VaultCheckReport } from "../flows/sync-check.js";
@@ -163,11 +165,40 @@ export function buildSyncCommand(): Command {
         if (connect.status !== "reconciled") connectDeferredPublish = true;
       }
 
+      // Fed-v2 Layer-1 (Phase D1d) — the POD-REPO LEDGER sync leg. Pulls/commits/
+      // pushes the per-writer subscription/alias SHARD ledger under
+      // `<podRoot>/ledger/` (the git SoT for cross-machine convergence) and
+      // reconstitutes the local registry cache from the union. Same
+      // `--no-publish` gate (it's an outward pod-repo git op) and same
+      // connect-deferral as the publish pass. Skipped cleanly when there's no
+      // pod. Best-effort: a ledger-sync hiccup surfaces but does not flip the
+      // overall exit code unless it errored hard.
+      //
+      // W4 staleness fix — this leg runs BEFORE the publish pass (was after).
+      // Reconstitution here regenerates the registry cache (and pod.yon) from
+      // the JUST-PULLED ledger union; running it first means the publish pass's
+      // pod.yon regen → commit → push below reflects the pulled peer
+      // subscriptions in the SAME `lyt sync`. With the old order, the publish
+      // pass pushed a pod.yon derived from the PRE-pull registry, leaving it one
+      // cycle stale whenever this leg pulled in a new peer subscription. The
+      // ledger leg remains the SOLE committer of `ledger/`; the publish pass
+      // remains the SOLE committer of `pod.yon` — disjoint pathspecs, just
+      // reordered.
+      let podLedger: SyncPodLedgerResult | undefined;
+      if (opts.publish !== false && !connectDeferredPublish) {
+        podLedger = await syncPodLedgerFlow({ push: true });
+        if (opts.json !== true && opts.quiet !== true) {
+          printPodLedgerHuman(podLedger);
+        }
+      }
+
       // Brief B (B.2) — the federation publish/reconcile pass: regen pod.yon →
       // create-missing vault repos + push → commit + push the pod, all
       // resumable via outbox.db. Running `lyt sync` IS the consent for this
       // outward step (the handler explicitly invoked it). --no-publish skips it
-      // (local sync only). Skipped cleanly when there's no pod.
+      // (local sync only). Skipped cleanly when there's no pod. Runs AFTER the
+      // pod-ledger leg above so its pod.yon regen sees the reconstituted cache
+      // (W4 staleness fix — see the ledger-leg comment).
       let publish: ReconcilePublishResult | undefined;
       if (opts.publish !== false && !connectDeferredPublish) {
         publish = await reconcilePublishFlow({ push: true });
@@ -178,7 +209,11 @@ export function buildSyncCommand(): Command {
 
       const syncOk = result.ok;
       const publishOk = publish === undefined || publish.skipped || publish.ok;
-      process.exit(syncOk && publishOk ? 0 : 1);
+      const podLedgerOk =
+        podLedger === undefined ||
+        podLedger.status === "skipped" ||
+        podLedger.status === "synced";
+      process.exit(syncOk && publishOk && podLedgerOk ? 0 : 1);
     });
   return cmd;
 }
@@ -252,6 +287,29 @@ function printPublishHuman(p: ReconcilePublishResult): void {
     console.log(
       `  ⚠ ${p.outboxRemaining} publish op(s) pending in the outbox — re-run \`lyt sync\` to finish (resumable).`,
     );
+  }
+}
+
+// Fed-v2 Layer-1 (Phase D1d) — pod-repo ledger sync summary line.
+function printPodLedgerHuman(p: SyncPodLedgerResult): void {
+  if (p.status === "skipped") {
+    if (p.reason !== "no-single-pod" && p.reason !== "no-federation-state") {
+      // eslint-disable-next-line no-console
+      console.log(`lyt sync (ledger): skipped — ${p.reason ?? "no pod"}`);
+    }
+    return;
+  }
+  const parts: string[] = [];
+  if (p.pulled) parts.push("pulled");
+  if (p.committed) parts.push("committed");
+  if (p.pushed) parts.push("pushed");
+  if (p.reconstituted) parts.push(`reconstituted ${p.subscriptionsReconstituted} sub(s)`);
+  const detail = parts.length > 0 ? parts.join(" · ") : "up to date";
+  // eslint-disable-next-line no-console
+  console.log(`lyt sync (ledger): ${p.status} — ${detail}`);
+  for (const w of p.warnings) {
+    // eslint-disable-next-line no-console
+    console.log(`  ⚠ ${w}`);
   }
 }
 

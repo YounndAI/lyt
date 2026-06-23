@@ -18,14 +18,9 @@ import { hexToUuid7Bytes } from "../util/uuid7.js";
 
 import type {
   MeshDoc,
-  MeshEdgeRecord,
   MeshHomeRecord,
-  MeshPublicRecord,
   MeshPushKind,
   MeshRecord,
-  MeshSubscriptionRecord,
-  MeshUpdateCadenceRecord,
-  MeshUpdateCadenceType,
 } from "./mesh-write.js";
 
 // v1.B.2 — hand-rolled parser for `.lyt/mesh.yon`. Counterpart to
@@ -57,25 +52,20 @@ import type {
 export function parseMeshYon(content: string): MeshDoc {
   const mesh = parseMesh(content);
   const homeVaults = parseMeshHomes(content);
-  const edges = parseMeshEdges(content);
-  const subscriptions = parseMeshSubscriptions(content);
-  // v1.B.6 — @MESH_PUBLIC + @UPDATE_CADENCE additions. Both default to
-  // absent (publicMeta undefined, updateCadences empty) for legacy
-  // mesh.yon files that don't carry them — preserves pre-release
-  // compatibility (the parser tolerates absence).
-  const publicMeta = parseMeshPublic(content);
-  const updateCadences = parseMeshUpdateCadences(content);
-  const doc: MeshDoc = {
+  // Fed-v2 Layer-1 (Phase D1c) — @MESH_SUBSCRIPTION is no longer parsed
+  // (no-legacy, design §5). A legacy mesh.yon carrying @MESH_SUBSCRIPTION blocks
+  // now has them silently IGNORED (same tolerance the parser already gives any
+  // unknown @TAG). Subscriptions live in the per-writer ledger, not mesh.yon.
+  // Fed-v2 Slice 1b (#13 DELETE) — @MESH_PUBLIC and @UPDATE_CADENCE are
+  // fully removed. Any legacy mesh.yon carrying those blocks now has them
+  // silently IGNORED (same tolerance the parser already gives any unknown @TAG).
+  // Slice 2a — @MESH_EDGE is no longer parsed (no-legacy). A legacy mesh.yon
+  // carrying @MESH_EDGE blocks now has them silently IGNORED; edges live in the
+  // per-writer ledger, reconstituted into the mesh_edges cache.
+  return {
     mesh,
     homeVaults,
-    edges,
-    subscriptions,
-    updateCadences,
   };
-  if (publicMeta !== null) {
-    doc.publicMeta = publicMeta;
-  }
-  return doc;
 }
 
 function parseMesh(content: string): MeshRecord {
@@ -98,9 +88,6 @@ function parseMesh(content: string): MeshRecord {
   }
   const mainVaultRid = hexToUuid7Bytes(mainVaultRidRaw);
   const createdAt = readTimestampField(content, "created_at") ?? "";
-  // v1.B.6 — optional default_vault_update_cadence on @MESH header. Read
-  // from the full content (the field can only appear on @MESH per the ratified default).
-  const defaultVaultUpdateCadence = readQuotedField(content, "default_vault_update_cadence");
 
   return {
     rid,
@@ -109,7 +96,6 @@ function parseMesh(content: string): MeshRecord {
     ...(pushKind !== undefined ? { pushKind } : {}),
     mainVaultRid,
     createdAt,
-    ...(defaultVaultUpdateCadence !== null ? { defaultVaultUpdateCadence } : {}),
   };
 }
 
@@ -157,134 +143,20 @@ function parseMeshHomes(content: string): MeshHomeRecord[] {
   return out;
 }
 
-function parseMeshEdges(content: string): MeshEdgeRecord[] {
-  const out: MeshEdgeRecord[] = [];
-  for (const block of iterateBlocks(content, "@MESH_EDGE")) {
-    const refMeshRidRaw = readBlockPrefixedHeader(block, "@MESH_EDGE", "ref_mesh_rid", "mesh");
-    if (refMeshRidRaw === null) continue;
-    const refVaultRidRaw = readPrefixedField(block, "ref_vault_rid", "vault");
-    if (refVaultRidRaw === null) continue;
-    const homeMeshRidRaw = readPrefixedField(block, "home_mesh_rid", "mesh");
-    if (homeMeshRidRaw === null) continue;
-    const homeVaultRidRaw = readPrefixedField(block, "home_vault_rid", "vault");
-    if (homeVaultRidRaw === null) continue;
-    const kindRaw = readBareField(block, "kind");
-    // Schema CHECK constraint at registry/migrations.ts narrows kind to
-    // 'parent' in v1; widening lands in v1.C.1 if needed. Reject other
-    // values silently (mirrors the v1.B.1 reader's posture for unknown
-    // header tokens).
-    if (kindRaw !== "parent") continue;
-    out.push({
-      refMeshRid: hexToUuid7Bytes(refMeshRidRaw),
-      refVaultRid: hexToUuid7Bytes(refVaultRidRaw),
-      homeMeshRid: hexToUuid7Bytes(homeMeshRidRaw),
-      homeVaultRid: hexToUuid7Bytes(homeVaultRidRaw),
-      kind: kindRaw,
-    });
-  }
-  return out;
-}
+// Slice 2a — parseMeshEdges DELETED. The @MESH_EDGE record type is retired
+// from mesh.yon (no-legacy); edges live in the per-writer ledger, so there is
+// nothing to parse. Any residual @MESH_EDGE block in a legacy file is simply not
+// walked. (Mirror of the D1c parseMeshSubscriptions removal below.)
 
-function parseMeshSubscriptions(content: string): MeshSubscriptionRecord[] {
-  const out: MeshSubscriptionRecord[] = [];
-  for (const block of iterateBlocks(content, "@MESH_SUBSCRIPTION")) {
-    const meshRidRaw = readBlockPrefixedHeader(block, "@MESH_SUBSCRIPTION", "mesh_rid", "mesh");
-    if (meshRidRaw === null) continue;
-    const externalVaultRidRaw = readPrefixedField(block, "external_vault_rid", "vault");
-    if (externalVaultRidRaw === null) continue;
-    const externalMeshRidRaw = readPrefixedField(block, "external_mesh_rid", "mesh");
-    if (externalMeshRidRaw === null) continue;
-    const externalMeshName = readQuotedField(block, "external_mesh_name");
-    if (externalMeshName === null) continue;
-    out.push({
-      meshRid: hexToUuid7Bytes(meshRidRaw),
-      externalVaultRid: hexToUuid7Bytes(externalVaultRidRaw),
-      externalMeshRid: hexToUuid7Bytes(externalMeshRidRaw),
-      externalMeshName,
-    });
-  }
-  return out;
-}
+// Fed-v2 Layer-1 (Phase D1c) — parseMeshSubscriptions DELETED. The
+// @MESH_SUBSCRIPTION record type is retired (no-legacy, design §5);
+// mesh.yon no longer carries subscriptions, so there is nothing to parse. Any
+// residual @MESH_SUBSCRIPTION block in a legacy file is simply not walked.
 
-// v1.B.6 — @MESH_PUBLIC parser. Single record per mesh; null when the
-// mesh.yon has no @MESH_PUBLIC block (mesh is not publicly published).
-// Required fields: mesh_rid, description. All other fields optional.
-export function parseMeshPublic(content: string): MeshPublicRecord | null {
-  for (const block of iterateBlocks(content, "@MESH_PUBLIC")) {
-    const meshRidRaw = readBlockPrefixedHeader(block, "@MESH_PUBLIC", "mesh_rid", "mesh");
-    if (meshRidRaw === null) continue;
-    const description = readQuotedField(block, "description");
-    if (description === null) continue;
-
-    const topics = readQuotedField(block, "topics");
-    const maintainerContact = readQuotedField(block, "maintainer_contact");
-    const maintainerHandle = readQuotedField(block, "maintainer_handle");
-    const licenseOverride = readQuotedField(block, "license_override");
-    const acceptContributions = readBoolField(block, "accept_contributions");
-    const contributionUrl = readQuotedField(block, "contribution_url");
-    const homepageUrl = readQuotedField(block, "homepage_url");
-    const chatUrl = readQuotedField(block, "chat_url");
-    const createdAt = readTimestampField(block, "created_at");
-
-    const rec: MeshPublicRecord = {
-      meshRid: hexToUuid7Bytes(meshRidRaw),
-      description,
-    };
-    if (topics !== null) rec.topics = topics;
-    if (maintainerContact !== null) rec.maintainerContact = maintainerContact;
-    if (maintainerHandle !== null) rec.maintainerHandle = maintainerHandle;
-    if (licenseOverride !== null) rec.licenseOverride = licenseOverride;
-    if (acceptContributions !== null) rec.acceptContributions = acceptContributions;
-    if (contributionUrl !== null) rec.contributionUrl = contributionUrl;
-    if (homepageUrl !== null) rec.homepageUrl = homepageUrl;
-    if (chatUrl !== null) rec.chatUrl = chatUrl;
-    if (createdAt !== null) rec.createdAt = createdAt;
-    return rec;
-  }
-  return null;
-}
-
-// v1.B.6 — @UPDATE_CADENCE parser. Zero-or-more records, one per home
-// vault that has a publisher-declared sync rhythm. Required fields:
-// vault_rid, cadence_type. cadence_type narrows to cron|interval|on-demand;
-// other values are silently dropped (mirrors v1.B.2 parseMeshEdges kind
-// gating).
-export function parseMeshUpdateCadences(content: string): MeshUpdateCadenceRecord[] {
-  const out: MeshUpdateCadenceRecord[] = [];
-  for (const block of iterateBlocks(content, "@UPDATE_CADENCE")) {
-    const vaultRidRaw = readBlockPrefixedHeader(block, "@UPDATE_CADENCE", "vault_rid", "vault");
-    if (vaultRidRaw === null) continue;
-    const cadenceTypeRaw = readBareField(block, "cadence_type");
-    if (cadenceTypeRaw === null) continue;
-    let cadenceType: MeshUpdateCadenceType;
-    if (
-      cadenceTypeRaw === "cron" ||
-      cadenceTypeRaw === "interval" ||
-      cadenceTypeRaw === "on-demand"
-    ) {
-      cadenceType = cadenceTypeRaw;
-    } else {
-      continue;
-    }
-    const cron = readQuotedField(block, "cron");
-    const intervalSeconds = readIntField(block, "interval_seconds");
-    const timezone = readQuotedField(block, "timezone");
-    const peakHours = readQuotedField(block, "peak_hours");
-    const onDemandAllowed = readBoolField(block, "on_demand_allowed");
-
-    const rec: MeshUpdateCadenceRecord = {
-      vaultRid: hexToUuid7Bytes(vaultRidRaw),
-      cadenceType,
-    };
-    if (cron !== null) rec.cron = cron;
-    if (intervalSeconds !== null) rec.intervalSeconds = intervalSeconds;
-    if (timezone !== null) rec.timezone = timezone;
-    if (peakHours !== null) rec.peakHours = peakHours;
-    if (onDemandAllowed !== null) rec.onDemandAllowed = onDemandAllowed;
-    out.push(rec);
-  }
-  return out;
-}
+// Fed-v2 Slice 1b (#13 DELETE) — parseMeshPublic and parseMeshUpdateCadences
+// DELETED. The @MESH_PUBLIC and @UPDATE_CADENCE record families are fully removed.
+// Any legacy mesh.yon carrying those blocks now has them silently IGNORED
+// (same tolerance the parser already gives any unknown @TAG).
 
 // Read `<key>=<prefix>:<value>` where the value is a UUID-shaped hex string
 // (32 chars or dashed 8-4-4-4-12). Value may be quoted ("…") or bare.
@@ -332,23 +204,6 @@ function readTimestampField(content: string, key: string): string | null {
   const m = content.match(re);
   if (!m) return null;
   return m[1]!;
-}
-
-// v1.B.6 — read `<key>:int=<digits>` field.
-function readIntField(content: string, key: string): number | null {
-  const re = new RegExp(`\\|\\s*${escapeRegex(key)}:int=(-?\\d+)`);
-  const m = content.match(re);
-  if (!m) return null;
-  const n = Number.parseInt(m[1]!, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-// v1.B.6 — read `<key>:bool=true|false` field.
-function readBoolField(content: string, key: string): boolean | null {
-  const re = new RegExp(`\\|\\s*${escapeRegex(key)}:bool=(true|false)`);
-  const m = content.match(re);
-  if (!m) return null;
-  return m[1] === "true";
 }
 
 function escapeRegex(s: string): string {

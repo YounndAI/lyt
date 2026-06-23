@@ -21,7 +21,9 @@ import type { Client } from "@libsql/client";
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
 import { listVaults, type VaultRow } from "../../registry/repo.js";
-import { deriveWriteGate, hasSubscriptionSignal } from "../writability.js";
+import { hasSubscriptionSignal } from "../writability.js";
+import type { AccessProvider } from "../../access/access-provider.js";
+import { GhAccessProvider } from "../../access/gh-access-provider.js";
 import type { GhExecutor } from "../../util/gh-discover.js";
 import { resolveConfig } from "../../util/config.js";
 import {
@@ -119,6 +121,11 @@ export interface ReconcilePublishArgs {
   // to the real `gh` CLI; tests inject a fake to exercise the foreign-mesh
   // subscription exclusion deterministically.
   writabilityGh?: GhExecutor | undefined;
+  // keystone Phase B — injectable AccessProvider for the publish-exclude
+  // write gate. Defaults to a GhAccessProvider built from `writabilityGh`;
+  // tests/callers may inject a different provider. Behavior-preserving: the
+  // default exactly mirrors the prior direct `deriveWriteGate(v, db, { gh })`.
+  accessProvider?: AccessProvider | undefined;
 }
 
 export interface ReconcilePublishResult {
@@ -224,12 +231,11 @@ export async function reconcilePublishFlow(
     // ONLY (the locked fix). Push still targets the existing `origin`, so a
     // granted-write subscription's content sync is unaffected.
     const foreignVaultNames = new Set<string>();
+    const accessProvider =
+      args.accessProvider ??
+      new GhAccessProvider(db, args.writabilityGh !== undefined ? { gh: args.writabilityGh } : {});
     for (const v of allActive) {
-      const gate = await deriveWriteGate(
-        v,
-        db,
-        args.writabilityGh !== undefined ? { gh: args.writabilityGh } : {},
-      );
+      const gate = await accessProvider.canWrite(v);
       if (gate.blocked) {
         warnings.push(`skipped read-only subscribed vault '${v.name}' (pull-only; no push)`);
         excludedSubscribers.add(v.name);

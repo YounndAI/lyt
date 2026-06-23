@@ -23,6 +23,7 @@ import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getVaultByRid, setVaultHomeMesh } from "../registry/repo.js";
 import { initVaultDbs } from "../registry/vault-db.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
+import { isReservedMeshName } from "../util/identity.js";
 import { ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
 import type { MeshPushKind } from "../yon/mesh-write.js";
@@ -101,6 +102,23 @@ export async function meshJoinFlow(opts: MeshJoinOptions): Promise<MeshJoinResul
     );
   }
   const parsedMesh = parseMeshYon(meshYonContent);
+
+  // Fed-v2 Layer-1 (Phase release review) — guard-bypass close. The mesh name
+  // here is `[lyt.untrusted]` foreign input from a published mesh.yon; it is
+  // inserted via insertMesh DIRECTLY (no validateMeshName). A foreign pod that
+  // publishes a mesh literally named `subscriptions` (etc.) would collide with
+  // the local system bucket namespace on join. A foreign mesh name is a bare
+  // mesh slot, so assert it directly. The SYSTEM's own bucket creation
+  // (rebuildFederationCacheFlow) does not route through here.
+  if (isReservedMeshName(parsedMesh.mesh.name)) {
+    throw new Error(
+      `lyt mesh join: the foreign mesh name ${JSON.stringify(parsedMesh.mesh.name)} ` +
+        `collides with a reserved Lyt bucket namespace (subscriptions, shared, agents, ` +
+        `published). The system homes subscriptions into 'subscriptions/{owner}' and ` +
+        `shared vaults into 'shared/{owner}' automatically; a joined mesh cannot occupy ` +
+        `one of these names. This mesh's publisher must rename it before it can be joined.`,
+    );
+  }
 
   // (c) extract fields. (d-h) populate the registry under a single open.
   const db = await openRegistry(

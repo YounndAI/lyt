@@ -28,13 +28,13 @@
 
 This is Lyt's **AI-first** contract made protocol-native: the same governed operations available as `lyt vault ...` / `lyt mesh ...` on the command line are surfaced as MCP tools with [Zod](https://zod.dev)-validated schemas, so agents get accurate parameter validation and structured errors instead of scraping CLI text. One operation set, three transports — CLI for you, MCP for your agents, harness skills for agent runtimes without MCP.
 
-You usually do not install this package directly — install [`@younndai/lyt`](https://www.npmjs.com/package/@younndai/lyt) and run `lyt mcp serve`.
+You usually do not install this package directly — install [`@younndai/lyt`](https://www.npmjs.com/package/@younndai/lyt) and run `lyt mcp start`.
 
 ## Install (standalone)
 
 ```bash
 npm install -g @younndai/lyt-mcp@alpha
-lyt-mcp serve            # starts an MCP server over stdio
+lyt-mcp mcp start        # starts an MCP server over stdio
 ```
 
 ## Wiring into an MCP client
@@ -45,19 +45,31 @@ lyt-mcp serve            # starts an MCP server over stdio
   "mcpServers": {
     "lyt": {
       "command": "lyt-mcp",
-      "args": ["serve"],
+      "args": ["mcp", "start"],
     },
   },
 }
 ```
 
-Or, from inside Claude Code: `claude mcp add lyt --command lyt-mcp -- serve`.
+Or, from inside Claude Code: `claude mcp add lyt --command lyt-mcp -- mcp start`.
 
 ## What it exposes
 
-A stable MCP tool set covering the v1 vault + mesh + registry operations — list and inspect vaults, run tiered full-text search across your pod, read mesh topology, check writability verdicts. Tool schemas use Zod, so MCP clients validate inputs before they ever touch your vaults. The operation surface grows as new verbs land in [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault) and [`@younndai/lyt-mesh`](https://www.npmjs.com/package/@younndai/lyt-mesh).
+A stable MCP tool set covering the vault + mesh + registry operations, including:
 
-Agent writes obey the same permission semantics as human writes: a vault that is read-only for you is read-only for your agent — the writability gate is enforced at the operation layer, not the UI.
+- **`search`** — tiered-cascade search (arcs → lanes → FTS5 → edges) across your pod, a mesh, or a vault, confidence-ranked. Accepts an optional **agent query-expansion** array (up to 20 domain/synonym terms folded into the keyword channel) so an agent can widen recall on a vocabulary mismatch. Returns a **recall-lean** result — a compact top-N list of `path` / `vault` / `mesh` / `snippet` / `tier` / `confidence` per hit, with the internal scoring noise stripped — sized for an agent triaging among many similar results.
+- **`vault.list` / `vault.info` / `vault.verify` / `vault.reconnect`** — enumerate and inspect vaults, check writability, heal a moved vault.
+- **`vault.access` / `vault.invites`** (read) and **`vault.share` / `vault.unshare` / `vault.invites.accept` / `vault.abandon`** (handler-gated writes) — vault sharing over GitHub collaborator ACLs.
+- **`capture`** — write a Figment under the 8-field frontmatter contract.
+- **`sync`** — push a vault's GitHub metadata (dry-run by default).
+- **`primer`** — generate an agent-priming digest for a vault / mesh / federation.
+- **`mesh.source.*`** — manage where Lyt looks for vaults to clone.
+
+Tool schemas use [Zod](https://zod.dev), so MCP clients validate inputs before they ever touch your vaults. The operation surface grows as new verbs land in [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault) and [`@younndai/lyt-mesh`](https://www.npmjs.com/package/@younndai/lyt-mesh).
+
+**Semantic search and MCP.** The `search` tool inherits your pod's semantic-search setting, so an agent gets the same dense-embedding fusion you do at the CLI — *if the embedding model is already downloaded*. Because the MCP transport is non-interactive, the server **never** triggers the one-time ~23 MB model download itself: with no cached model it degrades silently to lexical search. To enable semantic search for agents, run `lyt reindex` once on an interactive terminal and accept the download.
+
+Agent writes obey the same permission semantics as human writes: a vault that is read-only for you is read-only for your agent. Mutating share/invite/abandon tools are **handler-gated** and, because MCP has no interactive approval seam, fail closed over this transport — the equivalent `lyt vault ...` CLI verbs (with `--yes`) are the path for those operations today.
 
 ## Programmatic use
 

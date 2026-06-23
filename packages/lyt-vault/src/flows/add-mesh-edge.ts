@@ -14,68 +14,47 @@
  * limitations under the License.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-  readFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { insertMeshEdge } from "../registry/mesh-edges-repo.js";
 import { getMeshByRid } from "../registry/meshes-repo.js";
 import { getVaultByName, getVaultByRid } from "../registry/repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
-import { ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
-import { parseMeshYon } from "../yon/mesh-read.js";
-import { renderMeshYon, type MeshDoc, type MeshEdgeRecord } from "../yon/mesh-write.js";
+import { uuid7BytesToDashedString, uuid7BytesToHex } from "../util/uuid7.js";
+import { appendMeshEdgeActive } from "../yon/mesh-edge-ledger-write.js";
+import { liveMeshEdges } from "../yon/mesh-edge-ledger-read.js";
 
-// v1.C.1 — `lyt mesh add-edge --child <ref-vault> --parent <home-vault>`.
+// v1.C.1 Slice 2a — `lyt mesh add-edge --child <ref-vault> --parent <home-vault>`.
 //
-// Writes a single @MESH_EDGE row into the REFERENCING mesh's mesh.yon
-// (the parent's home mesh) per lyt-federation-design.md §3:155-157
-// asymmetric-awareness invariant — the referenced (child's) home mesh's
-// mesh.yon is never touched. The same transaction inserts the row into
-// the per-machine `mesh_edges` cache (regenerable per master-plan §G-6;
-// `lyt mesh rebuild-registry` would re-derive it from mesh.yon SoT on
-// any later reset).
+// Slice 2a REFIT: an edge is no longer a @MESH_EDGE block in the parent
+// mesh's mesh.yon. It is now an `active` record in THIS writer's append-only
+// mesh-edge ledger shard (`<podRoot>/ledger/mesh-edges/<writerId>/`,
+// yon/mesh-edge-ledger-{write,read}.ts), reconstituted into the `mesh_edges`
+// cache by rebuildFederationCacheFlow. This flow APPENDS the ledger record; it
+// no longer reads/renders/renames mesh.yon and no longer does an in-txn cache
+// insert. The cache goes stale until the next reconstitution (mirrors the
+// subscribe.ts:378-407 rewiring off the @MESH_SUBSCRIPTION block).
 //
 // Order of operations:
 // 1. Resolve child + parent vaults via getVaultByName (both must exist).
-// 2. Resolve parent's home mesh + its main vault (main vault must be
-// registered locally — mesh.yon writes only land on main vaults per
-// naming-convention "main vault locked to main").
-// 3. Read + parse the parent's home mesh's `.lyt/mesh.yon`.
-// 4. Construct the MeshEdgeRecord using the parent as the ref side and
-// the child as the home side (so the @MESH_EDGE record reads as
-// "ref vault is parent of home vault").
-// 5. Idempotent re-emit guard: if MeshDoc.edges already contains a row
-// with the same (ref_mesh_rid, ref_vault_rid, home_mesh_rid,
-// home_vault_rid, kind=parent) tuple, return `edge-already-present`
-// without mutating disk or cache (per the ratified default + v1.B.6 mesh.yon-
-// mutation-discipline + v1.B.2 Lock 0.3 byte-stability).
-// 6. Render the updated MeshDoc → tmp file (no disk mutation yet).
-// 7. BEGIN tx → insertMeshEdge into `mesh_edges` cache. On failure:
-// ROLLBACK + abandon tmp file (disk pristine).
-// 8. COMMIT, then atomic rename tmp → mesh.yon.
+// 2. Resolve parent's home mesh + its main vault (main vault must still be
+//    registered locally — the structural pre-flight refusals are preserved so
+//    `lyt vault add-edge` / `lyt mesh add-edge` keep their actionable errors
+//    + exit-code contract).
+// 3. Build the edge's identity 3-tuple `(ref_mesh, ref_vault, home_vault)` +
+//    its home_mesh VALUE: parent is the REF side, child is the HOME side.
+// 4. Idempotent re-emit guard: if `liveMeshEdges()` already contains a live
+//    edge with the same 3-tuple, return `edge-already-present` without
+//    appending a duplicate active record (mirrors subscribe.ts idempotence).
+// 5. Append one `active` @MESH_EDGE record to THIS writer's own shard — the
+//    durable convergent side-effect.
 //
 // Open-once seam (v1.A.5 CR-B1 vindicated 12 times): callers may pass
-// `registryDb`; the flow opens its own client only when omitted.
-//
-// Atomicity contract (mirrors flows/move.ts:308-404):
-// - Cache insert happens INSIDE the registry tx, BEFORE the mesh.yon
-// rename. If the cache insert throws, the tx rolls back and the tmp
-// file is removed — disk is unchanged.
-// - Once the registry tx COMMITs the cache row exists; the rename then
-// publishes mesh.yon atomically. A crash between COMMIT and rename
-// leaves a registry row pointing at content that exists only in the
-// tmp file; `lyt mesh rebuild-registry` re-derives the cache from
-// mesh.yon (SoT primacy) and clears the orphan row on its next run.
+// `registryDb`; the flow opens its own client only when omitted. (The registry
+// is still consulted for the resolution/refusal pre-flight; the edge write
+// itself targets the ledger.)
 
 export type AddMeshEdgeResultStatus = "edge-written" | "edge-already-present";
 
@@ -202,35 +181,28 @@ export async function addMeshEdgeFlow(args: AddMeshEdgeArgs): Promise<AddMeshEdg
       throw new AddMeshEdgeMainVaultMissingError(parentMesh.name);
     }
 
-    // 3. Locate + parse the parent's home mesh's mesh.yon. Per v1.B.1
-    // every mesh-init writes the initial mesh.yon, so for a healthy
-    // mesh the file exists. If it's absent treat as main-vault-missing
-    // (the mesh dir state has drifted from the registry).
+    // 3. Locate the parent's home mesh's mesh.yon path for the result summary
+    //    (no longer read/written — the edge lives in the ledger now). The
+    //    main-vault-missing refusal is preserved structurally; the path is
+    //    reported so callers/CLI still surface where the parent mesh lives.
     const meshYonPath = join(parentMainVault.path, ".lyt", "mesh.yon");
-    if (!existsSync(meshYonPath)) {
-      throw new AddMeshEdgeMainVaultMissingError(parentMesh.name);
-    }
-    const before = readFileSync(meshYonPath, "utf8");
-    const doc = parseMeshYon(before);
 
-    // 4. Build the @MESH_EDGE record. Parent is the REFERENCING side
-    // (ref_mesh + ref_vault). Child is the REFERENCED side (home_mesh
-    // = child's actual home mesh + home_vault = child vault). kind
-    // reads as "ref IS parent of home" per registry/migrations.ts
-    // CHECK (kind IN ('parent')) + mesh-read.ts:160 reader gate.
-    const newEdge: MeshEdgeRecord = {
-      refMeshRid: parentMesh.rid,
-      refVaultRid: parentVault.rid,
-      homeMeshRid: childVault.homeMeshRid,
-      homeVaultRid: childVault.rid,
-      kind: "parent",
-    };
+    // 4. Build the edge identity 3-tuple + its home_mesh VALUE. Parent is the
+    //    REFERENCING side (ref_mesh + ref_vault). Child is the REFERENCED side
+    //    (home_vault = child vault; home_mesh = child's actual home mesh, a
+    //    VALUE/free-rider — NOT part of the 3-tuple identity). kind reads as
+    //    "ref IS parent of home". Rids serialised as bare dashed-UUIDv7 for the
+    //    ledger (subscription/alias parity).
+    const refMeshRidStr = uuid7BytesToDashedString(parentMesh.rid);
+    const refVaultRidStr = uuid7BytesToDashedString(parentVault.rid);
+    const homeVaultRidStr = uuid7BytesToDashedString(childVault.rid);
+    const homeMeshRidStr = uuid7BytesToDashedString(childVault.homeMeshRid);
 
     const edgeHexes: AddMeshEdgeEdgeSummary = {
-      refMeshRidHex: uuid7BytesToHex(newEdge.refMeshRid),
-      refVaultRidHex: uuid7BytesToHex(newEdge.refVaultRid),
-      homeMeshRidHex: uuid7BytesToHex(newEdge.homeMeshRid),
-      homeVaultRidHex: uuid7BytesToHex(newEdge.homeVaultRid),
+      refMeshRidHex: uuid7BytesToHex(parentMesh.rid),
+      refVaultRidHex: uuid7BytesToHex(parentVault.rid),
+      homeMeshRidHex: uuid7BytesToHex(childVault.homeMeshRid),
+      homeVaultRidHex: uuid7BytesToHex(childVault.rid),
       kind: "parent",
     };
 
@@ -246,17 +218,13 @@ export async function addMeshEdgeFlow(args: AddMeshEdgeArgs): Promise<AddMeshEdg
       homeMeshName: parentMesh.name,
     };
 
-    // 5. Idempotent re-emit guard. Match on the full 5-tuple per brief
-    // spec; structurally home_mesh_rid is determined by home_vault_rid
-    // (a vault has exactly one home mesh) but matching all five keeps
-    // parity with the migrations.ts mesh_edges PK projection.
-    const alreadyPresent = doc.edges.some(
-      (e) =>
-        ridsEqual(e.refMeshRid, newEdge.refMeshRid) &&
-        ridsEqual(e.refVaultRid, newEdge.refVaultRid) &&
-        ridsEqual(e.homeMeshRid, newEdge.homeMeshRid) &&
-        ridsEqual(e.homeVaultRid, newEdge.homeVaultRid) &&
-        e.kind === newEdge.kind,
+    // 5. Idempotent re-emit guard — re-keyed onto the OR-Set 2-tuple (FU-1). The
+    //    live set is the add-wins fold over every writer's append-only shard; an
+    //    edge already live (active in some shard, not tombstone-superseded) means
+    //    this add-edge is a no-op. (ref_mesh + home_mesh + kind are VALUES,
+    //    excluded from the identity comparison — they are derived/fixed.)
+    const alreadyPresent = liveMeshEdges().some(
+      (e) => e.refVaultRid === refVaultRidStr && e.homeVaultRid === homeVaultRidStr,
     );
     if (alreadyPresent) {
       return {
@@ -269,45 +237,18 @@ export async function addMeshEdgeFlow(args: AddMeshEdgeArgs): Promise<AddMeshEdg
       };
     }
 
-    // 6. Render the updated MeshDoc → tmp file.
-    const updatedDoc: MeshDoc = {
-      ...doc,
-      edges: [...doc.edges, newEdge],
-    };
-    const rendered = renderMeshYon(updatedDoc);
-    const tmpPath = `${meshYonPath}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmpPath, rendered, "utf8");
-
-    // 7. Registry tx + cache insert. On failure: ROLLBACK + abandon tmp.
-    try {
-      await db.execute("BEGIN");
-      try {
-        await insertMeshEdge(db, {
-          refMeshRid: newEdge.refMeshRid,
-          refVaultRid: newEdge.refVaultRid,
-          homeMeshRid: newEdge.homeMeshRid,
-          homeVaultRid: newEdge.homeVaultRid,
-          kind: newEdge.kind,
-        });
-        await db.execute("COMMIT");
-      } catch (innerErr) {
-        try {
-          await db.execute("ROLLBACK");
-        } catch {
-          /* best-effort */
-        }
-        throw innerErr;
-      }
-    } catch (err) {
-      cleanupTmp(tmpPath);
-      throw err;
-    }
-
-    // 8. Atomic rename tmp → mesh.yon. dirname is the existing main vault
-    // `.lyt/`; mkdir is a defensive no-op (the parse above proves the
-    // file existed, hence the dir does too).
-    mkdirSync(dirname(meshYonPath), { recursive: true });
-    renameSync(tmpPath, meshYonPath);
+    // 6. Append one `active` @MESH_EDGE record to THIS writer's own shard — the
+    //    durable convergent side-effect. The mesh.yon write + the in-txn
+    //    mesh_edges cache insert are RETIRED (no-legacy): mesh.yon no longer
+    //    carries edges, and the cache is EXPECTED to go stale until the next
+    //    reconstitution (rebuildFederationCacheFlow). Mirrors subscribe.ts:403.
+    appendMeshEdgeActive({
+      refMeshRid: refMeshRidStr,
+      refVaultRid: refVaultRidStr,
+      homeVaultRid: homeVaultRidStr,
+      homeMeshRid: homeMeshRidStr,
+      kind: "parent",
+    });
 
     return {
       status: "edge-written",
@@ -319,13 +260,5 @@ export async function addMeshEdgeFlow(args: AddMeshEdgeArgs): Promise<AddMeshEdg
     };
   } finally {
     if (!callerSupplied) await closeRegistry(db);
-  }
-}
-
-function cleanupTmp(path: string): void {
-  try {
-    if (existsSync(path)) unlinkSync(path);
-  } catch {
-    // best-effort
   }
 }

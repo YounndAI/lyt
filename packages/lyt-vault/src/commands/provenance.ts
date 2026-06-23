@@ -25,7 +25,7 @@ interface ProvenanceTraceCliOpts {
 
 export function buildProvenanceCommand(): Command {
   const cmd = new Command("provenance").description(
-    "Trace the chronological chain of @STAMP records for a file or rid (arc §11.5).",
+    "Trace the chronological chain of @STAMP records for a file or rid.",
   );
 
   cmd

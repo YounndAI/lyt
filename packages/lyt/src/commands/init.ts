@@ -91,7 +91,7 @@ export function buildLytInitCommand(): Command {
       "--dry-run",
       "Only valid with --wizard. Walks all 12 wizard phases without spawn invocations or filesystem writes.",
     )
-    .option("--json", "Emit deterministic Lock 0.3 JSON")
+    .option("--json", "Emit deterministic JSON")
     .action(async (opts: LytInitCliOpts) => {
       // v1.G.13 Gap 1 — no-flag fresh-state wizard auto-route. When the
       // handler runs `lyt init` with NO mode flags AND the registry is

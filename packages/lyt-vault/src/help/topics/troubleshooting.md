@@ -10,7 +10,7 @@ gh: not logged in
 
 Run `gh auth login` and select GitHub.com → HTTPS → browser flow. `gh auth status`
 confirms. `lyt doctor` reports this as a warning (not a hard fail) — Lyt is
-usable offline; GH is only needed for sync / push / `sync-metadata`.
+usable offline; GitHub is only needed for sync, push, sharing, and `sync-metadata`.
 
 ## libSQL `EBUSY` on Windows
 
@@ -19,11 +19,32 @@ When a Lyt verb fails with `EBUSY: resource busy or locked` against
 second and retry (Windows file-handle drain is async). If persistent, restart
 the shell.
 
-## `git push origin main` blocked by harness classifier
+## `git push origin main` blocked by an agent-harness classifier
 
-The Claude Code "Pushing directly to default branch bypasses PR review"
-denial. Paste the `.claude/settings.json` from `lyt help settings` into the
-repo root; the next push succeeds.
+Some agent harnesses deny direct pushes to a default branch ("Pushing directly
+to default branch bypasses PR review"). Paste the settings snippet from
+`lyt help settings` into the repo root; the next push succeeds. Prefer
+`lyt sync`, which commits named paths and pushes under the writable gate.
+
+## Search returns nothing / "index cache is corrupt"
+
+The libSQL search caches are derived state — safe to rebuild from your markdown:
+
+```bash
+lyt reindex --vault <name>     # one vault
+lyt reindex --all              # the whole pod
+```
+
+A human `lyt search` self-heals: on zero results it reindexes any stale in-scope
+vault (content edited outside Lyt) and re-queries before reporting "no matches".
+
+## Semantic search isn't kicking in
+
+Semantic search needs its one-time ~23 MB embedding model. It is only downloaded
+on an interactive terminal, with a prompt — run `lyt reindex` and accept. In
+non-interactive, scripted, or MCP contexts Lyt never downloads it and uses lexical
+search. Disable semantic fusion entirely with `LYT_EMBEDDINGS=0` or
+`lyt search --no-semantic`.
 
 ## `lyt vault verify` says my vault is `missing`
 
@@ -44,20 +65,32 @@ Lyt expects `~/lyt/` to be writable. If `lyt doctor` reports
 `~/lyt/ not writable`, check that no other process is holding files in it
 and that the user has full control over `%USERPROFILE%\lyt\`.
 
-## Vault scaffolded before Phase 7A — missing priming files
+## Missing priming files in an older vault
 
-Vaults created before Phase 7A landed do not have `lyt-overview.md` /
-`.lyt/mesh-context.md` / `agents.md`. Recover with:
+A vault missing `lyt-overview.md` / `.lyt/mesh-context.md` / `agents.md` (created
+by an older Lyt) can be repaired with:
 
 ```bash
 lyt vault sync-metadata --vault <name> --apply --no-confirm
 ```
 
-`sync-metadata` regenerates `.lyt/mesh-context.md` and (re)writes `agents.md`
-if the template version drifted. `lyt-overview.md` is user-owned and not
-regenerated; write it by hand if you want one.
+This regenerates `.lyt/mesh-context.md` and re-writes `agents.md` if its template
+drifted. `lyt-overview.md` is user-owned and not regenerated; write it by hand.
 
-## `.lyt/mesh-context.md` merge conflict on `lyt sync` (Phase 8)
+## Federation / mesh drift
+
+If the pod won't sync, `lyt mesh info` fails, a vault's writability reads
+`unknown`, or a mesh looks broken:
+
+```bash
+lyt doctor                     # diagnose
+lyt repair --dry-run           # list findings
+lyt repair --apply             # heal (idempotent)
+```
+
+An orphan vault needs a mesh: `lyt repair --target <vault> --apply --mesh <mesh>`.
+
+## `.lyt/mesh-context.md` merge conflict on `lyt sync`
 
 ```bash
 git checkout --theirs .lyt/mesh-context.md
@@ -67,32 +100,18 @@ git rebase --continue
 ```
 
 Either side resolves identically because the file is deterministic from edge
-state.
+state. Or pass `lyt sync --resolve-mesh-context` to apply this automatically.
 
 ## `lyt registry reset --yes` refused
 
-The verb's heuristic floor refuses paths whose basename is not `lyt`, `.lyt`,
-or `lyt-*`. If you set `LYT_HOME=/some/other/path`, point it at a
-lyt-shaped basename (`/some/other/lyt-home`). The floor is documented in
-`packages/lyt-vault/src/util/paths.ts`.
+The verb refuses paths whose basename is not `lyt`, `.lyt`, or `lyt-*`. If you set
+`LYT_HOME=/some/other/path`, point it at a lyt-shaped basename
+(`/some/other/lyt-home`).
 
 ## How do I split a vault into smaller vaults?
 
 You don't, yet. Splitting is unsupported; a `lyt vault split` verb (fresh
-history) is coming. Do not improvise with git: a cloned repo's history retains
+history) is planned. Do not improvise with git: a cloned repo's history retains
 everything you delete afterwards, so a hand-rolled split can leak the content
 you meant to leave behind. Until the verb ships, start a new vault with
-`lyt vault init` and move the notes you need.
-
-## v1.0.0 daemon UX cliff (Phase 11 forward-doc)
-
-`lyt agent run` will ship foreground-only in Phase 11. The daemon stops when
-the terminal closes. Until the v1.1 background daemon ships:
-
-- **Linux/macOS:** `nohup lyt agent run > ~/lyt/agent.log 2>&1 &`
-- **macOS launchd:** ship a `.plist` (sample in `lyt help agents` when 11 lands).
-- **Windows:** Task Scheduler trigger.
-
-The next CLI command (`lyt sync`, `lyt vault verify`, `lyt mesh status`,
-`lyt doctor`) reports the last-stop time, so a stopped agent is discovered on
-the next interaction.
+`lyt vault init` and move only the notes you need.

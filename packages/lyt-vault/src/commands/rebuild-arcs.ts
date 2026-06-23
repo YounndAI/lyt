@@ -50,7 +50,7 @@ interface RebuildArcsCliOpts {
 export function buildRebuildArcsCommand(): Command {
   return new Command("rebuild-arcs")
     .description(
-      "v1.D.2a: rebuild the position-ordered narrative arcs index from notes/**/*.md. Detects arc membership via frontmatter `arcs:` field AND embedded `@ARC` / `@ARC_MEMBER` records in markdown bodies. Writes `.lyt/indexes/arcs.yon` (YON SoT per Lock 0.2). Pair with `lyt sync` (post-pull arcs-cache upsert) or with `lyt automator run arc-builder --run-now` (v1.D.2c scheduled wrapper).",
+      "Rebuild the position-ordered narrative arcs index from notes/**/*.md. Detects arc membership via frontmatter `arcs:` field AND embedded `@ARC` / `@ARC_MEMBER` records in markdown bodies. Writes `.lyt/indexes/arcs.yon` (YON SoT). Pair with `lyt sync` (post-pull arcs-cache upsert) or with `lyt automator run arc-builder --run-now` (scheduled wrapper).",
     )
     .requiredOption("--vault <name>", "Vault name (must be registered)")
     .option("--json", "Emit a JSON result instead of the human-readable summary")

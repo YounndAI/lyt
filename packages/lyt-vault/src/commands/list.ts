@@ -28,7 +28,7 @@ export function buildListCommand(): Command {
     .option("--no-tombstones", "Hide hard-tombstoned vaults (status='tombstoned')")
     .option(
       "--include-tombstones",
-      `v1.E.2: include soft-tombstoned rollup aggregate per vault (rows whose last_seen > ${ROLLUP_DISCONNECTED_DAYS} days). DISTINCT from --no-tombstones above, which filters vault.status='tombstoned' (hard tombstones).`,
+      `Include soft-tombstoned rollup aggregate per vault (rows whose last_seen > ${ROLLUP_DISCONNECTED_DAYS} days). DISTINCT from --no-tombstones above, which filters vault.status='tombstoned' (hard tombstones).`,
     )
     .option(
       "--rollup-threshold <days>",

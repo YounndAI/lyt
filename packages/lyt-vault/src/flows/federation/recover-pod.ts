@@ -20,11 +20,11 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { getMeshByRid, insertMesh } from "../../registry/meshes-repo.js";
-import { getVaultByName } from "../../registry/repo.js";
+import { getVaultByRid } from "../../registry/repo.js";
 import { initVaultDbs } from "../../registry/vault-db.js";
 import { getFederationRepoDir, vaultRepoName } from "../../util/federation-paths.js";
 import { realFederationGhClient } from "../../util/gh-federation.js";
-import { isValidGhHandle } from "../../util/identity.js";
+import { isValidGhHandle, validateMeshName } from "../../util/identity.js";
 import { resolveVaultPath } from "../../util/paths.js";
 import { hexToUuid7Bytes } from "../../util/uuid7.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
@@ -125,6 +125,23 @@ export async function recoverVaultsFromPodManifest(
   let meshesRecovered = 0;
   for (const m of doc.meshes) {
     try {
+      // fed-v2 Layer-2 P1 (recover-pod meshName) — the pod.yon is FOREIGN input
+      // (a cloned manifest, possibly hostile). Validate the declared mesh name
+      // through the SAME user-facing validator the create/move/init sinks use
+      // (validateMeshName → assertMeshNameNotReserved + slug-safe + Windows-
+      // reserved), BEFORE insertMesh. A reserved name (`subscriptions`, `shared`,
+      // `agents`, `published`) or a non-slug name must NOT land in the registry
+      // verbatim — it would collide with or shadow the system's own federation
+      // buckets. Mirror clone.ts:283. Refuse this mesh (recorded as a warning),
+      // never abort the whole recovery.
+      try {
+        validateMeshName(m.meshName);
+      } catch (validationErr) {
+        warnings.push(
+          `mesh ${JSON.stringify(m.meshName)} refused (invalid or reserved mesh name): ${errMsg(validationErr)}`,
+        );
+        continue;
+      }
       const rid = hexToUuid7Bytes(m.meshRidHex);
       if ((await getMeshByRid(db, rid)) === null) {
         await insertMesh(db, {
@@ -147,7 +164,15 @@ export async function recoverVaultsFromPodManifest(
       continue;
     }
     try {
-      if ((await getVaultByName(db, v.vaultName)) !== null) {
+      // Idempotency probe is rid-keyed, NOT name-keyed. The vault `rid`
+      // (UUIDv7 identity) is stable across rename/move; the name in pod.yon can
+      // diverge from the registry (a local rename, or a colliding name across
+      // meshes). A name-keyed probe (`getVaultByName`) routes through the
+      // leaf/alias resolver and would either miss an already-recovered vault
+      // under a changed name (→ re-clone + re-register, a duplicate-identity
+      // clobber) or resolve a bare leaf to a DIFFERENT vault. Match on identity.
+      const ridBytes = hexToUuid7Bytes(v.vaultRidHex);
+      if ((await getVaultByRid(db, ridBytes)) !== null) {
         skipped.push({ vaultName: v.vaultName, reason: "already-registered" });
         continue;
       }
@@ -164,7 +189,20 @@ export async function recoverVaultsFromPodManifest(
       // A just-cloned vault has no .lyt/indexes/*.db (gitignored) — init them so
       // the downstream Lane M reconcile has schemas to fill.
       await initVaultDbs(targetPath);
-      const reg = await registerVaultFromYon(db, { vaultPath: targetPath });
+      // fed-v2 Layer-2 P1 — recover-pod is the identity-PRESERVING
+      // restore axis: a genuine reconstitution re-homes an existing rid (same
+      // name) to this machine's path, so it carries trustedReconstruction. The
+      // name-mismatch refusal in upsertVault stays UNCONDITIONAL, so a hostile
+      // clone whose vault.yon asserts a DIFFERENT-named local victim's rid is
+      // still refused here (the impersonation defense the rid-keyed idempotency
+      // probe above cannot catch — that probe keys off the pod.yon MANIFEST rid,
+      // not the cloned vault.yon rid). NOTE: trustedReconstruction is a no-op
+      // today (upsertVault :267 `void`s it); pre-wired for the P5 same-name-arm
+      // gate.
+      const reg = await registerVaultFromYon(db, {
+        vaultPath: targetPath,
+        trustedReconstruction: true,
+      });
       vaultsRecovered.push({ vaultName: reg.name, repo, path: targetPath });
     } catch (err) {
       warnings.push(`vault ${v.vaultName}: ${errMsg(err)}`);

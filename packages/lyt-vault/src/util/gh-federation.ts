@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
+import { resolveRemoteUrl } from "./remote-url.js";
 import { withSpinner, type SpinnerOp } from "./spinner.js";
 
 const execFileAsync = promisify(execFile);
@@ -367,7 +368,7 @@ export const realFederationGhClient: FederationGhClient = {
     if (!existsSync(localDir)) mkdirSync(localDir, { recursive: true });
     runGit(localDir, ["init", "--initial-branch=main"]);
     // Set origin so commitAndOptionallyPush can push when called.
-    const url = `https://github.com/${handle}/${repoName}.git`;
+    const url = resolveRemoteUrl(handle, repoName);
     runGit(localDir, ["remote", "add", "origin", url]);
     // Release review Angle A + B + C: on a fresh machine with no global git
     // user.name / user.email (common on dev VMs + CI runners), the
@@ -399,7 +400,7 @@ export const realFederationGhClient: FederationGhClient = {
 
   async cloneExisting(handle, repoName, localDir): Promise<void> {
     mkdirSync(dirname(localDir), { recursive: true });
-    const url = `https://github.com/${handle}/${repoName}.git`;
+    const url = resolveRemoteUrl(handle, repoName);
     // F7: spinner-wrapped (op=clone → "Summoning…"). git clone is the
     // longest single network op on the adopt path.
     await withSpinner(

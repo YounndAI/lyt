@@ -51,9 +51,11 @@ lyt alias <name> <target>          # pod-local name → vault rid (survives rena
 
 # Capture and find knowledge
 lyt capture "<text>"               # save a Figment (markdown note) with frontmatter
-lyt search "<query>" [--vault <name>] [--json]
-                                   # tiered full-text search: pod-wide, mesh, or vault
-lyt vault rebuild-index <name>     # regenerate the libSQL index from the markdown SoT
+lyt search "<query>" [--vault <name>] [--mesh <m>] [--no-semantic] [--json]
+                                   # tiered search (arcs → lanes → FTS5 → edges)
+                                   #   + optional on-device semantic fusion
+lyt reindex [--all|--mesh <m>|--vault <name>]
+                                   # rebuild the libSQL search caches from the markdown SoT
 
 # Your Pod (the per-user view across every mesh you participate in)
 lyt federation init [--public|--private]   # forge {handle}/lyt-pod + the pod.yon manifest
@@ -72,10 +74,19 @@ lyt pattern list|run|fork|…        # the bundled pattern runtime (4 default pa
 
 The full v1 verb set also includes `vault clone|forget|disconnect|delete|add-edge|verify|regen-context`, the registry verbs, audit export, and friction tracking. Run `lyt help commands` for the complete list.
 
+## Search
+
+`lyt search` runs a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — each tier carrying a confidence score, ranked into one list. On top of that, an **optional on-device semantic layer** surfaces notes keyword matching misses (different words, same meaning): a small local embedding model (`bge-small-en-v1.5`, ~23 MB, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) whose results are fused into the cascade under a confidence gate.
+
+- Semantic search is **on by default when the model is available**, and degrades silently to the lexical cascade when it isn't — no error, no cloud call, byte-identical to `--no-semantic`.
+- The one-time ~23 MB model download is **handler-gated**: `lyt reindex` on an interactive terminal prompts before fetching; non-interactive / scripted / MCP runs never auto-download. The model caches under `~/lyt/.embeddings-cache/`, never inside a vault.
+- Embeddings run **locally on CPU** — there is no remote inference and `fastembed` is an `optionalDependency`, so install succeeds even where its native runtime can't build.
+- Turn fusion off with `lyt search --no-semantic`, or disable it globally via `LYT_EMBEDDINGS=0`.
+
 ## Key features
 
-- **Markdown is the source of truth.** The libSQL index is a regenerable cache — delete it and `rebuild-index` restores it from your notes. No black-box database ever owns your knowledge.
-- **Full-text search agents can use** — `lyt search --json` returns ranked, structured hits with vault, path, and snippet; the same search backs the agent-harness skills.
+- **Markdown is the source of truth.** The libSQL index is a regenerable cache — delete it and `lyt reindex` restores it from your notes. No black-box database ever owns your knowledge.
+- **Search agents can use** — `lyt search --json` returns ranked, structured hits with vault, path, snippet, tier, and confidence; the same search backs the agent-harness skills and the MCP server.
 - **YON-structured declarations** — `.lyt/vault.yon` is the machine-readable source of truth for the vault's mesh shape; any AI agent reads it directly.
 - **Self-healing** — corrupt index files are quarantined and rebuilt; `lyt doctor` and `lyt repair` diagnose and fix registry drift.
 - **Never phones home** — zero passive telemetry; every network operation is user-initiated and inspectable.

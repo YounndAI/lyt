@@ -44,7 +44,7 @@ interface MeshValidateCliOpts {
 export function buildMeshValidateSubcommand(): Command {
   return new Command("validate")
     .description(
-      "v1.C.1/v1.C.4: read-only diagnostic — walks every registered mesh's mesh.yon and verifies every @MESH_EDGE / @MESH_SUBSCRIPTION row resolves (ref/home vaults registered + home mesh main vault on disk + libSQL cache in sync); v1.C.4 also surfaces mesh.yon parse errors as MeshFileFinding rows. Per-finding warn rows with remediation hints. Exit 2 = warnings only. G-5 contract: this verb is read-only — see `lyt repair` for the write side.",
+      "Read-only diagnostic — walks every registered mesh's mesh.yon and verifies every @MESH_EDGE row resolves (ref/home vaults registered + home mesh main vault on disk + libSQL cache in sync); also surfaces mesh.yon parse errors as MeshFileFinding rows. (Subscriptions live in the per-writer ledger, not mesh.yon, so subscription validation is not part of this check.) Per-finding warn rows with remediation hints. Exit 2 = warnings only. This verb is read-only — see `lyt repair` for the write side.",
     )
     .option(
       "--mesh <name>",

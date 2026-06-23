@@ -1,20 +1,11 @@
 #!/usr/bin/env node
-// Mandatory pre-publish guard for the retired local-dev vendoring setup.
+// Guard: fail the publish if any local `file:` dependency survives in a package.json —
+// they must be replaced with published registry versions before release.
 //
-// Context: to let the local `lyt` CLI build without `file:` junctions reaching into the
-// PRIVATE younndai monorepo (the SOT) — a recursive-delete + IP-leak hazard — the YON
-// dependency closure (@younndai/{domains,yon-parser,yon-runner,ai-relay}) is packed into
-// gitignored `vendor/*.tgz` and wired as ROOT-ONLY `file:` deps. Publishable packages keep
-// real `^2.0.0` specs. This is a TEMPORARY modus operandi (see
-// the retired vendoring note in the internal design docs).
-//
-// It MUST be removed before any npm publish — by then the YON packages must be real
-// published registry deps. Publishing with the vendoring in place would ship a broken or
-// SOT-coupled dependency graph.
-//
-// This guard makes the cleanup MANDATORY: it is chained ahead of the publish precheck
-// (`npm run precheck-publish`), so the publish gate exits non-zero while ANY vendoring
-// artifact remains.
+// A local `file:` dependency or a vendored `vendor/*.tgz` tarball is only valid during
+// local development. Publishing with one still wired in would ship a broken dependency
+// graph. This guard is chained ahead of the publish precheck (`npm run precheck-publish`),
+// so the publish gate exits non-zero while ANY such artifact remains.
 //
 // Usage:
 //   node scripts/check-no-vendored-deps.mjs            # check repo root (cwd)
@@ -23,7 +14,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-const SOT_MARKER = "Marlink"; // private source-monorepo path fragment
+const SOT_MARKER = "Marlink"; // path fragment that flags a local source-tree dependency
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -52,7 +43,7 @@ export function detectVendoringDrift(rootDir) {
     }
   }
 
-  // 3. any publishable workspace dep reaching the private SOT or a vendored tarball
+  // 3. any publishable workspace dep reaching a local source tree or a vendored tarball
   for (const pattern of rootPkg.workspaces ?? []) {
     if (!pattern.endsWith("/*")) continue;
     const parent = join(rootDir, pattern.slice(0, -2));
@@ -65,7 +56,7 @@ export function detectVendoringDrift(rootDir) {
         for (const [name, spec] of Object.entries(pkg[field] ?? {})) {
           if (typeof spec !== "string") continue;
           if (spec.includes(SOT_MARKER)) {
-            hits.push(`${pkg.name} ${field}["${name}"] links into the private SOT: "${spec}"`);
+            hits.push(`${pkg.name} ${field}["${name}"] links into a local source tree: "${spec}"`);
           } else if (spec.startsWith("file:") && spec.includes("vendor")) {
             hits.push(`${pkg.name} ${field}["${name}"] points at a vendored tarball: "${spec}"`);
           }

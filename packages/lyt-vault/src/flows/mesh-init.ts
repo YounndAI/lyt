@@ -29,6 +29,7 @@ import { setVaultHomeMesh } from "../registry/repo.js";
 import { initVault } from "../scaffold/init.js";
 import { getHandleFromIdentity, validateMeshName } from "../util/identity.js";
 import { healPatterns } from "../util/pattern-paths.js";
+import { resolveRemoteUrl } from "../util/remote-url.js";
 import { newUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
 import { renderMeshYon } from "../yon/mesh-write.js";
 import type { MeshPushKind } from "../yon/mesh-write.js";
@@ -233,9 +234,6 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
           vaultName: mainVaultName,
         },
       ],
-      edges: [],
-      subscriptions: [],
-      updateCadences: [],
     });
     const meshYonPath = join(scaffoldResult.vaultPath, ".lyt", "mesh.yon");
     mkdirSync(join(scaffoldResult.vaultPath, ".lyt"), { recursive: true });
@@ -348,7 +346,7 @@ async function commitAndPushMain(
       stdio: ["ignore", "ignore", "pipe"],
       shell: isWindows,
     });
-    execFileSync("git", ["remote", "add", "origin", `https://github.com/${pushTarget}/main.git`], {
+    execFileSync("git", ["remote", "add", "origin", resolveRemoteUrl(pushTarget, "main")], {
       cwd: vaultPath,
       stdio: ["ignore", "ignore", "pipe"],
       shell: isWindows,

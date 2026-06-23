@@ -27,7 +27,7 @@
 // INV-3 hygiene a term living only in a code fence is not indexed
 // INV-4 determinism: identical query → identical ranked results
 // INV-5 scope: vault scope does not leak other vaults
-// INV-6 arc: tier-0 arc members keep the top under the soft-tier blend
+// INV-6 arc: tier-0 prior lifts arc members above an equal-relevance non-arc doc (boost-not-gate)
 
 import type { BenchPod } from "./pod-harness.js";
 import type { SearchCascadeResult } from "@younndai/lyt-vault";
@@ -195,16 +195,27 @@ export async function runInvariants(pod: BenchPod): Promise<InvariantResult[]> {
       scopeTarget: "core",
       limit: 20,
     });
-    const top = res.results[0];
-    const passed = top !== undefined && top.tier === 0;
+    const idxOf = (suffix: string): number =>
+      res.results.findIndex((r) => r.figment_path.endsWith(suffix));
+    const m1 = idxOf("pipeline-m1.md");
+    const m2 = idxOf("pipeline-m2.md");
+    const arcDecl = idxOf("arc-decl.md");
+    // "tier = boost, NOT gate" (the soft-tier blend contract): a tier-0 arc member is
+    // NOT guaranteed rank 0 — under the keyphrase-aboutness vein a doc
+    // saturated with the query term legitimately takes the top. The tier-0
+    // prior must still demonstrably LIFT the arc members: both present, both
+    // in the top 3, and both ranked ABOVE an equal-relevance non-arc tier-2
+    // doc (arc-decl). Fails if the blend stops boosting tier-0 (members sink to
+    // or below the non-arc doc) — the regression this canary guards.
+    const found = m1 >= 0 && m2 >= 0;
+    const inTopThree = found && m1 < 3 && m2 < 3;
+    const liftsAboveNonArc = found && arcDecl >= 0 && m1 < arcDecl && m2 < arcDecl;
+    const passed = found && inTopThree && liftsAboveNonArc;
     results.push({
       id: "INV-6",
-      name: "Arc primacy — tier-0 arc members stay on top under the soft-tier blend",
+      name: "Arc primacy — tier-0 prior lifts arc members above equal-relevance non-arc (boost-not-gate)",
       passed,
-      detail:
-        top === undefined
-          ? `query "pipeline": no results`
-          : `query "pipeline": top result tier=${top.tier} (expected 0)`,
+      detail: `query "pipeline": m1#${m1}, m2#${m2}, non-arc arc-decl#${arcDecl} (members must be top-3 AND above arc-decl)`,
     });
   }
 

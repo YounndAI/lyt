@@ -50,7 +50,7 @@ interface FedRebuildCliOpts {
 
 export function buildFederationCommand(): Command {
   const cmd = new Command("federation").description(
-    "Manage Your Pod — the pod repo (`{handle}/lyt-pod`) that anchors which meshes you participate in (arc + lyt-federation-design §4).",
+    "Manage Your Pod — the pod repo (`{handle}/lyt-pod`) that anchors which meshes you participate in.",
   );
   cmd.addCommand(buildInitSubcommand());
   cmd.addCommand(buildListSubcommand());
@@ -173,7 +173,7 @@ function buildListSubcommand(): Command {
       console.log(VOICE.yourPodSpansMeshes(result.meshes.length));
       if (result.meshes.length === 0) {
         // eslint-disable-next-line no-console
-        console.log("  (no meshes yet — multi-mesh tables ship in v1.A.1)");
+        console.log("  (no meshes yet)");
         return;
       }
       for (const m of result.meshes) {
@@ -192,7 +192,7 @@ interface FedCanvasCliOpts {
 function buildCanvasSubcommand(): Command {
   return new Command("canvas")
     .description(
-      "v1.D.5: render Your Pod as an Obsidian Canvas (.canvas) — federation → meshes → vaults. Writes to ~/lyt/pod/canvases/federation-graph.canvas when federation-repo populated; else a per-vault stub with a federation-repo-pending warning.",
+      "Render Your Pod as an Obsidian Canvas (.canvas) — federation → meshes → vaults. Writes to ~/lyt/pod/canvases/federation-graph.canvas when federation-repo populated; else a per-vault stub with a federation-repo-pending warning.",
     )
     .option(
       "--target <handle>",
@@ -227,7 +227,7 @@ function buildCanvasSubcommand(): Command {
           );
           return;
         }
-        const stubNote = res.isVaultStub ? " (vault-stub: federation-repo v1.A.0-pending)" : "";
+        const stubNote = res.isVaultStub ? " (vault-stub: federation-repo pending)" : "";
         // eslint-disable-next-line no-console
         console.log(
           `Federation canvas written to ${res.canvasPath}${stubNote} (${res.meshCount} meshes, ${res.vaultCount} vaults, ${res.nodeCount} nodes, ${res.edgeCount} edges; ${res.durationMs}ms).`,

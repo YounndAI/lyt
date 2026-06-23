@@ -17,7 +17,6 @@
 import {
   existsSync,
   mkdirSync,
-  readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -27,8 +26,6 @@ import { dirname, join } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { removeMeshEdge } from "../registry/mesh-edges-repo.js";
-import { removeSubscription } from "../registry/mesh-subscriptions-repo.js";
 import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getMeshByName, listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { detectMeshLinkDrift, reconcileOneMesh } from "./mesh-link-reconcile.js";
@@ -41,14 +38,13 @@ import {
   readMeshYonAtRevision,
   type GitExecutor,
 } from "../util/git-history.js";
-import { hexToUuid7Bytes, ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
+import { hexToUuid7Bytes, uuid7BytesToDashedString, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
-import { renderMeshYon, type MeshDoc } from "../yon/mesh-write.js";
+import { appendMeshEdgeTombstone } from "../yon/mesh-edge-ledger-write.js";
 import {
   MeshValidateNotFoundError,
   validateMeshEdgesFlow,
   type MeshEdgeFinding,
-  type MeshSubscriptionFinding,
 } from "./mesh-validate.js";
 
 // v1.C.4 — `lyt repair [--target <rid|name>] [--mesh <name>]
@@ -84,9 +80,13 @@ import {
 
 export type RepairMode = "dry-run" | "apply";
 
+// Fed-v2 Layer-1 (Phase D1c): the `remove-subscription` action kind +
+// `broken-mesh-subscription` finding class are RETIRED. mesh.yon is no longer
+// the subscription SoT (no-legacy, design §5), so there is no broken
+// mesh.yon subscription row to detect or remove — subscriptions live in the
+// per-writer ledger and are reconciled by the ledger reconstitution, not repair.
 export type RepairActionKind =
   | "remove-edge"
-  | "remove-subscription"
   | "restore-mesh-yon-from-git"
   | "reattach-orphan-vault"
   | "reconcile-mesh-link"
@@ -94,7 +94,6 @@ export type RepairActionKind =
 
 export type RepairFindingClass =
   | "broken-mesh-edge"
-  | "broken-mesh-subscription"
   | "mesh-yon-parse-error"
   | "orphan-vault"
   | "mesh-link-drift"
@@ -231,11 +230,6 @@ const REPAIRABLE_EDGE_REASONS: ReadonlyArray<MeshEdgeFinding["reason"]> = [
   "home-mesh-main-vault-missing-on-disk",
 ];
 
-const REPAIRABLE_SUBSCRIPTION_REASONS: ReadonlyArray<MeshSubscriptionFinding["reason"]> = [
-  "external-vault-not-registered",
-  "external-mesh-not-registered",
-];
-
 export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
   const startedAt = Date.now();
   const mode: RepairMode = args.mode ?? "dry-run";
@@ -276,22 +270,9 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
           },
         });
       }
-      for (const f of validateResult.subscriptionFindings) {
-        if (!REPAIRABLE_SUBSCRIPTION_REASONS.includes(f.reason)) continue;
-        findings.push({
-          class: "broken-mesh-subscription",
-          meshName: f.meshName,
-          targetId: subscriptionTargetId(f),
-          reason: f.reason,
-          remediation: f.remediation,
-          details: {
-            mesh_rid: f.meshRidHex,
-            external_vault_rid: f.externalVaultRidHex,
-            external_mesh_rid: f.externalMeshRidHex,
-            external_mesh_name: f.externalMeshName,
-          },
-        });
-      }
+      // Fed-v2 D1c: validateResult.subscriptionFindings is now always empty
+      // (subscription validation retired); no broken-mesh-subscription findings
+      // are translated here.
       for (const f of validateResult.fileFindings) {
         findings.push({
           class: "mesh-yon-parse-error",
@@ -469,17 +450,11 @@ function edgeTargetId(f: MeshEdgeFinding): string {
   return `edge:${f.refMeshName}:${f.refVaultRidHex.slice(0, 8)}->${f.homeVaultRidHex.slice(0, 8)}`;
 }
 
-function subscriptionTargetId(f: MeshSubscriptionFinding): string {
-  return `sub:${f.meshName}:${f.externalVaultRidHex.slice(0, 8)}`;
-}
-
 async function applyOne(db: Client, f: RepairFinding, args: RepairArgs): Promise<RepairAction> {
   try {
     switch (f.class) {
       case "broken-mesh-edge":
         return await applyRemoveEdge(db, f);
-      case "broken-mesh-subscription":
-        return await applyRemoveSubscription(db, f);
       case "mesh-yon-parse-error":
         return await applyRestoreFromGit(db, f, args);
       case "orphan-vault":
@@ -506,8 +481,6 @@ function kindForClass(c: RepairFindingClass): RepairActionKind {
   switch (c) {
     case "broken-mesh-edge":
       return "remove-edge";
-    case "broken-mesh-subscription":
-      return "remove-subscription";
     case "mesh-yon-parse-error":
       return "restore-mesh-yon-from-git";
     case "orphan-vault":
@@ -535,59 +508,46 @@ async function applyRebuildVaultIndex(f: RepairFinding): Promise<RepairAction> {
   };
 }
 
-async function applyRemoveEdge(db: Client, f: RepairFinding): Promise<RepairAction> {
-  // Resolve the owning mesh's main vault path so we can rewrite mesh.yon.
-  const mesh = await getMeshByName(db, f.meshName);
-  if (mesh === null) {
-    return errorAction(f, `mesh '${f.meshName}' no longer registered locally`);
-  }
-  const mainVaultPath = await mainVaultPathForMesh(db, mesh);
-  if (mainVaultPath === null) {
-    return errorAction(f, `mesh '${f.meshName}' has no resolvable main vault path`);
-  }
-  const meshYonPath = join(mainVaultPath, ".lyt", "mesh.yon");
-  if (!existsSync(meshYonPath)) {
-    return errorAction(f, `mesh '${f.meshName}' .lyt/mesh.yon missing on disk`);
-  }
-  const before = readFileSync(meshYonPath, "utf8");
-  const doc = parseMeshYon(before);
-
-  const refVaultRid = hexToUuid7Bytes(f.details["ref_vault_rid"] as string);
-  const homeMeshRid = hexToUuid7Bytes(f.details["home_mesh_rid"] as string);
-  const homeVaultRid = hexToUuid7Bytes(f.details["home_vault_rid"] as string);
-  const refMeshRid = hexToUuid7Bytes(f.details["ref_mesh_rid"] as string);
-
-  const filteredEdges = doc.edges.filter(
-    (e) =>
-      !(
-        ridsEqual(e.refMeshRid, refMeshRid) &&
-        ridsEqual(e.refVaultRid, refVaultRid) &&
-        ridsEqual(e.homeMeshRid, homeMeshRid) &&
-        ridsEqual(e.homeVaultRid, homeVaultRid)
-      ),
+// Exported for the FU-2 unit test (tests/flows/repair.test.ts) — the handler is
+// dormant (no finding feeds it today; see NOTE below), so it is otherwise
+// undrivable through repairFlow. Test-only seam, not a runtime caller.
+export async function applyRemoveEdge(_db: Client, f: RepairFinding): Promise<RepairAction> {
+  // Slice 2a — broken-edge removal retracts the edge by appending a
+  // TOMBSTONE for its identity 2-tuple `(ref_vault, home_vault)` (FU-1: the key
+  // narrowed from the old 3-tuple; `ref_mesh`/`home_mesh` are now VALUE fields)
+  // to THIS writer's mesh-edge ledger shard, instead of filtering+rewriting the
+  // mesh.yon block + deleting the cache row (mesh.yon is no longer the edge SoT;
+  // the per-writer ledger is). The add-wins OR-Set fold then drops the edge from
+  // the live set, and the cache catches up on the next reconstitution
+  // (rebuildFederationCacheFlow). The finding stores rids as HEX; convert all
+  // four to the dashed-UUIDv7 ledger form — the tombstone's 2-tuple identity
+  // `(ref_vault, home_vault)` then matches the active record's identity key,
+  // while `ref_mesh`/`home_mesh` ride along as persisted values.
+  //
+  // NOTE: after the Slice-2a deletion of mesh-validate's edge-validation block,
+  // no `remove-edge` findings are produced today (the validate walk no longer
+  // emits MeshEdgeFinding rows). This handler is retained for the (now-dormant)
+  // reason union + as the write-side primitive a future ledger-edge validation
+  // slice would drive.
+  const refMeshRid = uuid7BytesToDashedString(
+    hexToUuid7Bytes(f.details["ref_mesh_rid"] as string),
   );
-  if (filteredEdges.length === doc.edges.length) {
-    // SoT row already absent — only the cache may still have it. Clear
-    // cache + report skipped. mesh.yon stays byte-stable.
-    await removeMeshEdge(db, refMeshRid, refVaultRid, homeMeshRid, homeVaultRid);
-    return {
-      kind: "remove-edge",
-      meshName: f.meshName,
-      targetId: f.targetId,
-      status: "skipped",
-      message: `edge not present in mesh.yon SoT; cache row cleared`,
-      details: { ...f.details, mesh_yon_path: meshYonPath },
-    };
-  }
+  const refVaultRid = uuid7BytesToDashedString(
+    hexToUuid7Bytes(f.details["ref_vault_rid"] as string),
+  );
+  const homeVaultRid = uuid7BytesToDashedString(
+    hexToUuid7Bytes(f.details["home_vault_rid"] as string),
+  );
+  const homeMeshRid = uuid7BytesToDashedString(
+    hexToUuid7Bytes(f.details["home_mesh_rid"] as string),
+  );
 
-  const updated: MeshDoc = {
-    ...doc,
-    edges: filteredEdges,
-  };
-  const rendered = renderMeshYon(updated);
-
-  await atomicReplaceWithTx(db, meshYonPath, rendered, async () => {
-    await removeMeshEdge(db, refMeshRid, refVaultRid, homeMeshRid, homeVaultRid);
+  appendMeshEdgeTombstone({
+    refMeshRid,
+    refVaultRid,
+    homeVaultRid,
+    homeMeshRid,
+    kind: "parent",
   });
 
   return {
@@ -595,62 +555,8 @@ async function applyRemoveEdge(db: Client, f: RepairFinding): Promise<RepairActi
     meshName: f.meshName,
     targetId: f.targetId,
     status: "applied",
-    message: `removed broken @MESH_EDGE row from mesh.yon + libSQL cache`,
-    details: { ...f.details, mesh_yon_path: meshYonPath },
-  };
-}
-
-async function applyRemoveSubscription(db: Client, f: RepairFinding): Promise<RepairAction> {
-  const mesh = await getMeshByName(db, f.meshName);
-  if (mesh === null) {
-    return errorAction(f, `mesh '${f.meshName}' no longer registered locally`);
-  }
-  const mainVaultPath = await mainVaultPathForMesh(db, mesh);
-  if (mainVaultPath === null) {
-    return errorAction(f, `mesh '${f.meshName}' has no resolvable main vault path`);
-  }
-  const meshYonPath = join(mainVaultPath, ".lyt", "mesh.yon");
-  if (!existsSync(meshYonPath)) {
-    return errorAction(f, `mesh '${f.meshName}' .lyt/mesh.yon missing on disk`);
-  }
-  const before = readFileSync(meshYonPath, "utf8");
-  const doc = parseMeshYon(before);
-
-  const meshRid = hexToUuid7Bytes(f.details["mesh_rid"] as string);
-  const externalVaultRid = hexToUuid7Bytes(f.details["external_vault_rid"] as string);
-
-  const filteredSubs = doc.subscriptions.filter(
-    (s) => !(ridsEqual(s.meshRid, meshRid) && ridsEqual(s.externalVaultRid, externalVaultRid)),
-  );
-  if (filteredSubs.length === doc.subscriptions.length) {
-    await removeSubscription(db, meshRid, externalVaultRid);
-    return {
-      kind: "remove-subscription",
-      meshName: f.meshName,
-      targetId: f.targetId,
-      status: "skipped",
-      message: `subscription not present in mesh.yon SoT; cache row cleared`,
-      details: { ...f.details, mesh_yon_path: meshYonPath },
-    };
-  }
-
-  const updated: MeshDoc = {
-    ...doc,
-    subscriptions: filteredSubs,
-  };
-  const rendered = renderMeshYon(updated);
-
-  await atomicReplaceWithTx(db, meshYonPath, rendered, async () => {
-    await removeSubscription(db, meshRid, externalVaultRid);
-  });
-
-  return {
-    kind: "remove-subscription",
-    meshName: f.meshName,
-    targetId: f.targetId,
-    status: "applied",
-    message: `removed broken @MESH_SUBSCRIPTION row from mesh.yon + libSQL cache`,
-    details: { ...f.details, mesh_yon_path: meshYonPath },
+    message: `retracted broken edge via mesh-edge ledger tombstone (cache catches up on next reconstitution)`,
+    details: { ...f.details },
   };
 }
 
@@ -888,38 +794,6 @@ async function mainVaultPathForMesh(db: Client, mesh: MeshRow): Promise<string |
   const v = await getVaultByRid(db, mesh.mainVaultRid);
   if (v === null) return null;
   return v.path;
-}
-
-// Atomic write helper — tmp+rename inside the same dir, with a registry
-// tx wrapper so cache mutations + the mesh.yon publish happen as a unit
-// per the ratified default. Mirrors flows/add-mesh-edge.ts:243-294 atomicity contract.
-async function atomicReplaceWithTx(
-  db: Client,
-  targetPath: string,
-  content: string,
-  txBody: () => Promise<void>,
-): Promise<void> {
-  mkdirSync(dirname(targetPath), { recursive: true });
-  const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmpPath, content, "utf8");
-  try {
-    await db.execute("BEGIN");
-    try {
-      await txBody();
-      await db.execute("COMMIT");
-    } catch (innerErr) {
-      try {
-        await db.execute("ROLLBACK");
-      } catch {
-        /* best-effort */
-      }
-      throw innerErr;
-    }
-  } catch (err) {
-    cleanupTmp(tmpPath);
-    throw err;
-  }
-  renameSync(tmpPath, targetPath);
 }
 
 function atomicWriteFile(targetPath: string, content: string): void {

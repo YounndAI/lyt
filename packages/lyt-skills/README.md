@@ -24,20 +24,20 @@
 
 ## What is this?
 
-`@younndai/lyt-skills` is where [Lyt™](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: fifteen harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can capture notes, search your pod, record decisions, write plans, retros, and handoffs, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
+`@younndai/lyt-skills` is where [Lyt™](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: sixteen harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can capture notes, search your pod, record decisions, write plans, retros, and handoffs, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
 
-Most skills wrap a pattern verb from the `lyt pattern run` runtime, so structured knowledge work (plans, results, decisions, captures) shows up as first-class agent skills inside any vault; the read/orient skills (`/lyt-pod`, `/lyt-search`, `/lyt-primer-context`, `/lyt-mesh-explore`, `/lyt-sync`) wrap the corresponding CLI verbs directly. Pairs with [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault), which ships the four default patterns the skills resolve against.
+Most skills wrap a pattern verb from the `lyt pattern run` runtime, so structured knowledge work (plans, results, decisions, captures) shows up as first-class agent skills inside any vault; the read/orient + addressing skills (`/lyt-pod`, `/lyt-search`, `/lyt-primer-context`, `/lyt-mesh-explore`, `/lyt-sync`, `/lyt-alias`) wrap the corresponding CLI verbs directly. Pairs with [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault), which ships the four default patterns the skills resolve against.
 
 ## Install
 
 ```bash
 npm install -g @younndai/lyt@alpha   # the meta package bundles lyt-skills
-lyt skills install                   # links the 15 SKILL.md files into your harness(es)
+lyt skills install                   # links the 16 SKILL.md files into your harness(es)
 ```
 
 Tri-runtime: the installer detects Claude Code, Codex, and generic agent runtimes, and installs per-runtime (symlink by default, `--copy` for regular directories).
 
-## The 15 skills
+## The 16 skills
 
 | Skill                 | Wraps                                              | Use it when                                                  |
 | --------------------- | -------------------------------------------------- | ------------------------------------------------------------ |
@@ -46,6 +46,7 @@ Tri-runtime: the installer detects Claude Code, Codex, and generic agent runtime
 | `/lyt-search`         | `lyt search` (tiered cascade)                      | Ranked search across the whole pod, a mesh, or a vault.      |
 | `/lyt-pod`            | `lyt mesh list` + `lyt vault list`                 | Enumerating every mesh + vault on the machine.               |
 | `/lyt-mesh-explore`   | `lyt mesh info`                                    | Drilling into one mesh's members and metadata.               |
+| `/lyt-alias`          | `lyt alias` set/`--list`/`--remove`                | Managing pod-local vault aliases (name → rid).               |
 | `/lyt-primer-context` | `lyt primer` + `lyt vault info`                    | Priming an agent with vault/mesh/pod context.                |
 | `/lyt-sync`           | gated git pull/commit/push                         | Syncing a vault with its remote under the writable gate.     |
 | `/lyt-plan`           | work-management + plan                             | Drafting a multi-phase plan before implementation.           |

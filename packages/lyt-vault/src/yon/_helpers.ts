@@ -37,6 +37,8 @@
 // for both, regressing the other. Full consolidation lands at v1.A.3 when
 // the @younndai/yon-parser runtime dep replaces both hand-rolled walkers.
 
+import { createHash } from "node:crypto";
+
 export function escapeQuoted(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
@@ -60,4 +62,16 @@ export function safeParseJson(raw: string): Record<string, unknown> | undefined 
     // fall through
   }
   return undefined;
+}
+
+// The ledger chain-hash primitive — single source of truth for BOTH the writer
+// (ledger-write.ts, which stamps `hash=sha256(prior-record-bytes)`) and the
+// reader's recompute-and-warn (ledger-read.ts). These two MUST hash byte-
+// identically forever or tamper detection silently breaks (a false positive on
+// every chained record, or a missed tamper) — and the divergence would have NO
+// compile-time guard. Consolidated here (per the coupled-constant directive)
+// rather than duplicated; this file is the established home for exactly this
+// (see escapeQuoted above, #8/#9). Domain is UTF-8 → hex.
+export function sha256(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
 }

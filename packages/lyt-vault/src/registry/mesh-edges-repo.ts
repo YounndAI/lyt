@@ -65,23 +65,23 @@ export async function deleteAllEdgesByRefMesh(db: Client, refMeshRid: Uint8Array
 
 // v1.C.4 — single-row delete used by `lyt repair --apply` when an edge's
 // ref/home vault no longer resolves OR home mesh's main vault is missing.
-// Composite PK (ref_mesh_rid, ref_vault_rid, home_mesh_rid, home_vault_rid)
-// per migrations.ts; mirrors removeSubscription's shape in
-// mesh-subscriptions-repo.ts.
+// FU-1: the WHERE is narrowed to the 2-tuple identity (ref_vault_rid,
+// home_vault_rid[, kind]) — matching the narrowed cache PK
+// (ref_vault_rid, kind, home_vault_rid) per migrations.ts. ref_mesh + home_mesh
+// are VALUE columns (DERIVED at reconstitution), so they are NOT identity
+// predicates. Mirrors removeSubscription's shape in mesh-subscriptions-repo.ts.
 export async function removeMeshEdge(
   db: Client,
-  refMeshRid: Uint8Array,
   refVaultRid: Uint8Array,
-  homeMeshRid: Uint8Array,
   homeVaultRid: Uint8Array,
+  kind: string = "parent",
 ): Promise<void> {
   await db.execute({
     sql: `DELETE FROM mesh_edges
- WHERE ref_mesh_rid = ?
- AND ref_vault_rid = ?
- AND home_mesh_rid = ?
-            AND home_vault_rid = ?`,
-    args: [refMeshRid, refVaultRid, homeMeshRid, homeVaultRid],
+ WHERE ref_vault_rid = ?
+ AND home_vault_rid = ?
+            AND kind = ?`,
+    args: [refVaultRid, homeVaultRid, kind],
   });
 }
 

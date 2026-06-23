@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
-// Hand-rolled writer for per-vault append-only ledger YON files
-// (`audit.yon`, `provenance.yon`). Generic across ledger types — the record
+// Hand-rolled writer for append-only ledger YON files — e.g. the per-`writerId`
+// audit/provenance shards `<vault>/.lyt/ledgers/{audit,provenance}/<writerId>.yon`
+// (resharded from the former flat `audit.yon`/`provenance.yon` in Slice 2b).
+// Generic across ledger types — the record
 // shape is determined by `recordType` + `fields` at call time.
 //
 // Why hand-rolled: matches the `yon/federation-write.ts` + `yon/vault.ts`
@@ -39,11 +41,10 @@
 // by passing `recordType="@MY_TYPE"` at the call site. The writer is
 // vocabulary-agnostic.
 
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { escapeQuoted } from "./_helpers.js";
+import { escapeQuoted, sha256 } from "./_helpers.js";
 
 // v1.A.3 (CR-4 / E1) per-process content-and-hash cache. The prior shape
 // read the full ledger file on every append to compute the chain-hash
@@ -81,8 +82,8 @@ export function clearLedgerCache(ledgerPath?: string): void {
 }
 
 export interface AppendLedgerRecordArgs {
-  // Absolute path to the current-month ledger file (e.g.
-  // `<vault>/.lyt/ledgers/audit.yon`). Parent directory is mkdir'd lazily.
+  // Absolute path to the current-month ledger file (e.g. a per-`writerId`
+  // shard `<vault>/.lyt/ledgers/audit/<writerId>.yon`). Parent dir mkdir'd lazily.
   ledgerPath: string;
   // The ledger name used in the file's header line (e.g. "audit").
   ledgerName: string;
@@ -246,10 +247,6 @@ function ensureParentDir(absPath: string): void {
   const parent = dirname(absPath);
   if (parent.length === 0) return;
   mkdirSync(parent, { recursive: true });
-}
-
-function sha256(content: string): string {
-  return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 // Per-process counter for tmp filenames. Strictly monotonic so concurrent

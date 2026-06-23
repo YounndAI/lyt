@@ -34,7 +34,7 @@
 // `--dry-run` reports proposed renames without mutating.
 // `--json` mode emits Lock 0.3 deterministic JSON.
 
-import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
@@ -123,7 +123,33 @@ export async function housekeepFlow(args: HousekeepArgs = {}): Promise<Housekeep
   const rotations: HousekeepRotationReport[] = [];
   for (const v of vaults) {
     for (const ledger of ledgers) {
-      rotations.push(rotateOne(v, ledger, currentMonth, dryRun, rotateNow));
+      // Slice 2b: rotate per-writerId shard files under the shard dir.
+      // The old flat `<ledger>.yon` path no longer receives new writes; new
+      // shards live under `<vault>/.lyt/ledgers/<ledger>/<writerId>.yon`.
+      // Enumerate writerId shard CURRENT files in the shard directory and
+      // rotate each one. The legacy flat `<ledger>.yon` is left in place
+      // (read-tolerance; no new writes, so no rotation needed).
+      const shardDir = join(v.path, ".lyt", "ledgers", ledger);
+      const shards = listCurrentShardFiles(shardDir);
+      if (shards.length === 0) {
+        // No shards present — emit one skipped-missing report for the ledger.
+        rotations.push({
+          vaultName: v.name,
+          vaultPath: v.path,
+          ledger,
+          ledgerPath: join(shardDir, "<no-shards>"),
+          fromMonth: null,
+          toMonth: currentMonth,
+          archivedPath: null,
+          outcome: "skipped-missing",
+        });
+      } else {
+        for (const { writerId, shardPath } of shards) {
+          rotations.push(
+            rotateOneShard(v, ledger, writerId, shardPath, currentMonth, dryRun, rotateNow),
+          );
+        }
+      }
     }
   }
   return {
@@ -134,43 +160,76 @@ export async function housekeepFlow(args: HousekeepArgs = {}): Promise<Housekeep
   };
 }
 
-function rotateOne(
+// List the current-file shards (writerId name + path) under a shard directory.
+// A current-file shard is `<dir>/<writerId>.yon` where the `<writerId>` entry
+// is a FILE (not a directory — archive subdirs are `<dir>/<writerId>/`).
+function listCurrentShardFiles(shardDir: string): Array<{ writerId: string; shardPath: string }> {
+  if (!existsSync(shardDir)) return [];
+  let isDir = false;
+  try {
+    isDir = statSync(shardDir).isDirectory();
+  } catch {
+    return [];
+  }
+  if (!isDir) return [];
+  const out: Array<{ writerId: string; shardPath: string }> = [];
+  for (const entry of readdirSync(shardDir)) {
+    if (!entry.endsWith(".yon")) continue;
+    const full = join(shardDir, entry);
+    try {
+      if (!statSync(full).isFile()) continue;
+    } catch {
+      continue;
+    }
+    out.push({ writerId: entry.replace(/\.yon$/, ""), shardPath: full });
+  }
+  return out.sort((a, b) => (a.writerId < b.writerId ? -1 : a.writerId > b.writerId ? 1 : 0));
+}
+
+// Slice 2b: rotate ONE per-writerId shard file. The archive destination
+// for a shard `<shardDir>/<writerId>.yon` is
+// `<shardDir>/<writerId>/<effectiveFromMonth>.yon` — the archive subdir is
+// keyed by writerId, exactly mirroring the subscription/alias shard layout
+// (subscription-ledger-write.ts: "current `<name>.yon` + monthly
+// `<name>/YYYY-MM.yon` archives").
+function rotateOneShard(
   vault: VaultRow,
   ledger: LedgerName,
+  writerId: string,
+  shardPath: string,
   currentMonth: string,
   dryRun: boolean,
   rotateNow: boolean,
 ): HousekeepRotationReport {
-  const ledgerPath = join(vault.path, ".lyt", "ledgers", `${ledger}.yon`);
   const base: HousekeepRotationReport = {
     vaultName: vault.name,
     vaultPath: vault.path,
     ledger,
-    ledgerPath,
+    ledgerPath: shardPath,
     fromMonth: null,
     toMonth: currentMonth,
     archivedPath: null,
     outcome: "skipped-missing",
   };
-  if (!existsSync(ledgerPath)) {
+  if (!existsSync(shardPath)) {
     return base;
   }
-  const content = readFileSync(ledgerPath, "utf8");
+  const content = readFileSync(shardPath, "utf8");
   if (content.length === 0) {
     return { ...base, outcome: "skipped-empty" };
   }
   const fromMonth = parseHeaderMonth(content);
   if (fromMonth === null && !rotateNow) {
-    // File has content but neither a @META month header nor a parseable
-    // @STAMP ts — cannot decide which month to archive to without
-    // --rotate-now forcing the current month.
     return { ...base, outcome: "skipped-no-header" };
   }
   const effectiveFromMonth = fromMonth ?? currentMonth;
   if (effectiveFromMonth === currentMonth && !rotateNow) {
     return { ...base, fromMonth: effectiveFromMonth, outcome: "skipped-same-month" };
   }
-  const archivedPath = join(vault.path, ".lyt", "ledgers", ledger, `${effectiveFromMonth}.yon`);
+  // Archive: <shardDir>/<writerId>/<effectiveFromMonth>.yon
+  // (shardPath is <shardDir>/<writerId>.yon, so dirname = shardDir)
+  const archiveSubdir = join(dirname(shardPath), writerId);
+  const archivedPath = join(archiveSubdir, `${effectiveFromMonth}.yon`);
   if (dryRun) {
     return {
       ...base,
@@ -181,12 +240,12 @@ function rotateOne(
   }
   // Atomic rotation: mkdir archive parent, rename current → archive,
   // create fresh current with new month header + rotation_from @STAMP.
-  mkdirSync(dirname(archivedPath), { recursive: true });
-  renameSync(ledgerPath, archivedPath);
-  ensureLedgerHeader(ledgerPath, ledger, currentMonth);
+  mkdirSync(archiveSubdir, { recursive: true });
+  renameSync(shardPath, archivedPath);
+  ensureLedgerHeader(shardPath, writerId, currentMonth);
   appendLedgerRecord({
-    ledgerPath,
-    ledgerName: ledger,
+    ledgerPath: shardPath,
+    ledgerName: writerId,
     recordType: "ROTATION",
     fields: [
       ["from_month", effectiveFromMonth],

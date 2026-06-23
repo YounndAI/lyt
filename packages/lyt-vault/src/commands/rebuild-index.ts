@@ -28,16 +28,16 @@ interface RebuildIndexCliOpts {
 export function buildRebuildIndexCommand(): Command {
   return new Command("rebuild-index")
     .description(
-      "Rebuild per-vault libSQL projection from markdown YON source-of-truth (arc §8.5). Without --ledger: drops `.lyt/indexes/{lyt,audit,provenance}.db` + recreates schema + cached bundled YON record count (DESTRUCTIVE for block-B+ data — use --force). With --ledger <name>: surgically truncates only that ledger's cache table + re-injects from `.lyt/ledgers/<name>.yon` SoT via idempotent natural-key probe (non-destructive; YON-as-SoT per Lock 0.2).",
+      "Rebuild per-vault libSQL projection from markdown YON source-of-truth. Without --ledger: drops `.lyt/indexes/{lyt,audit,provenance}.db` + recreates schema + cached bundled YON record count (DESTRUCTIVE for ledger data — use --force). With --ledger <name>: surgically truncates only that ledger's cache table + re-injects from `.lyt/ledgers/<name>.yon` SoT via idempotent natural-key probe (non-destructive; YON-as-SoT).",
     )
     .argument("<name>", "Vault name (must be registered)")
     .option(
       "--force",
-      "Rebuild even if the vault is frozen, and discard non-trivial provenance / audit_log history (block-A.3 row-count guard per release review)",
+      "Rebuild even if the vault is frozen, and discard non-trivial provenance / audit_log history (row-count guard)",
     )
     .option(
       "--ledger <name>",
-      `v1.A.2: rebuild only the named ledger's cache from YON SoT (known: ${KNOWN_LEDGERS.join(", ")})`,
+      `Rebuild only the named ledger's cache from YON SoT (known: ${KNOWN_LEDGERS.join(", ")})`,
     )
     .option("--json", "Emit a JSON result instead of the human-readable summary")
     .action(async (name: string, opts: RebuildIndexCliOpts) => {
