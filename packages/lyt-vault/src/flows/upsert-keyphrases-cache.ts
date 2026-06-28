@@ -44,7 +44,7 @@ import {
   extractFtsBody,
   stripFrontmatter,
   toVaultRelPosix,
-  walkVaultMarkdownFiles,
+  walkVaultFigmentFiles,
 } from "./upsert-fts-cache.js";
 import { DEFAULT_KEYPHRASE_TOP_K, extractKeyphraseTokens } from "../util/keyphrase-extract.js";
 
@@ -73,7 +73,7 @@ export async function upsertKeyphrasesCache(
 ): Promise<UpsertKeyphrasesCacheResult> {
   const startedAt = Date.now();
   const topK = opts.topK ?? DEFAULT_KEYPHRASE_TOP_K;
-  const noteFiles = walkVaultMarkdownFiles(vaultPath);
+  const noteFiles = walkVaultFigmentFiles(vaultPath);
   if (noteFiles.length === 0) {
     return {
       vaultPath,

@@ -68,20 +68,43 @@ export function buildSyncMetadataCommand(): Command {
         if (r.skipped) {
           // eslint-disable-next-line no-console
           console.log(`  - ${r.vaultName}: SKIPPED (${r.skipReason})`);
+          // Surface dropped-topic warnings even on a skipped vault.
+          for (const w of r.warnings) {
+            // eslint-disable-next-line no-console
+            console.log(`      warning:     ${w}`);
+          }
           continue;
         }
         if (!r.changed) {
           // eslint-disable-next-line no-console
           console.log(`  - ${r.vaultName}: up-to-date`);
+          for (const w of r.warnings) {
+            // eslint-disable-next-line no-console
+            console.log(`      warning:     ${w}`);
+          }
           continue;
         }
         // eslint-disable-next-line no-console
-        console.log(`  - ${r.vaultName}: ${r.ghOwner}/${r.ghRepo}`);
+        console.log(
+          `  - ${r.vaultName}: ${r.ghOwner}/${r.ghRepo}${r.public ? " [public → +lyt-public]" : ""}`,
+        );
         if (r.before && r.after) {
           // eslint-disable-next-line no-console
           console.log(`      description: "${r.before.description}" -> "${r.after.description}"`);
+          // `after.topics` is the real post-apply UNION (editRepo only ADDS, never
+          // removes), so this arrow only ever shows topics being ADDED — it can
+          // never imply an existing topic is being stripped.
+          const added = r.after.topics.filter((t) => !r.before!.topics.includes(t));
           // eslint-disable-next-line no-console
-          console.log(`      topics:      [${r.before.topics.join(", ")}] -> [${r.after.topics.join(", ")}]`);
+          console.log(
+            `      topics:      [${r.before.topics.join(", ")}]${
+              added.length > 0 ? ` + [${added.join(", ")}]` : ""
+            } = [${r.after.topics.join(", ")}]`,
+          );
+        }
+        for (const w of r.warnings) {
+          // eslint-disable-next-line no-console
+          console.log(`      warning:     ${w}`);
         }
         if (r.agentsMdBumped) {
           // eslint-disable-next-line no-console

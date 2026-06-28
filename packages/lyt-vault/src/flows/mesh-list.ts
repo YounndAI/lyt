@@ -23,7 +23,7 @@ import type { MeshPushKind } from "../yon/mesh-write.js";
 
 // v1.B.1 — `lyt mesh list [--json]` flow.
 //
-// Source: Brief @TASK step 5 + Brief acceptance clause (e) + lyt-federation-design.md
+// Source: Brief step 5 + Brief acceptance clause (e) + lyt-federation-design.md
 // §6 line 266 + lyt-master-plan.md §5 v1.B.1 acceptance item 3.
 //
 // SELECT rid, name, push_target, push_kind, main_vault_rid, created_at FROM meshes

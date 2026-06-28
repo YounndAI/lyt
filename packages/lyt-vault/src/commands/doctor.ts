@@ -33,7 +33,7 @@ export function buildDoctorCommand(): Command {
     .option("--full", "Check every vault's .lyt/ shape instead of a 10-sample")
     .option(
       "--apply",
-      "Brief F — repair instead of report: migrate a legacy ~/lyt/identity.yon → machine.yon and reconcile the machine cache against the pod SoT (pod wins on handle conflict).",
+      "Repair instead of report: migrate a legacy ~/lyt/identity.yon → machine.yon and reconcile the machine cache against the pod SoT (pod wins on handle conflict).",
     )
     .action(async (opts: DoctorCliOpts) => {
       // V-DX-1 — liveness spinner over the binaries/gh-auth/network-smoke

@@ -22,11 +22,17 @@ import { getVaultByName } from "../registry/repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { getIdentity } from "../util/identity.js";
 import { getUserPatternsDir } from "../util/pattern-paths.js";
+import { isIndexablePath } from "../util/indexable.js";
 import { parsePatternYon, type VerbRecord } from "../yon/pattern.js";
 import { captureIndexFlow } from "./capture-index.js";
 import type { AccessProvider } from "../access/access-provider.js";
 import { GhAccessProvider } from "../access/gh-access-provider.js";
 import type { GhExecutor } from "../util/gh-discover.js";
+import {
+  MANDATORY_FRONTMATTER_TOKENS,
+  DEFAULT_MESH_VISIBILITY,
+  DEFAULT_WEIGHT,
+} from "../templates/contract.js";
 
 // hardening pass (Cohort-1 fix-pass) — the actionable refusal a pure-subscriber WRITE
 // attempt raises. A read-only subscribed vault has no push rights to its
@@ -102,9 +108,10 @@ const TOKEN_RE = /<([a-zA-Z][a-zA-Z0-9_-]*)>/g;
 // and `weight` have defaults applied in buildTokens(). The mandatory list
 // is checked AGAINST the actual template — patterns that do not opt into
 // the contract are unaffected.
-const MANDATORY_FRONTMATTER_TOKENS = ["purpose", "topic", "mesh-visibility", "weight"] as const;
-const DEFAULT_MESH_VISIBILITY = "local";
-const DEFAULT_WEIGHT = "3";
+//
+// SEE ALSO (contract.ts): MANDATORY_FRONTMATTER_TOKENS, DEFAULT_MESH_VISIBILITY,
+// DEFAULT_WEIGHT are now imported from `templates/contract.ts` (Phase A SoT).
+// Do not re-define them here.
 
 export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunResult> {
   const patternDir = join(getUserPatternsDir(), args.patternName);
@@ -193,15 +200,20 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
 
   // V-C-1 (L1 index-on-write) — the figment is now on disk; index it so a
   // subsequent `lyt search` / `recall` / `primer` hits with NO manual reindex
-  // (SC1/SC3). Gated to the indexed `notes/` tree: the FTS + lanes/arcs caches
-  // scan `notes/**` only, so indexing a write that lands elsewhere (e.g. a
-  // work-management figment under Projects/) would drift the incremental cache
-  // from the full rebuild. captureIndexFlow NEVER throws — a failure returns
-  // `deferred` (the markdown is already saved) which we surface as a soft note.
+  // (SC1/SC3). B-4: gated by the shared `isIndexable` predicate (the FTS +
+  // lanes/arcs caches now scan the whole vault via the same predicate), so a
+  // write anywhere under the vault root indexes consistently with the full
+  // rebuild. captureIndexFlow NEVER throws — a failure returns `deferred` (the
+  // markdown is already saved) which we surface as a soft note.
   const relPath = relative(vaultPath, filePath).split(sep).join(posix.sep);
   let indexDeferred: boolean | undefined;
   let indexNote: string | undefined;
-  if (isUnderNotes(relPath)) {
+  // PATH-ONLY here by design: this is a cheap pre-filter to skip the flow call
+  // for obviously non-indexable paths (non-markdown / floor / scaffold). The
+  // authoritative CONTENT gates (g3 size, g4 binary) are enforced downstream in
+  // captureIndexFlow, which re-checks with `vaultPath` — so incremental ⊆ full
+  // holds without re-statting the file twice here.
+  if (isIndexablePath(relPath)) {
     const idx = await captureIndexFlow({
       vaultName: args.vaultName,
       vaultPath,
@@ -228,13 +240,6 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
     ...(indexDeferred !== undefined ? { indexDeferred } : {}),
     ...(indexNote !== undefined ? { indexNote } : {}),
   };
-}
-
-// True when a vault-relative POSIX path is inside the indexed `notes/` tree
-// (the FTS + lanes + arcs caches scan `notes/**` only). Index-on-write fires
-// only for these, keeping the incremental cache consistent with full rebuild.
-function isUnderNotes(relPath: string): boolean {
-  return relPath === "notes" || relPath.startsWith("notes/");
 }
 
 interface TokensInput {
@@ -313,7 +318,7 @@ function validateMandatoryFrontmatterTokens(
     // repeatable form: `--vars purpose=<v> --vars topic=<v>`.
     throw new Error(
       `pattern run: template '${patternName}/${verbId}' requires non-empty value(s) for mandatory frontmatter token(s): ${missing.join(", ")}. ` +
-        "Per the lyt v1 frontmatter contract (arc §3), 'purpose' + 'topic' are author-supplied; 'mesh-visibility' defaults to 'local'; 'weight' defaults to 3. " +
+        "Per the lyt v1 frontmatter contract, 'purpose' + 'topic' are author-supplied; 'mesh-visibility' defaults to 'local'; 'weight' defaults to 3. " +
         `Re-invoke with ${missing.map((m) => `--vars ${m}=<value>`).join(" ")} or have /lyt-capture prompt for them.`,
     );
   }

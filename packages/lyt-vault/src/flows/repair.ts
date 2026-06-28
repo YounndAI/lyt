@@ -31,6 +31,10 @@ import { getMeshByName, listMeshes, type MeshRow } from "../registry/meshes-repo
 import { detectMeshLinkDrift, reconcileOneMesh } from "./mesh-link-reconcile.js";
 import { isLytDbCorrupt } from "../registry/vault-db.js";
 import { rebuildVaultFlow } from "./rebuild-vault.js";
+import { findLegacyAgentFiles } from "../util/agent-file-paths.js";
+import { migrateAgentFiles } from "./migrate-agent-files.js";
+import { snapshotVaultFlow } from "./snapshot.js";
+import { isGitRepo } from "../util/git-run.js";
 import { getVaultByName, getVaultByRid, listVaults, setVaultHomeMesh } from "../registry/repo.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
 import {
@@ -90,14 +94,18 @@ export type RepairActionKind =
   | "restore-mesh-yon-from-git"
   | "reattach-orphan-vault"
   | "reconcile-mesh-link"
-  | "rebuild-vault-index";
+  | "rebuild-vault-index"
+  // Phase D (SC6) — relocate legacy-root agents.md / lyt-overview.md into `.lyt/`.
+  | "migrate-agent-files";
 
 export type RepairFindingClass =
   | "broken-mesh-edge"
   | "mesh-yon-parse-error"
   | "orphan-vault"
   | "mesh-link-drift"
-  | "corrupt-vault-index";
+  | "corrupt-vault-index"
+  // Phase D (SC6) — a vault still carrying agent-priming files at the legacy root.
+  | "legacy-agent-files";
 
 // One row per actionable issue discovered during the walk. `target_id`
 // is a stable per-finding identifier the caller can pass back as
@@ -373,6 +381,34 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
       });
     }
 
+    // 1e. Phase D (SC6) — legacy agent-file location. A vault scaffolded before
+    // Phase D carries `agents.md` / `lyt-overview.md` at the vault ROOT; the
+    // post-Phase-D home is `.lyt/`. Detect every active, on-disk vault that still
+    // has a legacy-root copy. The apply step is SNAPSHOT-FIRST + idempotent +
+    // leaves no orphan (see applyMigrateAgentFiles). ONE-WAY DOOR on the installed
+    // base — surfaced under --dry-run, only mutated under --apply.
+    for (const v of allVaults) {
+      if (v.status !== "active") continue;
+      if (!existsSync(v.path)) continue;
+      const legacy = findLegacyAgentFiles(v.path);
+      if (legacy.length === 0) continue;
+      findings.push({
+        class: "legacy-agent-files",
+        meshName: "(none)",
+        targetId: `agent-files:${v.ridHex}`,
+        reason: "agent-priming-files-at-legacy-root",
+        // Self-targeting form (mirrors mesh-link-drift / corrupt-vault-index) so
+        // the heal bypasses the batch guard regardless of total finding count.
+        remediation: `Run: lyt repair --target agent-files:${v.ridHex} --apply (snapshots the vault, then moves ${legacy.map((l) => l.filename).join(" + ")} into .lyt/)`,
+        details: {
+          vault_rid: v.ridHex,
+          vault_name: v.name,
+          vault_path: v.path,
+          legacy_files: legacy.map((l) => l.filename),
+        },
+      });
+    }
+
     // 2. Filter by --target if given. Try rid-first then name.
     const filtered =
       args.target === undefined ? findings : filterFindingsByTarget(findings, args.target);
@@ -436,11 +472,13 @@ function filterFindingsByTarget(findings: RepairFinding[], target: string): Repa
   // Try mesh name match (broken-edge / broken-subscription / parse-error).
   const byMesh = findings.filter((f) => f.meshName === target);
   if (byMesh.length > 0) return byMesh;
-  // Try vault name match (orphan-vault + corrupt-vault-index findings carry
-  // vault_name in details).
+  // Try vault name match (orphan-vault + corrupt-vault-index + legacy-agent-files
+  // findings carry vault_name in details).
   const byVaultName = findings.filter(
     (f) =>
-      (f.class === "orphan-vault" || f.class === "corrupt-vault-index") &&
+      (f.class === "orphan-vault" ||
+        f.class === "corrupt-vault-index" ||
+        f.class === "legacy-agent-files") &&
       f.details["vault_name"] === target,
   );
   return byVaultName;
@@ -463,6 +501,8 @@ async function applyOne(db: Client, f: RepairFinding, args: RepairArgs): Promise
         return await applyReconcileMeshLink(db, f);
       case "corrupt-vault-index":
         return await applyRebuildVaultIndex(f);
+      case "legacy-agent-files":
+        return await applyMigrateAgentFiles(f);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -489,6 +529,8 @@ function kindForClass(c: RepairFindingClass): RepairActionKind {
       return "reconcile-mesh-link";
     case "corrupt-vault-index":
       return "rebuild-vault-index";
+    case "legacy-agent-files":
+      return "migrate-agent-files";
   }
 }
 
@@ -505,6 +547,104 @@ async function applyRebuildVaultIndex(f: RepairFinding): Promise<RepairAction> {
     status: "applied",
     message: `corrupt lyt.db quarantined${r.indexQuarantinedTo !== null ? ` to ${r.indexQuarantinedTo}` : ""} + rebuilt for vault '${vaultName}'`,
     details: { ...f.details, quarantined_to: r.indexQuarantinedTo },
+  };
+}
+
+// Phase D (SC6) apply leg — SNAPSHOT-FIRST relocation of legacy-root agent-priming
+// files into `.lyt/`. ONE-WAY DOOR on the installed base, so a `vault snapshot` is
+// taken BEFORE any disk mutation. Two distinct snapshot outcomes, branched cleanly
+// (release review F1 — do NOT fail open on a transient error):
+//   • Git repo present + snapshot succeeds → fully recoverable via `lyt vault
+//     restore` (a clean-tree snapshot points at HEAD; a dirty tree captures the
+//     working state — either way the pre-migration bytes are banked).
+//   • GENUINE non-git vault (not a Git repo at all) → DEGRADED but still safe: no
+//     git snapshot is possible, but the move is `renameSync` (bytes survive on
+//     disk; the `.lyt/` copy is the same inode). We proceed and record a
+//     snapshot_note explaining the reduced safety net.
+//   • Git repo present BUT the snapshot THREW (transient — branch-name collision
+//     or a raw git failure) → REFUSE. We do NOT mutate the installed-base vault
+//     with the safety net silently disabled; the action is surfaced as an error so
+//     the handler can retry. (Distinguished by re-probing isGitRepo: the only
+//     reason snapshotVaultFlow throws BENIGNLY is the non-git case, which it
+//     guards on isGitRepo===false; any other throw on a real repo is transient.)
+// The relocation itself (migrateAgentFiles) is idempotent and leaves no orphaned
+// tree copy.
+async function applyMigrateAgentFiles(f: RepairFinding): Promise<RepairAction> {
+  const vaultName = String(f.details["vault_name"] ?? "");
+  const vaultPath = String(f.details["vault_path"] ?? "");
+
+  // Snapshot-first. Distinguish the genuine non-git case (safe to proceed without
+  // a snapshot) from a transient snapshot failure on a real git repo (REFUSE —
+  // migrating with the net silently down is the one-way-door concern).
+  let snapshotBranch: string | null = null;
+  let snapshotNote: string | null = null;
+  try {
+    const snap = await snapshotVaultFlow({ name: vaultName, label: "pre-agent-file-migration" });
+    snapshotBranch = snap.branch;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    // Re-probe: is this a real git repo? snapshotVaultFlow throws BENIGNLY only
+    // when the vault is NOT a git repo (it guards on isGitRepo===false before any
+    // other throw). If the path IS a git repo, the throw is transient (branch-name
+    // collision / raw git failure) — refuse to migrate so the safety net isn't
+    // silently disabled on the installed base.
+    if (await isGitRepo(vaultPath)) {
+      return {
+        kind: "migrate-agent-files",
+        meshName: f.meshName,
+        targetId: f.targetId,
+        status: "error",
+        message: `vault '${vaultName}' is a Git repo but the pre-migration snapshot failed; refusing to migrate without a recovery snapshot — retry after resolving: ${reason}`,
+        details: { ...f.details, snapshot_branch: null, snapshot_error: reason },
+      };
+    }
+    // Genuine non-git vault — proceed; record the reduced safety net.
+    snapshotNote = `no git snapshot possible (vault is not a Git repo); migration proceeded — bytes preserved by renameSync but 'lyt vault restore' is unavailable: ${reason}`;
+  }
+
+  const result = migrateAgentFiles(vaultPath);
+  if (result.noop) {
+    // Idempotent: nothing left at the legacy root (already migrated between the
+    // detect walk and this apply, or a concurrent run beat us to it).
+    return {
+      kind: "migrate-agent-files",
+      meshName: f.meshName,
+      targetId: f.targetId,
+      status: "skipped",
+      message: `vault '${vaultName}' has no legacy-root agent files to migrate (already under .lyt/)`,
+      details: { ...f.details, snapshot_branch: snapshotBranch, snapshot_note: snapshotNote },
+    };
+  }
+
+  // F2 (release review) — chain a reindex now that the legacy-root copy has actually
+  // moved. A pre-Phase-D vault's root `agents.md` may carry an FTS row keyed on the
+  // old relpath; after the move to `.lyt/` (FTS-excluded), that row is stale until
+  // the next sync/reindex. Mirror applyRebuildVaultIndex: drive the same
+  // rebuildVaultFlow so the stale row is cleared in THIS `repair --apply`. Reuse
+  // the existing reindex flow (no hand-rolled FTS deletion). Best-effort: a reindex
+  // hiccup must not undo the successful, recoverable move — the stale row is a
+  // cache-staleness nuisance the next `lyt sync`/reindex still clears.
+  let reindexNote: string | null = null;
+  try {
+    await rebuildVaultFlow({ vault: vaultName });
+  } catch (err) {
+    reindexNote = `reindex-after-migrate skipped: ${err instanceof Error ? err.message : String(err)} (stale FTS row clears on next sync/reindex)`;
+  }
+
+  const moved = result.migrated.map((m) => `${m.filename} (${m.action})`).join(", ");
+  return {
+    kind: "migrate-agent-files",
+    meshName: f.meshName,
+    targetId: f.targetId,
+    status: "applied",
+    message: `relocated agent-priming file(s) into .lyt/ for vault '${vaultName}': ${moved}${snapshotBranch !== null ? ` (snapshot: ${snapshotBranch})` : ""}`,
+    details: {
+      ...f.details,
+      migrated: result.migrated,
+      snapshot_branch: snapshotBranch,
+      snapshot_note: snapshotNote,
+      reindex_note: reindexNote,
+    },
   };
 }
 

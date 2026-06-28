@@ -36,6 +36,7 @@ import { assertSafeCloneName, isSlugSegment, parseVaultRepoName } from "../util/
 import { getDefaultVaultsRoot } from "../util/paths.js";
 import { assertMeshNameNotReserved } from "../util/identity.js";
 import { rmWithRetry } from "../scaffold/delete.js";
+import { writeScaffoldConformance } from "../scaffold/init.js";
 import { renderVaultYon } from "../yon/vault.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { hexToUuid7Bytes } from "../util/uuid7.js";
@@ -231,6 +232,11 @@ export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
       parseClonedVaultYonOrRefuse(readFileSync(defaultYonPath, "utf8"), target);
     }
     const join_ = await joinVaultFlow(target);
+    // UNIT 4 — scaffold conformance on clone. A cloned vault may lack the
+    // sentinel-bearing priming seeds (or carry un-flagged ones); bring it to
+    // conformance so it does NOT FTS-pollute the primer. Additive + marker-
+    // bounded — never clobbers handler content (see writeScaffoldConformance).
+    writeScaffoldConformance({ vaultPath: target, name: join_.name });
     return { ...join_, cloneTargetPath: target, meshAssignment: null, originDetached: null };
   } catch (err) {
     // release review — scope the cleanup to failures AT-OR-BEFORE
@@ -662,6 +668,14 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
       ...(reparsed.agentTemplateVersion !== null
         ? { agentTemplateVersion: reparsed.agentTemplateVersion }
         : {}),
+      // Phase A — preserve scaffold-system version stamps across parse→render.
+      // SEE ALSO: yon/parse.ts ParsedVaultYon + yon/vault.ts renderVaultYon.
+      ...(reparsed.templateVersion !== null
+        ? { templateVersion: reparsed.templateVersion }
+        : {}),
+      ...(reparsed.contractVersion !== null
+        ? { contractVersion: reparsed.contractVersion }
+        : {}),
       homeMesh: {
         vaultRid: freshRid,
         meshRid: meshRow.rid,
@@ -696,6 +710,11 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
         vaultName: join_.name,
       });
     }
+
+    // UNIT 4 — scaffold conformance on clone --to-mesh / subscribe-on-clone too:
+    // the freshly-rid'd vault gets sentinel-bearing priming seeds so it does not
+    // FTS-pollute. Additive + marker-bounded (never clobbers handler content).
+    writeScaffoldConformance({ vaultPath: args.target, name: join_.name });
 
     return {
       ...join_,

@@ -16,7 +16,7 @@
 
 import { Command } from "commander";
 
-import { formatBytes, infoVaultFlow } from "../flows/info.js";
+import { formatBytes, infoVaultFlow, resolveVaultNameByPath } from "../flows/info.js";
 
 // Exported so tests can pin the human-readable rendering against the
 // actual production string mapping rather than re-deriving the same
@@ -34,10 +34,32 @@ export function buildInfoCommand(): Command {
   const cmd = new Command("info");
   cmd
     .description("Show metadata for a registered vault (path, mesh edges, size)")
-    .argument("<name>", "Registered vault name")
+    .argument("[name]", "Registered vault name (omit when using --by-path)")
     .option("--json", "Emit machine-readable JSON")
-    .action(async (name: string, opts: { json?: boolean }) => {
-      const result = await infoVaultFlow(name);
+    .option("--by-path <cwd>", "Resolve the vault that contains this path")
+    .action(async (name: string | undefined, opts: { json?: boolean; byPath?: string }) => {
+      // Exactly one of <name> / --by-path must be given.
+      if (name && opts.byPath) {
+        // eslint-disable-next-line no-console
+        console.error("lyt vault info: pass either <name> or --by-path, not both.");
+        process.exit(1);
+      }
+      if (!name && !opts.byPath) {
+        // eslint-disable-next-line no-console
+        console.error("lyt vault info: a vault <name> or --by-path <cwd> is required.");
+        process.exit(1);
+      }
+      let resolvedName = name;
+      if (opts.byPath) {
+        const byPathName = await resolveVaultNameByPath(opts.byPath);
+        if (byPathName === null) {
+          // eslint-disable-next-line no-console
+          console.error(`lyt vault info: ${opts.byPath} is not inside a registered vault.`);
+          process.exit(1);
+        }
+        resolvedName = byPathName;
+      }
+      const result = await infoVaultFlow(resolvedName as string);
       if (opts.json) {
         // eslint-disable-next-line no-console
         console.log(JSON.stringify(result, null, 2));

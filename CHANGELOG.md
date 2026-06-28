@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.9.7] — 2026-06-27
+
+Alpha update — release hardening, test-gate reliability, and scaffold-layout cleanup. No user-facing CLI or format changes beyond the `.lyt/` priming-file move below.
+
+### Changed
+- **Agent-priming files now scaffold under `.lyt/`.** New vaults write `agents.md` and `lyt-overview.md` into the vault's `.lyt/` system directory instead of the vault root, so the browsable vault tree carries only your README and notes. Existing vaults are migrated in place by `lyt repair --apply` (snapshot-first, idempotent); reads fall back to the legacy root location until migrated.
+- **Release-publishing safeguards.** Every publish now passes a doc↔CLI accuracy gate, user-facing-string and staged-diff leak scans, doc-facts-asserted-from-source checks, and a safe multi-package version bump with publish-set version-equality enforcement.
+- **Trustworthy, faster test gate.** The full suite was made deterministic (mock-dependent access tests isolated from shared single-fork pollution; git-integration timeouts raised) and split into `test:smoke` / `test:affected` / `test:release` tiers for a fast inner loop, with an orphan-reap + temp-sweep pre-gate step.
+
+Published under the `alpha` dist-tag: `npm install -g @younndai/lyt@alpha`.
+
+---
 ## [0.9.6] — 2026-06-23
 
 Alpha update — Federation v2 (identity + governance), semantic search, and team sharing.

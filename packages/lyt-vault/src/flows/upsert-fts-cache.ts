@@ -42,11 +42,12 @@
 // supplied, the caller owns lifecycle; when omitted, the flow opens +
 // closes its own client.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, posix, relative, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { posix, relative, sep } from "node:path";
 
 import type { Client } from "@libsql/client";
 
+import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
 import { closeVaultDb, openLytDb } from "../registry/vault-db.js";
 import { deleteAllFts, insertFtsDoc } from "../registry/fts-repo.js";
 import {
@@ -71,6 +72,15 @@ export interface UpsertFtsCacheOpts {
   // uses the caller's lyt.db client and does NOT close it. When
   // omitted, the flow opens + closes its own.
   lytDb?: Client;
+  // B-4 / Decision-B (B2): when true, write ONLY the figment_fts tier — skip
+  // figment_edges + figment_meta (neither deleted nor rebuilt). Used by
+  // indexScaffoldFtsOnCreate so a freshly-scaffolded vault's scaffold figments
+  // satisfy doctor's index-fts-smoke (reads figment_fts) WITHOUT populating
+  // figment_meta — which the primer's "Top keywords" fallback reads, and which
+  // a 0-figment vault MUST keep empty to honor the SC3-b honest-empty-placeholder
+  // contract. Confines scaffold to search (the accepted nDCG cost); keeps the
+  // primer honest. A later full reindex rebuilds all three tiers consistently.
+  ftsOnly?: boolean;
 }
 
 export async function upsertFtsCache(
@@ -78,8 +88,16 @@ export async function upsertFtsCache(
   opts: UpsertFtsCacheOpts = {},
 ): Promise<UpsertFtsCacheResult> {
   const startedAt = Date.now();
-  const notesRoot = join(vaultPath, "notes");
-  const noteFiles = walkMarkdownFiles(notesRoot);
+  // B-4: root the FTS walk at the VAULT ROOT (not notes/) via the shared
+  // isIndexable predicate — content under any semantic folder is now indexed,
+  // while the immutable floor (.lyt/.obsidian/.git), scaffold index.md, and
+  // size/binary skips are enforced uniformly. Skipped markdown files surface a
+  // reason on a real (non-dry-run) reindex via console.warn (skip = warned).
+  const noteFiles = walkVaultMarkdownFiles(vaultPath, isIndexable, {
+    onSkip: (relPath, reason) => {
+      console.warn(`[reindex] skipped ${relPath}: ${reason}`);
+    },
+  });
   if (noteFiles.length === 0) {
     return {
       vaultPath,
@@ -95,9 +113,13 @@ export async function upsertFtsCache(
   try {
     // Truncate first so every cache reflects the SoT verbatim — drops any
     // figment (and its edges + meta) that disappeared on disk between rebuilds.
+    // ftsOnly (B2) touches the figment_fts tier ALONE — edges + meta are left
+    // untouched (a fresh vault keeps them empty → primer stays honest).
     await deleteAllFts(db);
-    await deleteAllEdges(db);
-    await deleteAllMeta(db);
+    if (opts.ftsOnly !== true) {
+      await deleteAllEdges(db);
+      await deleteAllMeta(db);
+    }
 
     for (const abs of noteFiles) {
       let content: string;
@@ -109,17 +131,19 @@ export async function upsertFtsCache(
       // Lane V 0.3 hygiene: strip frontmatter + code fences, and pull
       // [[wikilink]] targets out of the FTS body (recorded as edges instead).
       const { body, links } = extractFtsBody(content);
-      // Lane V 0.4 temporal truth: index the figment's frontmatter authored time.
-      const { createdIso, modifiedIso } = parseFigmentDates(content);
-      // V-C-1 SC3 option-b: also index topic + tags for the primer keyword
-      // fallback. Same lightweight frontmatter scan as parseFigmentDates (no
-      // heavyweight YAML parse); tags reuse extractFrontmatterTags (identical to
-      // the list folded into the FTS body above → no drift).
-      const { topic, tags } = parseFigmentTopicTags(content);
       const relPath = toVaultRelPosix(abs, vaultPath);
       await insertFtsDoc(db, { figmentPath: relPath, body });
-      await replaceEdgesForFigment(db, relPath, links);
-      await upsertFigmentMeta(db, { figmentPath: relPath, createdIso, modifiedIso, topic, tags });
+      if (opts.ftsOnly !== true) {
+        // Lane V 0.4 temporal truth: index the figment's frontmatter authored time.
+        const { createdIso, modifiedIso } = parseFigmentDates(content);
+        // V-C-1 SC3 option-b: also index topic + tags for the primer keyword
+        // fallback. Same lightweight frontmatter scan as parseFigmentDates (no
+        // heavyweight YAML parse); tags reuse extractFrontmatterTags (identical to
+        // the list folded into the FTS body above → no drift).
+        const { topic, tags } = parseFigmentTopicTags(content);
+        await replaceEdgesForFigment(db, relPath, links);
+        await upsertFigmentMeta(db, { figmentPath: relPath, createdIso, modifiedIso, topic, tags });
+      }
       ftsDocsUpserted += 1;
     }
   } finally {
@@ -135,47 +159,62 @@ export async function upsertFtsCache(
 }
 
 // ---------------------------------------------------------------------------
-// Filesystem walking — mirrors rebuild-arcs.walkMarkdownFiles
-// (locally duplicated rather than refactored — keeps the patch
-// contained; generalisation to a shared `walkVaultNotes` helper can
-// land in a v1.D.3d sweep when the third consumer emerges).
+// B-4 / Decision-B (B2 — ratified 2026-06-24): index a freshly-scaffolded
+// vault's figments into FTS at CREATION time, so FTS == on-disk-indexable from
+// the first moment (the 3 vault-root scaffold figments README.md /
+// lyt-overview.md / agents.md the scaffold writes). B-4 re-rooted every
+// READ/index tier off `notes/` onto the vault root, so those scaffold figments
+// are now indexable-on-disk; the creation paths wrote them but left FTS empty,
+// so doctor's `vaults.index-fts-smoke` canary false-warned ("index EMPTY though
+// the vault has 3 figment(s) on disk") on EVERY freshly-created vault —
+// including the auto-created `<mesh>/main` vault — flipping `lyt doctor` to exit
+// 2. Indexing here keeps the doctor honesty check UNTOUCHED (no blind spot for a
+// real wiped index). The Decision-B primary "discriminate on captured/registered
+// figments" was ruled out: `figment_meta` is a same-walk rebuildable cache keyed
+// on the figment path, NOT a capture registry, so no clean captured-vs-walked
+// signal exists; the proper exclude-generated-scaffold-from-indexing fix needs a
+// generated-by marker and is a deferred fast-follow.
+//
+// FTS-ONLY (ftsOnly: true) is deliberate: it satisfies doctor's index-fts-smoke
+// (which reads figment_fts) WITHOUT writing figment_meta — the tier the primer's
+// "Top keywords" fallback reads. A 0-figment vault MUST keep figment_meta empty
+// to honor the SC3-b honest-empty-placeholder contract ("a 0-figment pod keeps
+// the honest empty placeholder; fallback does NOT mask it"); writing scaffold
+// meta here would surface fake scaffold-derived keywords on a brand-new vault —
+// the primer analogue of the fresh-vault-warns UX this whole fix removes. So the
+// scaffold lands in SEARCH only (the accepted nDCG cost), never the primer.
+//
+// SHARED SEAM — call from EVERY fresh-scaffold creation path (right after
+// `initVaultDbs`). Currently: flows/init.ts (user `lyt init`) + flows/mesh-init.ts
+// (the auto-created `<mesh>/main`). Best-effort: a failure leaves FTS empty and
+// doctor will honestly warn (the backstop), so a fresh index hiccup never fails
+// the create itself. Idempotent, so safe if a caller is later reindexed (a full
+// reindex then rebuilds all three tiers consistently). Do NOT inline this
+// `try/catch` per-call-site — keep the one definition so the seams can't drift.
 // ---------------------------------------------------------------------------
-
-function walkMarkdownFiles(root: string): string[] {
-  const out: string[] = [];
-  let names: string[];
+export async function indexScaffoldFtsOnCreate(vaultPath: string): Promise<void> {
   try {
-    names = readdirSync(root);
+    await upsertFtsCache(vaultPath, { ftsOnly: true });
   } catch {
-    return out;
+    /* non-fatal — doctor's index-fts-smoke remains the honest backstop */
   }
-  names.sort();
-  for (const name of names) {
-    const p = join(root, name);
-    let stat: ReturnType<typeof statSync>;
-    try {
-      stat = statSync(p);
-    } catch {
-      continue;
-    }
-    if (stat.isDirectory()) {
-      out.push(...walkMarkdownFiles(p));
-    } else if (stat.isFile() && p.toLowerCase().endsWith(".md") && !isScaffoldNote(name)) {
-      // Lane V 0.3 (V-F12): the auto-generated scaffold `index.md` is not a
-      // figment — never index it (its body + prompt wikilinks were FTS noise).
-      out.push(p);
-    }
-  }
-  return out;
 }
 
-// feat/keyphrase-boost — exported full-walk over `<vault>/notes/**/*.md` for the
-// keyphrases cache, so the keyphrase index walks the IDENTICAL file set the FTS
-// index walks (same scaffold exclusion, same sort order). Sharing the walk
-// guarantees a result the FTS tier can surface always has a keyphrase row to
-// match against — no path the boost silently can't reach.
-export function walkVaultMarkdownFiles(vaultPath: string): string[] {
-  return walkMarkdownFiles(join(vaultPath, "notes"));
+// ---------------------------------------------------------------------------
+// B-4 (figment-roots): the FTS walk is now THE shared `walkVaultMarkdownFiles`
+// from src/util/indexable.ts, rooted at the VAULT ROOT and gated by the single
+// `isIndexable` predicate. The pre-B-4 private `walkMarkdownFiles` copy (notes/-
+// rooted, with its own sort + scaffold exclusion) is DELETED — its behavior is
+// subsumed by the shared walker's uniform sort + the predicate's scaffold/floor
+// gates. See the Phase-0 walker-semantics audit for the superset rationale.
+// ---------------------------------------------------------------------------
+
+// feat/keyphrase-boost — exported full-walk over `<vault>/**/*.md` for the
+// keyphrases cache (and the embeddings + rebuild-vault delegators), so they walk
+// the IDENTICAL file set the FTS index walks (same scaffold exclusion, same
+// floor, same sort order). B-4: now rooted at the vault root, not notes/.
+export function walkVaultFigmentFiles(vaultPath: string): string[] {
+  return walkVaultMarkdownFiles(vaultPath, isIndexable);
 }
 
 // Exported (Lane M Wave 0) so the incremental per-write reconcile path
@@ -225,13 +264,22 @@ export function stripFrontmatter(raw: string): string {
 // indexed. Diverging the two paths re-introduces the pollution this fixes.
 // ---------------------------------------------------------------------------
 
-// True for the auto-generated scaffold `index.md` (any directory level). It is
-// not a user figment, so it is excluded from BOTH the FTS body and the edge
-// cache (V-F12). (A user-authored file deliberately named index.md is rare;
-// revisit with a generated-by marker check if that case ever matters.)
+// True for LYT-authored scaffold files by basename:
+//   - `index.md`   — the auto-generated starter Figment written by scaffold/init.ts
+//                    into notes/index.md (any directory level). Not a user Figment.
+//                    (V-F12; a user-authored index.md is rare — revisit with a
+//                    generated-by marker check if that case ever matters.)
+//   - `README.md`  — the GitHub landing file written by scaffold/init.ts at the vault
+//                    root. MUST NOT carry frontmatter (GitHub renders it badly); the
+//                    Phase A `lyt-scaffold: true` frontmatter gate cannot apply to
+//                    it, so we exclude it by basename instead.
+//
+// Phase A: extend the basename match to cover README.md at any vault level.
+// The `lyt-scaffold: true` content gate (in indexable.ts) handles seed Figments
+// with frontmatter; this basename gate handles README.md which has no frontmatter.
 export function isScaffoldNote(nameOrRelPath: string): boolean {
-  const base = nameOrRelPath.split(/[\\/]/).pop() ?? nameOrRelPath;
-  return base.toLowerCase() === "index.md";
+  const base = (nameOrRelPath.split(/[\\/]/).pop() ?? nameOrRelPath).toLowerCase();
+  return base === "index.md" || base === "readme.md";
 }
 
 // Remove fenced code blocks (``` or ~~~, 3+ markers) — delimiters, language

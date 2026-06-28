@@ -9,7 +9,7 @@ operation set you do, through three transports:
   search, and capture operations as typed Model Context Protocol tools.
 - **The CLI** — agents can also call `lyt ...` directly.
 
-Every new vault scaffolds an `agents.md` priming file at its root telling the
+Every new vault scaffolds an `agents.md` priming file under `.lyt/` telling the
 agent how to drive Lyt in that vault's context, and `lyt agent-manual --install`
 writes a compact Lyt manual into a runtime's global instructions.
 

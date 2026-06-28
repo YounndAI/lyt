@@ -24,14 +24,14 @@ land alongside the brand topics.
 
 ## Priming files at scaffold
 
-Every `lyt vault init` writes four files at the vault root that together prime
+Every `lyt vault init` writes four files that together prime
 both humans and AI agents on what the vault is:
 
 | File                   | Owner        | Regenerated?                                 |
 | ---------------------- | ------------ | -------------------------------------------- |
-| `lyt-overview.md`      | user         | never                                        |
+| `.lyt/lyt-overview.md` | user         | never                                        |
 | `.lyt/mesh-context.md` | Lyt          | on edge mutation + `lyt vault regen-context` |
-| `agents.md`            | Lyt template | on template version bump                     |
+| `.lyt/agents.md`       | Lyt template | on template version bump                     |
 | `notes/index.md`       | user         | never; suppressed by `--no-starter-figment`  |
 
 `lyt-overview.md` ends with `![[.lyt/mesh-context]]` — an Obsidian

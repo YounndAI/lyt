@@ -22,7 +22,7 @@ import { newUuidv7Bytes } from "../util/uuid7.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
 import { renderMemscopeYon } from "../yon/memscope.js";
 import { renderVaultYon } from "../yon/vault.js";
-import { copyBundledAutomators } from "./init.js";
+import { copyBundledAutomators, writeScaffoldConformance } from "./init.js";
 
 export interface AdoptOptions {
   vaultPath: string;
@@ -41,6 +41,9 @@ export interface AdoptResult {
   name: string;
   addedLytDir: boolean;
   alreadyLytAware: boolean;
+  // UNIT 4 — relative paths of scaffold-conformance priming files written on
+  // adopt (sentinel-bearing lyt-overview.md / agents.md / README.md when absent).
+  conformanceFilesWritten: string[];
 }
 
 export function adoptVault(opts: AdoptOptions): AdoptResult {
@@ -107,6 +110,13 @@ export function adoptVault(opts: AdoptOptions): AdoptResult {
   // Commit 10.
   copyBundledAutomators(abs);
 
+  // UNIT 4 — scaffold conformance on adopt (the B-4 alm-os migration path for
+  // semantic-folder vaults). Additively writes the sentinel-bearing priming
+  // seeds (lyt-overview.md / agents.md) so an adopted vault does NOT FTS-pollute
+  // the primer with un-flagged Lyt-authored boilerplate. Never clobbers existing
+  // handler content (see writeScaffoldConformance blast-radius notes).
+  const conformance = writeScaffoldConformance({ vaultPath: abs, name, owner });
+
   return {
     vaultPath: abs,
     vaultRid,
@@ -114,6 +124,7 @@ export function adoptVault(opts: AdoptOptions): AdoptResult {
     name,
     addedLytDir: true,
     alreadyLytAware: false,
+    conformanceFilesWritten: conformance.written,
   };
 }
 

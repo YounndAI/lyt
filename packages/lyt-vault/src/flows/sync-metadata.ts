@@ -20,12 +20,17 @@ import { join } from "node:path";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName, listVaults, type VaultRow } from "../registry/repo.js";
 import { ridsEqual } from "../util/uuid7.js";
-import { formatRepoDescription, mergeTopics } from "../scaffold/github-defaults.js";
+import {
+  baseTopicsForClass,
+  formatRepoDescription,
+  mergeTopics,
+} from "../scaffold/github-defaults.js";
 import { regenMeshContextFromYon } from "../scaffold/mesh-context.js";
 import { AGENTS_MD_TEMPLATE_VERSION } from "../templates/priming.js";
 import { readFrozenLock } from "../util/freeze-check.js";
 import { parseOwnerRepoFromUrl, realGhClient, type GhClient } from "../util/gh.js";
 import { applyGhPrefix, parseMeshManifest } from "../yon/manifest.js";
+import { resolvePublicVaultNames } from "../yon/federation-read.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { regenAgentsMd } from "./agents-md-regen.js";
 
@@ -62,6 +67,15 @@ export interface SyncMetadataVaultReport {
   after: { description: string; topics: string[] } | null;
   meshContextRegenerated: boolean;
   agentsMdBumped: boolean;
+  // Phase E — true when this vault's per-vault pod.yon visibility === "public",
+  // which selects the public-vault topic class (`+lyt-public`). Surfaced so the
+  // CLI / audit log can show WHY a vault got the extra topic.
+  public: boolean;
+  // Phase E release review (fix A) — per-vault warnings for user-authored vault.yon
+  // topics that mergeTopics DROPPED (invalid GH grammar, brand-reserved forgery
+  // like `lyt-public`, or over the 20-topic cap). Empty when nothing was dropped.
+  // Surfaced so a sync never silently swallows a user's intended topic.
+  warnings: string[];
 }
 
 export interface SyncMetadataResult {
@@ -99,8 +113,15 @@ export async function syncMetadataFlow(args: SyncMetadataArgs): Promise<SyncMeta
     const expandedScope = await expandScope(db, all, args.scope);
     const eligible = filterByScope(all, expandedScope);
 
+    // Phase E — resolve which vaults are consciously public from the pod.yon
+    // SoT (the publish unit is the vault; `visibility === "public"` is the
+    // LOCKED `lyt-public` trigger). Built ONCE (best-effort) so the per-vault
+    // loop never re-reads pod.yon. An unreadable/absent pod.yon → every vault
+    // defaults to private (the safe default), degrading gracefully.
+    const publicVaultNames = await resolvePublicVaultNames(db);
+
     for (const vault of eligible) {
-      reports.push(await processVault(vault, args, gh));
+      reports.push(await processVault(vault, args, gh, publicVaultNames));
     }
   } finally {
     await closeRegistry(db);
@@ -205,7 +226,9 @@ async function processVault(
   vault: VaultRow,
   args: SyncMetadataArgs,
   gh: GhClient,
+  publicVaultNames: ReadonlySet<string>,
 ): Promise<SyncMetadataVaultReport> {
+  const isPublic = publicVaultNames.has(vault.name);
   const base: SyncMetadataVaultReport = {
     vaultName: vault.name,
     vaultPath: vault.path,
@@ -218,6 +241,8 @@ async function processVault(
     after: null,
     meshContextRegenerated: false,
     agentsMdBumped: false,
+    public: isPublic,
+    warnings: [],
   };
 
   if (vault.status === "tombstoned") {
@@ -309,13 +334,35 @@ async function processVault(
   }
 
   const desiredDescription = formatRepoDescription(parsed.desc);
-  const desiredTopics = mergeTopics(parsed.topics);
+  // Phase E — select the per-repo-class topic floor. A consciously-public vault
+  // (pod.yon visibility === "public") gets the public-vault base
+  // (`+lyt-public`); otherwise the standard vault base. UNION semantics preserve
+  // the user's extra topics either way (mergeTopics never clobbers).
+  const baseTopics = baseTopicsForClass(isPublic ? "public-vault" : "vault");
+  // Fix A surfacing — collect any user-authored topics mergeTopics dropped
+  // (invalid grammar / brand-reserved / cap) so we can warn the user per-vault.
+  const dropped: { topic: string; reason: "invalid" | "brand-reserved" | "cap-exceeded" }[] = [];
+  const desiredTopics = mergeTopics(parsed.topics, baseTopics, dropped);
+  const warnings = dropped.map(
+    (d) => `dropped topic '${d.topic}' from vault.yon (${reasonText(d.reason)})`,
+  );
 
-  const changed =
-    beforeInfo.description !== desiredDescription || !sameTopics(beforeInfo.topics, desiredTopics);
+  // Fix B — drift is UNION-aware, not clobber-aware. editRepo is `--add-topic`
+  // only, so a GH-only extra is NEVER removed and must NEVER count as drift (else
+  // `changed` stays true forever → a needless editRepo every run). Mirror the
+  // doctor's floor check: drift = some brand-floor topic MISSING from GH, OR the
+  // description differs. `desiredTopics` carries the full floor, so checking the
+  // floor against the live set is sufficient.
+  const have = new Set(beforeInfo.topics.map((t) => t.trim().toLowerCase()));
+  const missingFloor = baseTopics.filter((t) => !have.has(t.trim().toLowerCase()));
+  const changed = beforeInfo.description !== desiredDescription || missingFloor.length > 0;
 
+  // Honest reported post-apply state. editRepo only ADDS, so the real `after` is
+  // the UNION of what's live on GH plus what we'd assert — never a set that drops
+  // a pre-existing GH-only extra (which the old `after = desiredTopics` implied).
+  const afterTopics = unionTopics(beforeInfo.topics, desiredTopics);
   const before = { description: beforeInfo.description, topics: beforeInfo.topics };
-  const after = { description: desiredDescription, topics: desiredTopics };
+  const after = { description: desiredDescription, topics: afterTopics };
 
   if (changed && args.mode === "apply") {
     try {
@@ -332,6 +379,7 @@ async function processVault(
         skipReason: `gh-edit-failure: ${msg}`,
         before,
         after,
+        warnings,
       };
     }
     if (args.auditLog) {
@@ -340,6 +388,7 @@ async function processVault(
         rid: vault.ridHex,
         owner: ownerRepo.owner,
         name: ownerRepo.repo,
+        public: isPublic,
         before,
         after,
       };
@@ -356,12 +405,33 @@ async function processVault(
     changed,
     before,
     after,
+    warnings,
   };
 }
 
-function sameTopics(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) return false;
-  const sa = [...a].sort();
-  const sb = [...b].sort();
-  return sa.every((v, i) => v === sb[i]);
+// Union of two topic lists, normalized (trim + lowercase) and de-duped, preserving
+// first-seen order. Models the real post-apply GH state: `gh repo edit
+// --add-topic` only ADDS, so the result is everything already on the repo PLUS
+// everything we assert — nothing is ever removed.
+function unionTopics(existing: readonly string[], added: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of [...existing, ...added]) {
+    const norm = t.trim().toLowerCase();
+    if (norm.length === 0 || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(norm);
+  }
+  return out;
+}
+
+function reasonText(reason: "invalid" | "brand-reserved" | "cap-exceeded"): string {
+  switch (reason) {
+    case "invalid":
+      return "invalid GitHub topic syntax";
+    case "brand-reserved":
+      return "brand-reserved — only the public-vault class may set it";
+    case "cap-exceeded":
+      return "exceeds GitHub's 20-topic limit";
+  }
 }

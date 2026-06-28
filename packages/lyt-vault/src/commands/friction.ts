@@ -128,7 +128,7 @@ export function buildFrictionCommand(): Command {
         if (result.tierATriggered) {
           // eslint-disable-next-line no-console
           console.log(
-            `\n  ⚠ Tier A trigger reached (≥${FRICTION_TIER_A_THRESHOLD} unresolved incidents in window). Arc §10.1: ship a Tier A plugin within 1 week.`,
+            `\n  ⚠ Tier A trigger reached (≥${FRICTION_TIER_A_THRESHOLD} unresolved incidents in window).`,
           );
         }
       }

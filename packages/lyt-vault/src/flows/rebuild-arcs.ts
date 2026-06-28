@@ -62,11 +62,12 @@
 // figment that declared the @ARC. When the arc has no members and no
 // declarations, falls back to flow-entry timestamp.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, posix, relative, sep } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { posix, relative, sep } from "node:path";
 
 import type { Client } from "@libsql/client";
 
+import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName, type VaultRow } from "../registry/repo.js";
 import { extractArcRecordsFromMarkdownBody } from "../yon/arcs-read.js";
@@ -138,8 +139,9 @@ export async function rebuildArcsFlow(args: RebuildArcsArgs): Promise<RebuildArc
   const fallbackNow = args.nowIso ?? new Date().toISOString();
 
   const { vaultName, vaultPath } = await resolveVault(args);
-  const notesRoot = join(vaultPath, "notes");
-  const noteFiles = walkMarkdownFiles(notesRoot);
+  // B-4: root the arcs walk at the VAULT ROOT (not notes/) via the shared
+  // isIndexable predicate. NEWLY excludes scaffold index.md uniformly with FTS.
+  const noteFiles = walkVaultMarkdownFiles(vaultPath, isIndexable);
 
   interface CategoryEntry {
     value: string;
@@ -400,33 +402,9 @@ function deriveVaultNameFromPath(p: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Filesystem walking — mirror rebuild-lanes.walkMarkdownFiles
+// B-4: the arcs walk now uses the shared `walkVaultMarkdownFiles` (vault-root +
+// isIndexable). The pre-B-4 notes/-rooted private copy is DELETED.
 // ---------------------------------------------------------------------------
-
-function walkMarkdownFiles(root: string): string[] {
-  const out: string[] = [];
-  let names: string[];
-  try {
-    names = readdirSync(root);
-  } catch {
-    return out;
-  }
-  for (const name of names) {
-    const p = join(root, name);
-    let stat: ReturnType<typeof statSync>;
-    try {
-      stat = statSync(p);
-    } catch {
-      continue;
-    }
-    if (stat.isDirectory()) {
-      out.push(...walkMarkdownFiles(p));
-    } else if (stat.isFile() && p.toLowerCase().endsWith(".md")) {
-      out.push(p);
-    }
-  }
-  return out;
-}
 
 function toVaultRelPosix(absPath: string, vaultPath: string): string {
   return relative(vaultPath, absPath).split(sep).join(posix.sep);

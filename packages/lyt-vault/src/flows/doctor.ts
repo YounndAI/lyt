@@ -24,9 +24,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { cwd } from "node:process";
-import { join } from "node:path";
+import { join, posix as posixPath, relative, sep } from "node:path";
 
 import type { Client } from "@libsql/client";
+
+import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { listFederationStates } from "../registry/federation-state.js";
@@ -39,6 +41,12 @@ import {
   type InitFailureRecord,
 } from "../util/failure-log.js";
 import { isNearExpiry, readFrozenLock } from "../util/freeze-check.js";
+import { checkReadmePresent } from "./readme-regen.js";
+import { findLegacyAgentFiles } from "../util/agent-file-paths.js";
+import { baseTopicsForClass } from "../scaffold/github-defaults.js";
+import { parseOwnerRepoFromUrl, realGhClient, type GhClient } from "../util/gh.js";
+import { resolvePublicVaultNames } from "../yon/federation-read.js";
+import { parseVaultYon } from "../yon/parse.js";
 import {
   getIdentityCachePath,
   getPodIdentityPath,
@@ -65,7 +73,6 @@ import {
 } from "../registry/vault-db.js";
 import { createClient } from "@libsql/client";
 import { readGitRemoteOriginUrl } from "../util/git.js";
-import { isScaffoldNote } from "./upsert-fts-cache.js";
 import { readMachineState } from "./machine-state.js";
 
 export type CheckStatus = "pass" | "warn" | "fail" | "info";
@@ -96,6 +103,11 @@ export interface DoctorOptions {
   // Test seam — override the pod root the identity check reads. Defaults to
   // getFederationRoot() (the flat `~/lyt/pod/`).
   podRootResolver?: (() => string) | undefined;
+  // Phase E — GitHub client seam for the topic-conformance check. Defaults to
+  // realGhClient (live `gh api`). Tests inject a fake. The check only runs when
+  // gh is authenticated AND a client is present; otherwise it emits `info`
+  // (skipped) so an offline doctor never fails on it.
+  ghClient?: GhClient | undefined;
 }
 
 export interface DoctorResult {
@@ -270,6 +282,16 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
       }
       checks.push(await checkDuplicateOrigins(db));
       checks.push(await checkOrphanVaults(db));
+      // Phase E — GitHub repo-topic drift. Detect-only (the heal lives in
+      // `lyt sync-metadata --apply`). Skipped (`info`) when gh is not authed.
+      checks.push(
+        await checkTopicConformance(db, {
+          ghClient: opts.ghClient ?? realGhClient,
+          ghAuthed: ghAuthed === true,
+          sampleLimit,
+          full: opts.full === true,
+        }),
+      );
     } finally {
       await closeRegistry(db);
     }
@@ -327,6 +349,13 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
       id: "registry.orphan-vaults",
       group: "registry",
       label: "every active vault has a home mesh",
+      status: "info",
+      message: "skipped (no registry yet)",
+    });
+    checks.push({
+      id: "github.topic-conformance",
+      group: "github",
+      label: "GitHub repo topics match the brand set",
       status: "info",
       message: "skipped (no registry yet)",
     });
@@ -1430,6 +1459,58 @@ async function checkVaultIndexHealth(
     detail: smokeIssues.length > 0 ? { issues: smokeIssues } : undefined,
   });
 
+  // Phase C (UNIT 4 / SC4) — README present-from-birth, init-once v1. doctor
+  // WARNS when a vault's README is missing but does NOT auto-recreate
+  // (surface-don't-act; the git-tombstone primitive that would distinguish a
+  // deliberate delete is deferred). A present-but-marker-less README is fine
+  // (hand-authored READMEs are respected) — only a MISSING README warns.
+  const missingReadme: string[] = [];
+  for (const v of subjects) {
+    if (!checkReadmePresent(v.path).present) missingReadme.push(v.name);
+  }
+  out.push({
+    id: "vaults.readme-present",
+    group: "vaults",
+    label: `vault README present (${sampleLabel})`,
+    status: missingReadme.length > 0 ? "warn" : "pass",
+    message:
+      missingReadme.length > 0
+        ? `${missingReadme.length} vault(s) are missing README.md: ${missingReadme.join(", ")} — Lyt does not auto-recreate it (init-once v1)`
+        : `${subjects.length} sampled vault(s) have a README.md`,
+    remediation:
+      missingReadme.length > 0
+        ? `If the README was deleted by mistake, restore it from git (e.g. cd <vault> && git checkout README.md), or re-run scaffold conformance (lyt vault adopt / clone re-applies it)`
+        : undefined,
+    detail: missingReadme.length > 0 ? { missingReadme } : undefined,
+  });
+
+  // Phase D (SC6) — audience-split location. Surface vaults that still carry the
+  // agent-priming files (agents.md / lyt-overview.md) at the LEGACY vault root.
+  // Detect-only (the heal lives in `lyt repair --apply`, snapshot-first per the
+  // pod's diagnose/fix verb split). A vault already under `.lyt/` passes.
+  const legacyAgentVaults: { name: string; files: string[] }[] = [];
+  for (const v of subjects) {
+    const legacy = findLegacyAgentFiles(v.path);
+    if (legacy.length > 0) {
+      legacyAgentVaults.push({ name: v.name, files: legacy.map((l) => l.filename) });
+    }
+  }
+  out.push({
+    id: "vaults.agent-files-location",
+    group: "vaults",
+    label: `agent-priming files under .lyt/ (${sampleLabel})`,
+    status: legacyAgentVaults.length > 0 ? "warn" : "pass",
+    message:
+      legacyAgentVaults.length > 0
+        ? `${legacyAgentVaults.length} vault(s) still keep agents.md/lyt-overview.md at the vault root: ${legacyAgentVaults.map((v) => v.name).join(", ")} — Lyt relocates them under .lyt/`
+        : `${subjects.length} sampled vault(s) keep agent-priming files under .lyt/ (or have none)`,
+    remediation:
+      legacyAgentVaults.length > 0
+        ? `Run: lyt repair --apply (snapshots each vault, then moves agents.md/lyt-overview.md into .lyt/; idempotent)`
+        : undefined,
+    detail: legacyAgentVaults.length > 0 ? { legacyAgentVaults } : undefined,
+  });
+
   return out;
 }
 
@@ -1499,37 +1580,149 @@ async function checkOrphanVaults(db: Client): Promise<CheckResult> {
   };
 }
 
-// On-disk figment relpaths (vault-relative POSIX, notes/** only, scaffold
-// index.md excluded — the same key shape upsertFtsCache writes), capped so a
-// huge vault doesn't turn a doctor run into a tree walk.
-function listDiskFigments(vaultPath: string, cap: number): string[] {
-  const out: string[] = [];
-  const walk = (dir: string, rel: string): void => {
-    if (out.length >= cap) return;
-    let names: string[];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      return;
-    }
-    names.sort();
-    for (const name of names) {
-      if (out.length >= cap) return;
-      const abs = join(dir, name);
-      let st;
+// Phase E (SC7) — GitHub repo-topic drift. For each active vault with a parseable
+// git origin, compute the DESIRED brand-grade topic floor for its repo CLASS
+// (public-vault when the vault's per-vault pod.yon visibility === "public", else
+// vault) UNIONed with the vault's own extra topics, and compare it to the topics
+// actually on GitHub. A repo MISSING any brand topic is drift → warn, with the
+// conformance fix (`lyt sync-metadata --vault <name> --apply`, which re-asserts
+// the brand set as a union, never clobbering user extras). Detect-only here; the
+// heal lives in sync-metadata.
+//
+// gh-graceful: when gh is not authed the check is `info` (skipped) — Lyt is
+// usable offline and doctor must never FAIL on an offline box. Per-repo gh-api
+// failures (rate-limit, 404, no-admin) are surfaced as a per-vault probe error,
+// not a brand-drift warning, so a transient gh hiccup never masquerades as drift.
+export async function checkTopicConformance(
+  db: Client,
+  opts: { ghClient: GhClient; ghAuthed: boolean; sampleLimit: number; full: boolean },
+): Promise<CheckResult> {
+  const id = "github.topic-conformance";
+  const group = "github";
+  const label = "GitHub repo topics match the brand set";
+
+  if (!opts.ghAuthed) {
+    return {
+      id,
+      group,
+      label,
+      status: "info",
+      message: "skipped (gh not authed — run `gh auth login` to check topic drift)",
+    };
+  }
+
+  const active = (await listVaults(db)).filter((v) => v.status === "active" && existsSync(v.path));
+  if (active.length === 0) {
+    return { id, group, label, status: "info", message: "no active vaults to check" };
+  }
+
+  // LOCKED `lyt-public` trigger — public vault names from the pod.yon SoT.
+  // Shared resolver (yon/federation-read.ts), identical to the sync-metadata path.
+  const publicVaultNames = await resolvePublicVaultNames(db);
+
+  const subjects = opts.full ? active : active.slice(0, opts.sampleLimit);
+  const sampleLabel = opts.full
+    ? `all ${active.length}`
+    : `sample ${subjects.length}/${active.length}`;
+
+  const drift: { name: string; missing: string[] }[] = [];
+  const probeErrors: { name: string; reason: string }[] = [];
+
+  for (const v of subjects) {
+    const yonPath = join(v.path, ".lyt", "vault.yon");
+    let gitUrl: string | null = v.gitUrl;
+    if (!gitUrl && existsSync(yonPath)) {
       try {
-        st = statSync(abs);
+        gitUrl = parseVaultYon(readFileSync(yonPath, "utf8")).gitUrl;
       } catch {
-        continue;
-      }
-      const childRel = rel.length === 0 ? name : `${rel}/${name}`;
-      if (st.isDirectory()) walk(abs, childRel);
-      else if (st.isFile() && name.toLowerCase().endsWith(".md") && !isScaffoldNote(name)) {
-        out.push(`notes/${childRel}`);
+        // unparseable vault.yon — fall through; no remote resolved
       }
     }
+    if (!gitUrl) continue; // no remote → nothing to conform on GitHub
+
+    const ownerRepo = parseOwnerRepoFromUrl(gitUrl);
+    if (!ownerRepo) continue;
+
+    const repoClass = publicVaultNames.has(v.name) ? "public-vault" : "vault";
+    // Drift = any BRAND topic absent on GitHub. We only flag MISSING brand
+    // topics (union-not-clobber: extra topics on GitHub are never drift). The
+    // vault's own extra topics are merged by the CONFORMANCE fix (sync-metadata),
+    // not part of the drift floor checked here.
+    const brandFloor = baseTopicsForClass(repoClass);
+
+    let info;
+    try {
+      info = await opts.ghClient.getRepo(ownerRepo.owner, ownerRepo.repo);
+    } catch (err) {
+      probeErrors.push({
+        name: v.name,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    const have = new Set(info.topics.map((t) => t.trim().toLowerCase()));
+    const missing = brandFloor.filter((t) => !have.has(t));
+    if (missing.length > 0) {
+      drift.push({ name: v.name, missing });
+    }
+  }
+
+  if (drift.length > 0) {
+    return {
+      id,
+      group,
+      label: `${label} (${sampleLabel})`,
+      status: "warn",
+      message: `${drift.length} vault repo(s) have drifted GitHub topics (missing brand topic[s]): ${drift
+        .map((d) => `${d.name} [${d.missing.join(", ")}]`)
+        .join("; ")}`,
+      remediation: `Run: ${drift
+        .map((d) => `lyt sync-metadata --vault '${d.name}' --apply`)
+        .join(" ; ")} — re-asserts the brand set as a UNION (your extra topics are preserved)`,
+      detail: { drift, probeErrors: probeErrors.length > 0 ? probeErrors : undefined },
+    };
+  }
+
+  if (probeErrors.length > 0) {
+    return {
+      id,
+      group,
+      label: `${label} (${sampleLabel})`,
+      status: "warn",
+      message: `${probeErrors.length} vault repo(s) could not be probed for topic drift: ${probeErrors
+        .map((p) => p.name)
+        .join(", ")}`,
+      detail: { probeErrors },
+    };
+  }
+
+  return {
+    id,
+    group,
+    label: `${label} (${sampleLabel})`,
+    status: "pass",
+    message: `${subjects.length} probed vault repo(s) carry the brand topic set`,
   };
-  walk(join(vaultPath, "notes"), "");
+}
+
+// On-disk figment relpaths (vault-relative POSIX), capped to `cap` entries so
+// the doctor diff only SAMPLES a bounded window of figments (paired with the
+// indexed-paths cap in readIndexedFigmentPaths). B-4: rooted at the VAULT ROOT
+// (not notes/) via the shared `walkVaultMarkdownFiles` + `isIndexable` — the SAME
+// key shape + inclusion set upsertFtsCache now writes (floor + scaffold +
+// size/binary gates uniform). The output prefix is the actual vault-relative
+// POSIX path (e.g. `identity/me.md`), no longer a hardcoded `notes/` prefix.
+// NOTE: the shared walker enumerates the FULL tree first; the `cap` only bounds
+// the RETURNED sample, not the walk itself (the walker has no early-exit hook).
+// For a doctor sample this is acceptable — the walk is the same one a reindex
+// performs; if it ever becomes a hot path, push the cap into the walker.
+function listDiskFigments(vaultPath: string, cap: number): string[] {
+  const abs = walkVaultMarkdownFiles(vaultPath, isIndexable);
+  const out: string[] = [];
+  for (const p of abs) {
+    if (out.length >= cap) break;
+    out.push(relative(vaultPath, p).split(sep).join(posixPath.sep));
+  }
   return out;
 }
 

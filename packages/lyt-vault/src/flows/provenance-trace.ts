@@ -224,7 +224,7 @@ function readFrontmatterLastProvenance(filePath: string): FrontmatterRead {
     return {
       value: null,
       message:
-        "File has no YAML frontmatter — `last_provenance:` cannot be read. Block-A does not auto-inject this slot; block-B's lyt-runner pre-write hook (arc §11.4) will.",
+        "File has no YAML frontmatter — `last_provenance:` cannot be read. This slot is populated by the lyt-runner pre-write hook when available.",
     };
   }
   const closing = raw.indexOf("\n---", 3);
@@ -240,7 +240,7 @@ function readFrontmatterLastProvenance(filePath: string): FrontmatterRead {
     return {
       value: null,
       message:
-        "`last_provenance:` not present in frontmatter. Block-A does not auto-inject this slot; block-B's lyt-runner pre-write hook (arc §11.4) will.",
+        "`last_provenance:` not present in frontmatter. This slot is populated by the lyt-runner pre-write hook when available.",
     };
   }
   return {

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// LLM op composition (block-B Commit 4).
+// LLM op composition.
 //
 // Per arc-thoughts §6.12:489-494 (LOCKED 2026-05-27) `@younndai/lyt-llm`
 // registers four ops with the underlying yon-runner via lyt-runner:
@@ -25,7 +25,7 @@
 // src/index.ts:9 documents the deferral)
 // std:llm.generate_object@v1 — stub-with-warning (block-D — zod-schema
 // structured output deferred per lyt-llm
-// src/index.ts:9; brief @TASK clause (4))
+// src/index.ts:9; brief clause (4))
 //
 // Real handlers convert @STEP-string args to LlmGateway request shape and
 // surface the gateway's structured GenerateResult / EmbedResult unchanged
@@ -184,7 +184,7 @@ export function createLlmOps(gateway: LlmGateway | undefined): Record<string, Op
         status: "stub",
         op: "std:llm.stream@v1",
         warning:
-          "std:llm.stream@v1 is stubbed in block-B Commit 4; streaming surface lands at block-D when the lyt-llm gateway gains a stream() method",
+          "std:llm.stream@v1 is not yet implemented; a streaming surface is planned for a future release.",
         args,
       };
     },
@@ -198,7 +198,7 @@ export function createLlmOps(gateway: LlmGateway | undefined): Record<string, Op
         status: "stub",
         op: "std:llm.generate_object@v1",
         warning:
-          "std:llm.generate_object@v1 is stubbed in block-B Commit 4; zod-schema structured output lands at block-D when the lyt-llm gateway gains a generateObject() method",
+          "std:llm.generate_object@v1 is not yet implemented; schema-structured output is planned for a future release.",
         args,
       };
     },

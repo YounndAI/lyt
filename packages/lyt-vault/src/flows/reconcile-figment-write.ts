@@ -62,13 +62,13 @@ import { recordProvenance } from "../registry/provenance-write.js";
 import { newUuidv7Bytes } from "../util/uuid7.js";
 import {
   extractFtsBody,
-  isScaffoldNote,
   parseFigmentDates,
   parseFigmentTopicTags,
   type ExtractedFtsBody,
   type FigmentDates,
   type FigmentTopicTags,
 } from "./upsert-fts-cache.js";
+import { isIndexablePath } from "../util/indexable.js";
 
 // src= attribution carried in the provenance ledger + @STAMP for
 // capture-time reconciles. Distinct from `automator:*` (those are
@@ -176,20 +176,37 @@ function readFigmentBody(
   vaultPath: string,
   relPath: string,
 ): (ExtractedFtsBody & FigmentDates & FigmentTopicTags) | null {
-  if (isScaffoldNote(relPath)) return null;
   const abs = join(vaultPath, relPath);
   if (!existsSync(abs)) return null;
   // C2 (Lane M Wave 0 v2.1) — symlink info-disclosure guard. `lstat` does
-  // NOT follow the link, so a symlink placed in `notes/` (pointing at, e.g.,
-  // /etc/passwd or any out-of-vault file) is rejected here and its target
+  // NOT follow the link, so a symlink placed at a contained path (pointing at,
+  // e.g., /etc/passwd or any out-of-vault file) is rejected here and its target
   // content is never read into the FTS cache. Pairs with `followSymlinks:
   // false` on the watcher (sync-watch.ts) — defense in depth. The path is
   // already containment-checked by assertContained before we get here.
+  //
+  // ORDERING (MF4, fix-pass 2): this reject runs BEFORE the isIndexablePath
+  // content-gate below. isIndexablePath(relPath, …, vaultPath) runs the g3/g4
+  // CONTENT gates — a statSync + an 8 KB readSync on the abs path — and BOTH
+  // follow symlinks. Running it first would stat + open + read the first 8 KB
+  // of an out-of-vault symlink TARGET before this reject fired. Rejecting the
+  // symlink first guarantees an out-of-vault target is never stat'd or opened.
   try {
     if (lstatSync(abs).isSymbolicLink()) return null;
   } catch {
     return null;
   }
+  // B-4: widen the inclusion gate from the notes/-era scaffold check to the
+  // single `isIndexable` predicate (extension + immutable floor + scaffold). The
+  // chokidar watch (sync-watch.ts) is already vault-wide, so an edit OUTSIDE
+  // notes/ now reconciles into FTS instead of being silently dropped. The file
+  // is on disk at this per-write seam, so we pass `vaultPath` to run the CONTENT
+  // gates (g3 size cap, g4 binary sniff) too — this keeps incremental ⊆ full: a
+  // >2MB or NUL-byte file the full-walk reindex (which always passes vaultRoot)
+  // would DROP must not be indexed here either, else the row vanishes on the
+  // next reindex. (Symlinks are already rejected above, so g3/g4 never follow a
+  // link out of the vault.)
+  if (!isIndexablePath(relPath, undefined, vaultPath)) return null;
   try {
     const raw = readFileSync(abs, "utf8");
     return {

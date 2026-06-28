@@ -228,6 +228,10 @@ export async function addEdgeFlow(args: AddEdgeArgs): Promise<AddEdgeResult> {
         lifecycle: parseLifecycle(parsed.lifecycle),
         topics: parsed.topics,
         agentTemplateVersion: parsed.agentTemplateVersion ?? undefined,
+        // Phase A — preserve scaffold-system version stamps across parse→render.
+        // SEE ALSO: yon/parse.ts ParsedVaultYon + yon/vault.ts renderVaultYon.
+        templateVersion: parsed.templateVersion ?? undefined,
+        contractVersion: parsed.contractVersion ?? undefined,
       };
       writeFileSync(yonPath, renderVaultYon(doc), "utf8");
     }

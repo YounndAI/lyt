@@ -43,7 +43,7 @@ import {
   NoEligibleAdapterError,
 } from "./types.js";
 
-// Brief @TASK clause (4): "default `[cheap, harness, byok, local]` per arc §6.10".
+// Brief clause (4): "default `[cheap, harness, byok, local]` per arc §6.10".
 // Translated to source vocabulary: cheap → ai-relay; harness → harness;
 // byok → byok; local → ollama. Order preserved from arc §6.10 default.
 export const DEFAULT_SOURCE_PREFERENCE: readonly LlmSource[] = Object.freeze([

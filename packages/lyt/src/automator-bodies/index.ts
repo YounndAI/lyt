@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Archetype → TS body resolver (block-B Commit 7).
+// Archetype → TS body resolver.
 //
 // v1 ships three bundled archetype-body pairs: metadata-filler (filler),
 // lane-builder (aggregator — tag-frequency search lanes), and arc-builder

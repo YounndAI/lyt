@@ -15,7 +15,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { Client } from "@libsql/client";
 
@@ -48,6 +48,8 @@ import { POD_REPO_DESCRIPTION, POD_TOPICS } from "../../scaffold/github-defaults
 import { hexToUuid7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../../util/uuid7.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { renderFederationYon } from "../../yon/federation-write.js";
+import { AGENTS_MD_TEMPLATE_VERSION } from "../../templates/priming.js";
+import { renderPodReadme } from "../../templates/pod-readme.js";
 
 // `lyt federation init` — provisions or adopts {handle}/lyt-pod (repo
 // name; CLI verb-group + internal "federation" term unchanged per Option B).
@@ -310,7 +312,7 @@ export async function federationInitFlow(
     // is genuinely no manifest to preserve (fresh / local forge, or an adopted pod
     // whose remote lacked one). The end-of-flow regen re-derives pod.yon from the
     // registry once the recovered vaults are registered, so the derived-manifest
-    // invariant (Brief A) still holds on every branch.
+    // invariant still holds on every branch.
     const podYonAlreadyCloned = branch === "adopted" && existsSync(fedYonPath);
     if (!podYonAlreadyCloned) {
       const yon = renderFederationYon({
@@ -326,6 +328,21 @@ export async function federationInitFlow(
       });
       mkdirSync(dirname(fedYonPath), { recursive: true });
       writeFileSync(fedYonPath, yon, "utf8");
+    }
+
+    // Phase C (UNIT 5) — pod-repo brand-grade README, INIT-ONCE. The pod repo
+    // gets a managed README (no Figment seed) carrying the scaffold-generation
+    // version stamp. Write-if-absent so a handler edit / existing README is
+    // never clobbered (doctor warns-not-acts on a later delete). Lands in the
+    // forge commit below (commitAndOptionallyPush stages the whole localDir).
+    const podReadmePath = join(localDir, "README.md");
+    if (!existsSync(podReadmePath)) {
+      mkdirSync(localDir, { recursive: true });
+      writeFileSync(
+        podReadmePath,
+        renderPodReadme({ handle, templateVersion: AGENTS_MD_TEMPLATE_VERSION }),
+        "utf8",
+      );
     }
 
     // W2.3 — persist recover identity through the pod repo (the

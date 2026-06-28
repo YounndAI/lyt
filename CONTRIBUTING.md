@@ -42,7 +42,7 @@ confirms a signed CLA is on file for all contributors.**
 - [ ] Signed the appropriate CLA (see above)
 - [ ] Apache-2.0 copyright header included in any new source files (see existing files for the exact block)
 - [ ] Code follows existing project conventions (TypeScript strict mode, libSQL-only data layer, cross-platform paths)
-- [ ] Tests added for new functionality; `npm run build` + `npm test` green
+- [ ] Tests added for new functionality; `npm run build` + `npm test` green (test tiers: `test:smoke` / `test:affected` / `test:release`)
 - [ ] Documentation updated for user-facing changes
 - [ ] Trademark indicators (™) on first prominent use of any YounndAI or LYT mark in new documentation
 - [ ] CHANGELOG.md updated where the change is user-facing

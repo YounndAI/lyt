@@ -21,6 +21,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import {
   backfillFigmentCaches,
   closeRegistry,
+  isIndexablePath,
   listVaults,
   openRegistry,
   reconcileFigmentWrite,
@@ -170,7 +171,8 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
     return null;
   };
 
-  // Lane M Wave 0 v2 — incremental FTS reconcile on a notes/** file event.
+  // Lane M Wave 0 v2 — incremental FTS reconcile on an indexable file event
+  // (B-4 A2: any indexable markdown under the vault root, not notes/**-only).
   // CHEAP-SEARCH INVARIANT: fresh search is the cheap universal layer, so
   // we reconcile the FTS cache ONLY (provenance:false). The reconcile is
   // non-fatal: a failure logs + is swallowed (the markdown SoT is on disk;
@@ -198,11 +200,15 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
     // Commit-debounce fires for ANY change in the vault (unchanged behavior).
     scheduleCommit(v.name);
 
-    // FTS reconcile is notes/**-ONLY (the figment_fts source set). Changes
-    // under work/, handoffs/, .lyt/, .git/ etc. are NOT part of the cheap
-    // search cache and are skipped here.
+    // B-4 (figment-roots, A2) — the FTS reconcile pre-filter is now the SHARED
+    // inclusion predicate, not a notes/**-only gate. A live edit under any
+    // semantic folder (identity/, funding/, …) now reconciles; only
+    // non-indexable paths (scaffold index.md, the .lyt/.git/.obsidian floor,
+    // non-markdown) are dropped here. PATH-ONLY (no vaultRoot): this is a cheap
+    // pre-filter on the watch event; reconcileFigmentWrite itself runs the
+    // authoritative content-gate (g3 size / g4 binary) with vaultPath downstream.
     const relPath = toVaultRelPosix(changedPath, v.path);
-    if (!isNotesFigment(relPath)) return;
+    if (!isIndexablePath(relPath)) return;
 
     // Map the chokidar event → reconcile op. chokidar's default config does
     // not emit rename as a single event (it surfaces unlink + add), so we
@@ -268,13 +274,6 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
   };
 
   return { stop, triggerChange, whenIdle };
-}
-
-// A figment lives under the vault's `notes/` tree (the figment_fts source
-// set per upsert-fts-cache.ts) and is a markdown file. Matches both
-// `notes/x.md` and nested `notes/sub/x.md`; excludes everything else.
-function isNotesFigment(relPath: string): boolean {
-  return relPath.startsWith("notes/") && relPath.toLowerCase().endsWith(".md");
 }
 
 async function runSyncForVault(vaultName: string, opts: SyncWatchOptions): Promise<void> {

@@ -39,6 +39,11 @@ export interface ParsedVaultYon {
   lifecycle: string | null;
   topics: string[];
   agentTemplateVersion: number | null;
+  // Phase A — scaffold-system version stamps. Read back alongside
+  // agent_template_version so parse→reconstruct→render flows preserve them.
+  // SEE ALSO: yon/vault.ts renderVaultYon (emitter) + scaffold/init.ts (writer).
+  templateVersion: number | null;
+  contractVersion: number | null;
   frozenAt: string | null;
   frozenUntil: string | null;
   // v1.B.3 — present when vault.yon carries a @VAULT_HOME_MESH record.
@@ -75,6 +80,11 @@ export function parseVaultYon(content: string): ParsedVaultYon {
     lifecycle: readMetaBare(content, "lifecycle"),
     topics: readTopicTags(content),
     agentTemplateVersion: readMetaInt(content, "agent_template_version"),
+    // Phase A — scaffold-system version stamps. Mirror the agent_template_version
+    // read above so parse→reconstruct→render flows preserve all three stamps.
+    // SEE ALSO: yon/vault.ts renderVaultYon (emitter) + scaffold/init.ts (writer).
+    templateVersion: readMetaInt(content, "template_version"),
+    contractVersion: readMetaInt(content, "contract_version"),
     frozenAt: readTimestampField(content, "frozen_at"),
     frozenUntil: readTimestampField(content, "frozen_until"),
     homeMesh: parseVaultHomeMesh(content),

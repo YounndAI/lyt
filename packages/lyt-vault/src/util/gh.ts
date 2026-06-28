@@ -48,6 +48,12 @@ export const realGhClient: GhClient = {
   },
 
   async editRepo(owner, name, description, topics): Promise<void> {
+    // NOTE (Phase E release review): this is `--add-topic`-only — additive, never
+    // removes. That's the load-bearing assumption behind the union-not-clobber
+    // drift logic (sync-metadata.ts). It also means REVERSAL is unbuilt: un-
+    // publishing a vault cannot strip `lyt-public` here. A proper un-publish
+    // needs a `--remove-topic` capability and MUST ship WITH the conscious-public
+    // flip (see PUBLIC_VAULT_TOPICS in scaffold/github-defaults.ts, gap #2).
     const args = ["repo", "edit", `${owner}/${name}`, "--description", description];
     for (const t of topics) {
       args.push("--add-topic", t);

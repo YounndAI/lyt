@@ -346,7 +346,7 @@ function appendNextSteps(lines: string[]): string[] {
   lines.push("## Sharing this export");
   lines.push("");
   lines.push(
-    "Per arc §8.4, audit exports become cross-machine artifacts through git. Stage + commit + push this file when you want collaborators (or other machines you own) to see the window:",
+    "Audit exports become cross-machine artifacts through git. Stage + commit + push this file when you want collaborators (or other machines you own) to see the window:",
   );
   lines.push("");
   lines.push("```");

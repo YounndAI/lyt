@@ -257,7 +257,10 @@ async function maybePickRevisionInteractive(target: string): Promise<string | nu
   }
 }
 
-function emitHumanSummary(r: RepairResult): void {
+// Exported for the release review F1 unit test (tests/flows/phase-d-agent-file-relocation.test.ts)
+// — asserts a present `snapshot_note` (a non-git vault migrated without a recovery
+// snapshot) surfaces in the human output, not just `details`. Test-only seam.
+export function emitHumanSummary(r: RepairResult): void {
   // eslint-disable-next-line no-console
   console.log(
     `Repair ${r.mode}: ${r.summary.findingsCount} finding${r.summary.findingsCount === 1 ? "" : "s"}; ${r.summary.actionsApplied} applied; ${r.summary.actionsSkipped} skipped; ${r.summary.actionsErrored} errored.`,
@@ -272,6 +275,14 @@ function emitHumanSummary(r: RepairResult): void {
     const marker = a.status === "applied" ? "✓" : a.status === "skipped" ? "~" : "✗";
     // eslint-disable-next-line no-console
     console.log(`  ${marker} ${a.kind} ${a.meshName} (${a.targetId}): ${a.message}`);
+    // Release review F1 — a present snapshot_note (e.g. a non-git vault migrated
+    // without a recovery snapshot) rides only in `details` and was invisible in
+    // human output. Surface it on its own line so the reduced safety net is seen.
+    const snapshotNote = a.details["snapshot_note"];
+    if (typeof snapshotNote === "string" && snapshotNote.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`      ⚠ ${snapshotNote}`);
+    }
   }
 }
 

@@ -212,6 +212,14 @@ export async function renameVaultFlow(args: RenameVaultArgs): Promise<RenameVaul
       ...(parsed.agentTemplateVersion !== null
         ? { agentTemplateVersion: parsed.agentTemplateVersion }
         : {}),
+      // Phase A — preserve scaffold-system version stamps across parse→render.
+      // SEE ALSO: yon/parse.ts ParsedVaultYon + yon/vault.ts renderVaultYon.
+      ...(parsed.templateVersion !== null
+        ? { templateVersion: parsed.templateVersion }
+        : {}),
+      ...(parsed.contractVersion !== null
+        ? { contractVersion: parsed.contractVersion }
+        : {}),
       ...(parsed.homeMesh !== null && meshRidHomeBytes !== undefined
         ? {
             homeMesh: {

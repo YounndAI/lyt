@@ -226,6 +226,30 @@ export function validateVaultName(name: string): void {
   if (name.trim().length === 0) {
     throw new Error(`Vault name cannot be whitespace-only: ${JSON.stringify(name)}.`);
   }
+  // M1b (release review): reject names that could hijack a managed-marker search.
+  // The vault name flows into regenReadme / regenAgentsMd, which locate the
+  // managed block via a first-`indexOf` on HTML-comment markers
+  // (`<!-- LYT_README_BEGIN -->`, `LYT_PATTERNS_*`, `LYT_PRIMER_*`). A name
+  // carrying an HTML-comment delimiter (or a literal marker substring) would
+  // shift that search and let the regen DELETE handler prose outside the
+  // managed block. Block every HTML-comment delimiter outright — the simplest
+  // superset that covers all marker substrings — plus control chars / newlines
+  // (which have no place in a filesystem-bound vault name and would also break
+  // a single-line marker scan).
+  if (name.includes("<!--") || name.includes("-->")) {
+    throw new Error(
+      `Vault name cannot contain an HTML-comment delimiter ('<!--' or '-->'): ${JSON.stringify(name)}. ` +
+        `These collide with Lyt's managed-block markers. Use 'owner/repo' (e.g. 'alex/main') or a bare name (e.g. 'notes').`,
+    );
+  }
+  // C0 controls (U+0000–U+001F) + DEL (U+007F) — covers CR, LF, TAB, NUL, etc.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error(
+      `Vault name cannot contain control characters or newlines: ${JSON.stringify(name)}. ` +
+        `Use 'owner/repo' (e.g. 'alex/main') or a bare name (e.g. 'notes').`,
+    );
+  }
   if (name.startsWith("/")) {
     throw new Error(
       `Vault name cannot start with '/': ${JSON.stringify(name)}. Use 'owner/repo' (e.g. 'alex/main') or a bare name (e.g. 'notes').`,

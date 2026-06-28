@@ -24,7 +24,14 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { PUBLISH_SET } from "./public-release/scan-tarball.mjs";
+
 const REQUIRED_NODE_ENGINE = ">=20.9";
+
+// The npm specifiers that count as inter-package siblings within the publish
+// set (the ^-ranged @younndai/* deps a release bump must keep in lockstep).
+const PUBLISH_DEP_NAMES = new Set(PUBLISH_SET.map((p) => `@younndai/${p}`));
+const DEP_BLOCKS = ["dependencies", "devDependencies", "peerDependencies"];
 
 function parseArgs(argv) {
   const args = { root: null, json: false };
@@ -122,6 +129,59 @@ function detectDrift(dir, shape) {
   return drift;
 }
 
+// ── Guard E — publish-set version-equality assertion ───────────────────────
+// A release bump must move ALL 7 publish-set versions in lockstep AND keep every
+// inter-package ^@younndai/<sibling> dep among them equal to that version. A
+// partial/naive bump (one package.json missed, one ^ dep stale) ships a broken
+// dependency graph (`@younndai/lyt@0.9.7` depending on `lyt-vault@^0.9.6`). This
+// asserts the invariant directly from the package.json files (no npm pack
+// needed) and yields a list of mismatch findings — empty == healthy.
+export function checkVersionEquality(rootDir) {
+  const root = resolve(rootDir);
+  const findings = [];
+  const pkgs = [];
+  for (const name of PUBLISH_SET) {
+    const file = join(root, "packages", name, "package.json");
+    if (!existsSync(file)) {
+      findings.push({ kind: "publish-pkg-missing", detail: `${relative(root, file)} does not exist` });
+      continue;
+    }
+    pkgs.push({ name, rel: relative(root, file), json: readJson(file) });
+  }
+  // All 7 `version` fields must be identical.
+  const versions = pkgs.map((p) => p.json.version);
+  const uniqueVersions = [...new Set(versions)];
+  const expected = uniqueVersions.length === 1 ? uniqueVersions[0] : null;
+  if (uniqueVersions.length > 1) {
+    findings.push({
+      kind: "publish-version-mismatch",
+      detail: `publish-set versions diverge: ${pkgs
+        .map((p) => `${p.name}@${p.json.version}`)
+        .join(", ")}`,
+    });
+  }
+  // Every ^-ranged sibling dep among the 7 must equal the (uniform) version.
+  for (const { name, rel, json } of pkgs) {
+    for (const block of DEP_BLOCKS) {
+      const deps = json[block];
+      if (!deps || typeof deps !== "object") continue;
+      for (const [depName, spec] of Object.entries(deps)) {
+        if (!PUBLISH_DEP_NAMES.has(depName)) continue;
+        const m = /^\^(.+)$/.exec(spec ?? "");
+        if (!m) continue; // non-^ specs are out of scope for the equality rule
+        const target = expected ?? versions[0];
+        if (m[1] !== target) {
+          findings.push({
+            kind: "publish-dep-version-mismatch",
+            detail: `${name}: ${block}.${depName} is "${spec}", expected "^${target}" to match the publish-set version`,
+          });
+        }
+      }
+    }
+  }
+  return { ok: findings.length === 0, expectedVersion: expected, findings };
+}
+
 export function runPrecheck({ rootDir }) {
   const workspaces = listPublishableWorkspaces(rootDir);
   const reports = [];
@@ -145,8 +205,18 @@ export function runPrecheck({ rootDir }) {
     if (packError) drift.push({ kind: "npm-pack-failed", detail: packError });
     reports.push({ dir: relative(rootDir, dir), shape, pack, drift });
   }
-  const totalDrift = reports.reduce((n, r) => n + r.drift.length, 0);
-  return { ok: totalDrift === 0, totalDrift, workspaceCount: reports.length, reports };
+  // Guard E — fold the publish-set version-equality check into the result so a
+  // version/dep divergence makes the precheck RED alongside the existing drift.
+  const versionEquality = checkVersionEquality(rootDir);
+  const totalDrift =
+    reports.reduce((n, r) => n + r.drift.length, 0) + versionEquality.findings.length;
+  return {
+    ok: totalDrift === 0,
+    totalDrift,
+    workspaceCount: reports.length,
+    reports,
+    versionEquality,
+  };
 }
 
 function formatHuman(result) {
@@ -163,11 +233,19 @@ function formatHuman(result) {
       lines.push(`       - ${d.kind}: ${d.detail}`);
     }
   }
+  const ve = result.versionEquality;
+  if (ve) {
+    const veMarker = ve.ok ? "[ok]" : `[mismatch x${ve.findings.length}]`;
+    lines.push(`${veMarker} publish-set version equality (expected ${ve.expectedVersion ?? "—"})`);
+    for (const f of ve.findings) {
+      lines.push(`       - ${f.kind}: ${f.detail}`);
+    }
+  }
   lines.push("");
   if (result.ok) {
     lines.push("clean: 0 drift detected, all workspaces publish-ready.");
   } else {
-    lines.push(`drift: ${result.totalDrift} issue(s) detected across ${result.reports.filter((r) => r.drift.length > 0).length} workspace(s).`);
+    lines.push(`drift: ${result.totalDrift} issue(s) detected across ${result.reports.filter((r) => r.drift.length > 0).length} workspace(s)${ve && !ve.ok ? " + publish-set version equality" : ""}.`);
   }
   return lines.join("\n");
 }

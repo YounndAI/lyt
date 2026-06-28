@@ -1,7 +1,7 @@
 ---
 name: lyt-capture
 description: >
-  Capture a Figment (a markdown note) into a Lyt vault under the 8-field frontmatter contract. Trigger when the user runs /lyt-capture, or says "save this", "capture this", "add to my vault", "remember this in Lyt", or similar phrasing on content they want kept in their Lyt vault. Writes an Obsidian-flavored markdown file under <vault>/notes/ with frontmatter (title, created, modified, tags, purpose, topic, mesh-visibility, weight, meta) per yai.lyt v1 (arc §3). Wraps `lyt pattern run knowledge-capture capture` under the hood. Companion to lyt-recall.
+  Capture a Figment (a markdown note) into a Lyt vault under the 8-field frontmatter contract. Trigger when the user runs /lyt-capture, or says "save this", "capture this", "add to my vault", "remember this in Lyt", or similar phrasing on content they want kept in their Lyt vault. Writes an Obsidian-flavored markdown file under <vault>/notes/ with frontmatter (title, created, modified, tags, purpose, topic, mesh-visibility, weight, meta) per yai.lyt v1. Wraps `lyt pattern run knowledge-capture capture` under the hood. Companion to lyt-recall.
 visibility: public
 lyt-version: 0.2.0
 capabilities: [write]
@@ -45,7 +45,7 @@ A `--vault` argument may be a `{mesh}/{vault}` name, a bare leaf (resolved to a 
 
 ## Phase 2 — Build the Figment under the v1 8-field contract
 
-Per yai.lyt v1 frontmatter contract (arc §3), every captured Figment carries 8 mandatory frontmatter fields plus a `meta:` escape hatch.
+Per yai.lyt v1 frontmatter contract, every captured Figment carries 8 mandatory frontmatter fields plus a `meta:` escape hatch.
 
 1. **Determine a title.** Use the user's explicit title if given. Otherwise infer a short noun-phrase (5–8 words) from the content. If unsure, ask.
 2. **Compute the slug** — lowercase, kebab-case the title, strip non-`[a-z0-9-]` characters, max 60 chars.

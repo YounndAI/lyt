@@ -580,11 +580,15 @@ export type {
 } from "./flows/doctor.js";
 export {
   BRAND_TOPICS,
+  POD_TOPICS,
+  PUBLIC_VAULT_TOPICS,
+  baseTopicsForClass,
   DESCRIPTION_PREFIX,
   DESCRIPTION_SUFFIX,
   formatRepoDescription,
   mergeTopics,
 } from "./scaffold/github-defaults.js";
+export type { RepoClass } from "./scaffold/github-defaults.js";
 export {
   renderMeshContext,
   meshContextInputFromYon,
@@ -607,6 +611,30 @@ export {
 export type { AgentsMdInput, InstalledPatternSummary } from "./templates/priming.js";
 export { regenAgentsMd, collectInstalledPatterns } from "./flows/agents-md-regen.js";
 export type { RegenAgentsMdResult } from "./flows/agents-md-regen.js";
+export {
+  README_MANAGED_BEGIN,
+  README_MANAGED_END,
+  regenReadme,
+  checkReadmePresent,
+} from "./flows/readme-regen.js";
+export type { RegenReadmeResult, ReadmePresenceCheck } from "./flows/readme-regen.js";
+export {
+  TIER_PAYLOADS,
+  payloadForVault,
+  resolveScaffoldTier,
+  renderSeedFigment,
+} from "./templates/tier-payloads.js";
+export type {
+  ScaffoldTier,
+  TierPayload,
+  SeedFigmentSpec,
+} from "./templates/tier-payloads.js";
+export {
+  POD_README_MANAGED_BEGIN,
+  POD_README_MANAGED_END,
+  renderPodReadme,
+} from "./templates/pod-readme.js";
+export type { PodReadmeInput } from "./templates/pod-readme.js";
 export {
   edge as jsonCanvasEdge,
   fileNode as jsonCanvasFileNode,
@@ -1080,6 +1108,12 @@ export type {
   InsertProvenanceArgs,
   InsertAuditLogArgs,
 } from "./registry/vault-db-repo.js";
+
+// B-4 (figment-roots, A2) — the shared inclusion predicate, exported so the
+// cross-package READ gate in lyt-mesh (the sync-watch event pre-filter) routes
+// through the SAME funnel as every in-package index tier. Public-export
+// addition only: no behavior change to lyt-vault.
+export { isIndexablePath } from "./util/indexable.js";
 
 export { renderVaultYon } from "./yon/vault.js";
 export type { VaultDoc, VaultRecord, VaultHomeMeshRecord } from "./yon/vault.js";

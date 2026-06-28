@@ -36,14 +36,15 @@ import type { MeshPushKind } from "../yon/mesh-write.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import { realMeshGhClient } from "../util/gh-mesh.js";
 import { registerVaultFromYon } from "./register.js";
+import { indexScaffoldFtsOnCreate } from "./upsert-fts-cache.js";
 
 // v1.B.1 — `lyt mesh init <name>` flow.
 //
-// Source: Brief @TASK steps 1-2 + lyt-federation-design.md §3 (mesh.yon
+// Source: Brief steps 1-2 + lyt-federation-design.md §3 (mesh.yon
 // schema verbatim, lines 121-151) + lyt-master-plan.md §5 v1.B.1 + Brief
 // @CONTINUATION §5 (mesh.yon initial-state shape).
 //
-// Order of operations (Brief @TASK step 2):
+// Order of operations (Brief step 2):
 // (a) validate <name> as mesh-name slot (no `/`, slug-safe — validateMeshName)
 // (b) resolve --parent <existing-mesh> → mesh's main_vault_rid as parentVaultRid
 // for the new main vault (BLOB FK on vaults.parent_vault per v1.A.1b)
@@ -213,6 +214,11 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
     // @VAULT_HOME_MESH from vault.yon and sets vaults.home_mesh_rid → meshRid
     // (meshes row was inserted above, so the FK resolves).
     await initVaultDbs(scaffoldResult.vaultPath);
+    // B-4 / Decision-B (B2): index the auto-created `<mesh>/main` vault's scaffold
+    // figments into FTS at create so doctor's index-fts-smoke does not false-warn
+    // (exit 2) on it. Shared seam + rationale: indexScaffoldFtsOnCreate
+    // (upsert-fts-cache.ts) — keep in sync with the flows/init.ts call site.
+    await indexScaffoldFtsOnCreate(scaffoldResult.vaultPath);
     const registered = await registerVaultFromYon(db, {
       vaultPath: scaffoldResult.vaultPath,
     });

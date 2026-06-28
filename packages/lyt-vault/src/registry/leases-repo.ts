@@ -16,7 +16,7 @@
 
 // machine_leases repo — per-machine automator lease ledger.
 //
-// Per block-B brief @TASK clause (5)-(6) + arc-thoughts §6.6 5-step protocol:
+// Per block-B brief clause (5)-(6) + arc-thoughts §6.6 5-step protocol:
 // every automator run acquires a libSQL row with TTL (default 60s,
 // overridable per @AUTOMATOR via lease_expiry_ms field) before stepping
 // into the protocol's vault-sync/run/commit/release sequence. The lease
@@ -142,7 +142,7 @@ export async function probeActiveLeases(
   }));
 }
 
-// Auto-expiry sweep (lazy cleanup, per brief @TASK clause (6)). Flips every
+// Auto-expiry sweep (lazy cleanup, per brief clause (6)). Flips every
 // row with status='active' AND expires_at < now to status='expired'. Called
 // on every acquireLease() — keeps the lease ledger tidy without a daemon.
 export async function sweepExpiredLeases(db: Client, now: number): Promise<number> {

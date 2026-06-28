@@ -15,7 +15,11 @@ export default defineConfig({
     // forks. `fileParallelism: false` is the vitest-4 spelling of the
     // single-fork sequential intent documented above.
     fileParallelism: false,
-    testTimeout: 15000,
-    hookTimeout: 15000,
+    // raised from 15s (V98 2026-06-27 spike: Windows git-subprocess latency
+    // pushes git-integration tests to 13–25s; 45s = ~3× clean worst-case, still
+    // tight enough to catch a 2× regression).
+    // Keep in sync with packages/lyt-runner/vitest.config.ts (same git-latency class).
+    testTimeout: 45000,
+    hookTimeout: 45000,
   },
 });

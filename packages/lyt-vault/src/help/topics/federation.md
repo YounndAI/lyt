@@ -121,5 +121,5 @@ the manifest on its own, run `lyt federation rebuild --push`.
 
 ## See also
 
-- `lyt help machine` — machine roles drive automator dispatch.
+- `lyt help automators` — machine roles drive automator dispatch.
 - `lyt help sync` — how the pod publish pass works.

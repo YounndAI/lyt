@@ -1,6 +1,6 @@
 # `mesh.yon` — the mesh source of truth
 
-A **mesh.yon** is the YON document that defines a [Mesh](#) — its identity,
+A **mesh.yon** is the YON document that defines a mesh — its identity,
 its home vaults, and its cross-mesh edges.
 It lives at `.lyt/mesh.yon` inside the mesh's main vault, and only there.
 (Cross-mesh **subscriptions** no longer live in mesh.yon — they moved to a
@@ -20,11 +20,13 @@ federation primer — is derived state that can be regenerated.
 ├── .git/
 ├── .obsidian/
 ├── .lyt/
+│   ├── agents.md       ← AI-agent priming (under .lyt/)
+│   ├── lyt-overview.md ← your identity page
 │   ├── vault.yon       ← @VAULT (this vault's identity)
 │   └── mesh.yon        ← @MESH + @MESH_HOME + @MESH_EDGE
 │                         (this whole mesh's identity; only present in the main vault)
 ├── notes/
-└── lyt-overview.md
+└── README.md
 ```
 
 Non-main vaults in the mesh do NOT carry a `mesh.yon`. They link back to the
@@ -121,7 +123,7 @@ re-emits them. The disk SoT is authoritative; the cache catches up.
 - `markers.render` — verifies each mesh's `meshes.main_vault_rid` resolves to
   a real vault row, so `lyt vault list`'s `★ {mesh}/main` marker can render.
 
-Run `lyt help doctor` for the full check list.
+Run `lyt doctor` for the full check list.
 
 ## Not yet shipped
 

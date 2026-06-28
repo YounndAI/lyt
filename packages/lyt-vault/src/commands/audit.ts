@@ -29,7 +29,7 @@ interface AuditExportCliOpts {
 
 export function buildAuditCommand(): Command {
   const audit = new Command("audit").description(
-    "Audit-log tooling (export markdown windows; aggregate deferred to block-D).",
+    "Audit-log tooling (export markdown windows; aggregate deferred to a future release).",
   );
 
   audit

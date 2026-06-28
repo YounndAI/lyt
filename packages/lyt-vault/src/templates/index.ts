@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { renderTemplate } from "./render.js";
+
 export type TemplateName = "empty" | "obsidian-default";
 
 export const DEFAULT_TEMPLATE: TemplateName = "obsidian-default";
@@ -101,18 +103,11 @@ export function getObsidianScaffold(template: TemplateName): ObsidianScaffold {
   };
 }
 
+// UNIT 2 — README body externalized to `templates/README.md`.
+// Per-template variable manifest: { vaultName }. README.md is FTS-excluded by
+// the isScaffoldNote BASENAME gate, so it carries no frontmatter.
 export function getReadmeContent(vaultName: string): string {
-  return [
-    `# ${vaultName}`,
-    ``,
-    `> A Lyt vault — federated markdown knowledge with AI agent integration.`,
-    ``,
-    `This vault is part of a Lyt mesh. The canonical bytes live in Git;`,
-    `derived state (search index, embeddings) lives in \`.lyt/indexes/\` and is rebuildable.`,
-    ``,
-    `See [linkyourthink.com](https://linkyourthink.com).`,
-    ``,
-  ].join("\n");
+  return renderTemplate("README.md", { vaultName });
 }
 
 export function getVaultGitignore(): string {
@@ -123,32 +118,32 @@ export function getVaultGitignore(): string {
     ".lyt/lyt.db-wal",
     ".lyt/outbox.db",
     "",
-    "# v1.A.2 — libSQL ledger caches (rebuilt from `.lyt/ledgers/*.yon` SoT",
+    "# libSQL ledger caches (rebuilt from `.lyt/ledgers/*.yon` SoT",
     "# via `lyt vault rebuild-index --ledger <name>` or `lyt sync` post-pull).",
     ".lyt/indexes/",
     "",
-    "# v1.A.2 — YON ledger SoT (audit + provenance) IS committed; ensure",
+    "# YON ledger SoT (audit + provenance) IS committed; ensure",
     "# no parent `.lyt/` rule silently ignores them.",
     "!.lyt/ledgers/",
     "!.lyt/ledgers/**",
     "",
-    "# v1.D.1a — YON lanes index SoT IS committed. The `.lyt/indexes/`",
+    "# YON lanes index SoT IS committed. The `.lyt/indexes/`",
     "# rule above gitignores the libSQL caches; this re-include keeps the",
     "# canonical lanes.yon visible to Git.",
     "!.lyt/indexes/lanes.yon",
     "",
-    "# v1.D.2a — YON arcs index SoT IS committed (position-ordered",
+    "# YON arcs index SoT IS committed (position-ordered",
     "# narrative arcs). Same posture as lanes.yon above.",
     "!.lyt/indexes/arcs.yon",
     "",
-    "# v1.D.4 — agent-priming markdown files (lyt primer output) IS",
+    "# agent-priming markdown files (lyt primer output) IS",
     "# committed by default. Small textual artifacts useful cross-",
     "# machine; the parent `.lyt/` rule above would gitignore them",
     "# without this re-include.",
     "!.lyt/primers/",
     "!.lyt/primers/**",
     "",
-    "# v1.D.5 — Obsidian Canvas visualisations of federation + mesh",
+    "# Obsidian Canvas visualisations of federation + mesh",
     "# graphs (lyt federation canvas / lyt mesh canvas output) IS",
     "# committed by default. Same posture as primers above.",
     "!.lyt/canvases/",

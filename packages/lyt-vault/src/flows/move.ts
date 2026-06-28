@@ -364,6 +364,14 @@ export async function moveVaultFlow(args: MoveVaultArgs): Promise<MoveVaultResul
       ...(vaultParsed.agentTemplateVersion !== null
         ? { agentTemplateVersion: vaultParsed.agentTemplateVersion }
         : {}),
+      // Phase A — preserve scaffold-system version stamps across parse→render.
+      // SEE ALSO: yon/parse.ts ParsedVaultYon + yon/vault.ts renderVaultYon.
+      ...(vaultParsed.templateVersion !== null
+        ? { templateVersion: vaultParsed.templateVersion }
+        : {}),
+      ...(vaultParsed.contractVersion !== null
+        ? { contractVersion: vaultParsed.contractVersion }
+        : {}),
       homeMesh: {
         vaultRid: vault.rid,
         meshRid: targetMesh.rid,

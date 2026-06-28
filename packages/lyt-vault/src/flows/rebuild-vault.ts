@@ -46,7 +46,7 @@ import {
 } from "./rebuild-embeddings.js";
 import { embeddingsEnabled } from "../util/config.js";
 import { modelCachePresent as defaultModelCachePresent } from "../util/embeddings.js";
-import { walkVaultMarkdownFiles } from "./upsert-fts-cache.js";
+import { walkVaultFigmentFiles } from "./upsert-fts-cache.js";
 
 export interface RebuildVaultArgs {
   // Registered vault name.
@@ -143,7 +143,7 @@ export async function rebuildVaultFlow(args: RebuildVaultArgs): Promise<RebuildV
     // search's self-heal — the M2 vector-build UX blocker. The gate decides
     // skip / build-silently / prompt-then-visible-fetch / non-interactive-skip
     // per the tree (see embeddingsBuildGate). rebuildEmbeddingsFlow still
-    // self-degrades to a clean no-op if the model fails to load (ARC-D2).
+    // self-degrades to a clean no-op if the model fails to load.
     const embeddings = await embeddingsBuildGate({
       vault,
       vaultPath: vaultRow.path,
@@ -224,7 +224,7 @@ export async function embeddingsBuildGate(
   if (!embeddingsEnabled()) return null;
 
   // Branch 2 — no notes → nothing to embed; never load/fetch the model.
-  if (walkVaultMarkdownFiles(args.vaultPath).length === 0) return null;
+  if (walkVaultFigmentFiles(args.vaultPath).length === 0) return null;
 
   const modelCachePresent = args.modelCachePresentFn ?? defaultModelCachePresent;
 

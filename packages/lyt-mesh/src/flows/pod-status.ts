@@ -22,6 +22,7 @@ import {
   getDefaultVaultsRoot,
   getFederationRepoDir,
   isProvisionalIdentity,
+  isScaffoldNote,
   listFederationStates,
   listVaults,
   openRegistry,
@@ -154,13 +155,28 @@ function isIndexStale(vaultPath: string): boolean {
     }
   }
   if (dbMtime === 0) return false; // no index db located → cannot assert stale
-  const notesDir = join(vaultPath, "notes");
-  if (!existsSync(notesDir)) return false;
+  // B-4 (figment-roots, A2) — re-root the freshness scan from <vault>/notes/ to
+  // the VAULT ROOT so a markdown edit at the top level also moves the "newest
+  // note" signal. This is a SINGLE-LEVEL (top-level-only) advisory freshness
+  // poll (ratified plan option b): an O(1-level) hot poll, NOT an index-
+  // inclusion walk — routing it through the recursive walker would turn it
+  // O(corpus) and change its semantics. SUBFOLDER edits are deliberately NOT
+  // seen here; deeper figment freshness is covered by the recursive self-heal
+  // watermark (search-cascade.ts `newestFigmentMtimeMs`), not this probe.
+  //
+  // MF5 (fix-pass 2) — apply the scaffold gate (`isScaffoldNote`) so the probe
+  // aligns with the index INCLUSION set: a file the index tiers exclude as
+  // scaffold (the generated `index.md`) must not trip a stale signal the user
+  // can't clear by reindexing. Extension test is case-insensitive to match the
+  // unified predicate's rule; top-level dirs are skipped (files only).
+  if (!existsSync(vaultPath)) return false;
   let newestNote = 0;
   try {
-    for (const f of readdirSync(notesDir)) {
-      if (!f.endsWith(".md")) continue;
-      newestNote = Math.max(newestNote, statSync(join(notesDir, f)).mtimeMs);
+    for (const entry of readdirSync(vaultPath, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.toLowerCase().endsWith(".md")) continue;
+      if (isScaffoldNote(entry.name)) continue; // not indexed → never a freshness signal
+      newestNote = Math.max(newestNote, statSync(join(vaultPath, entry.name)).mtimeMs);
     }
   } catch {
     return false;

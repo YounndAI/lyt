@@ -70,11 +70,12 @@
 // deterministically from the index, so the same query against the same
 // vault set → byte-identical JSON.
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join, posix, sep } from "node:path";
 
 import type { Client } from "@libsql/client";
 
+import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { readIndexWatermark, writeIndexWatermark } from "../util/index-watermark.js";
 import { readFrozenLock } from "../util/freeze-check.js";
@@ -687,7 +688,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
   // embed the query), reorder `results` by fusing the dense cosine ranking into
   // the lexical ranking via the proven confidence-gated rank-preserve rule. ANY
   // miss (model unavailable, zero vectors gathered, embed throws) leaves the
-  // lexical order UNTOUCHED → byte-identical to semantic:false (ARC-D2). The
+  // lexical order UNTOUCHED → byte-identical to semantic:false. The
   // fusion is pure reordering over the already-gathered candidates (no new DB
   // reads), so it cannot starve or change the candidate SET — only its order.
   let semanticFused = false;
@@ -916,33 +917,22 @@ function isVaultStale(vaultPath: string): boolean {
   return newest > watermark;
 }
 
-// Newest mtime (epoch ms) across `<vault>/notes/**/*.md`, or null when the
-// notes tree is absent/empty. Mirrors the notes-walk scope of rebuild-fts /
-// rebuild-lanes (the tiers the self-heal rebuilds).
+// Newest mtime (epoch ms) across the vault's indexable markdown, or null when
+// there is none. B-4: rooted at the VAULT ROOT (not notes/) via the shared
+// `walkVaultMarkdownFiles` + `isIndexable` — the SAME inclusion set the tiers the
+// self-heal rebuilds (FTS / lanes / arcs) now use. Without this re-root, edits
+// under non-`notes/` folders would never bump the watermark and never trigger
+// the L3 self-heal.
 function newestFigmentMtimeMs(vaultPath: string): number | null {
   let newest: number | null = null;
-  const walk = (dir: string): void => {
-    let entries: import("node:fs").Dirent[];
+  for (const p of walkVaultMarkdownFiles(vaultPath, isIndexable)) {
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      const ms = statSync(p).mtimeMs;
+      if (newest === null || ms > newest) newest = ms;
     } catch {
-      return;
+      /* skip unreadable */
     }
-    for (const e of entries) {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) {
-        walk(p);
-      } else if (e.isFile() && p.toLowerCase().endsWith(".md")) {
-        try {
-          const ms = statSync(p).mtimeMs;
-          if (newest === null || ms > newest) newest = ms;
-        } catch {
-          /* skip unreadable */
-        }
-      }
-    }
-  };
-  walk(join(vaultPath, "notes"));
+  }
   return newest;
 }
 

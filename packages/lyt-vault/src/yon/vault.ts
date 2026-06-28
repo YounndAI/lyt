@@ -70,6 +70,19 @@ export interface VaultDoc {
   // mesh (pre-v1.B.3 vaults; vaults created via direct `initVault` without
   // a `homeMesh` arg).
   homeMesh?: VaultHomeMeshRecord | undefined;
+  // Phase A — scaffold-system version stamps. Emitted alongside
+  // `agent_template_version` so consumers can detect schema evolution:
+  //   template_version  — the scaffold template set generation (bumped when
+  //                       the set of files written by initVault changes shape).
+  //                       Uses the same integer as AGENTS_MD_TEMPLATE_VERSION
+  //                       from templates/priming.ts (both describe the same
+  //                       scaffold generation; sharing avoids a 3rd disjoint version).
+  //   contract_version  — the yai.lyt v1 frontmatter contract revision (bumped
+  //                       when FRONTMATTER_FIELDS or MANDATORY_FRONTMATTER_TOKENS
+  //                       change in templates/contract.ts). Starts at 1 for
+  //                       the Phase A baseline.
+  templateVersion?: number | undefined;
+  contractVersion?: number | undefined;
 }
 
 export function renderVaultYon(doc: VaultDoc): string {
@@ -127,6 +140,14 @@ export function renderVaultYon(doc: VaultDoc): string {
   lines.push(`@META key=lifecycle | value=${doc.lifecycle}`);
   if (doc.agentTemplateVersion !== undefined) {
     lines.push(`@META key=agent_template_version | value=${doc.agentTemplateVersion}`);
+  }
+  // Phase A — scaffold-system version stamps (template_version + contract_version).
+  // Emitted AFTER agent_template_version to preserve backward-compat read order.
+  if (doc.templateVersion !== undefined) {
+    lines.push(`@META key=template_version | value=${doc.templateVersion}`);
+  }
+  if (doc.contractVersion !== undefined) {
+    lines.push(`@META key=contract_version | value=${doc.contractVersion}`);
   }
 
   return lines.join("\n") + "\n";

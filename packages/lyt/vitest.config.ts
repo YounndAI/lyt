@@ -9,10 +9,17 @@ export default defineConfig({
     // tests reproducibly crash a worker ("Worker exited unexpectedly") — and
     // non-deterministically (passed-count varied run-to-run), so the suite was
     // green only sometimes, which is itself a gate-integrity defect. pool:forks
-    // + isolate:false + fileParallelism:false run files one-by-one in a single
-    // reused fork → deterministic (validated 19/19 files, 96/96 green).
+    // + fileParallelism:false run files one-by-one in a single sequential fork
+    // → deterministic (the parallelism-free property that avoids that death).
     pool: "forks",
-    isolate: false,
+    // isolate:true (the vitest default) RESETS the module registry between files
+    // so per-file memory is freed instead of accumulating in one reused fork.
+    // With the prior isolate:false the suite OOM-crashed the worker mid-run once
+    // it outgrew its validated 19-file size (24 files now) under the machine's
+    // NODE_OPTIONS --max-old-space-size cap; resetting keeps memory bounded
+    // without per-fork heap tuning. fileParallelism:false (above) is what keeps
+    // determinism — isolation is orthogonal to it.
+    isolate: true,
     fileParallelism: false,
     // npm pack --dry-run --json over 5 workspaces is slow on Windows; allow headroom.
     testTimeout: 60000,

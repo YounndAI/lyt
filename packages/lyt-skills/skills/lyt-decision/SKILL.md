@@ -18,7 +18,7 @@ Record a locked decision — the choice, the alternatives, the reasoning. Use wh
 - `/lyt-decision` slash trigger
 - "lock this decision"
 - "we decided X — record it"
-- after a `/insight-assess` or `/insight-adversarial` lands a locked verdict
+- after a structured assessment or review lands a locked verdict
 - before starting work whose direction depends on a non-obvious choice
 
 ## Phase 1 — Resolve target

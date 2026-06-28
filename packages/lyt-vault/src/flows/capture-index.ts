@@ -51,6 +51,7 @@ import type { Client } from "@libsql/client";
 
 import { closeRegistry, getRegistryPath, openRegistry } from "../registry/client.js";
 import { getVaultByName, getVaultByPath, type VaultRow } from "../registry/repo.js";
+import { isIndexablePath } from "../util/indexable.js";
 import { readFrozenLock } from "../util/freeze-check.js";
 import { writeIndexWatermark } from "../util/index-watermark.js";
 import { reconcileFigmentWrite } from "./reconcile-figment-write.js";
@@ -186,15 +187,17 @@ export async function captureIndexFlow(args: CaptureIndexArgs): Promise<CaptureI
     };
   }
 
-  // SEAM-LEVEL notes/ GUARD (release review R2 fix-pass). The FTS + lanes + arcs
-  // caches scan `notes/**` ONLY (rebuild-fts/lanes/arcs), so indexing a figment
-  // OUTSIDE notes/ would create an FTS row the next full rebuild / sync-pull /
-  // self-heal silently DELETES — incremental-vs-full drift (a figment that
-  // searches today vanishes after the next sync). pattern-run already gates its
-  // own call, but the `lyt capture --index-only` skill seam reaches here with a
-  // caller-supplied path; enforce the invariant at THE SEAM so BOTH callers are
-  // protected. Out-of-scope path → not indexed (by design), not "deferred".
-  if (!isUnderNotes(args.relPath)) {
+  // SEAM-LEVEL inclusion GUARD. B-4: the FTS + lanes + arcs caches now scan the
+  // whole vault via the shared `isIndexable` predicate, so the incremental
+  // index gate must use the SAME predicate (keeps incremental ⊆ full — a figment
+  // indexed here is exactly one the next full rebuild also keeps). The figment is
+  // already on disk at this seam, so we pass `vaultPath` to run the CONTENT gates
+  // (g3 size cap, g4 binary sniff) too — without them a >2MB or NUL-byte file
+  // would be indexed incrementally yet DROPPED by the full rebuild (which always
+  // passes vaultRoot), and the row would vanish on the next reindex. A path the
+  // predicate excludes (non-markdown, under the floor, scaffold index.md, over
+  // the size cap, binary) is not indexed by design, not "deferred".
+  if (!isIndexablePath(args.relPath, undefined, vaultPath)) {
     return {
       vaultName,
       vaultPath,
@@ -202,7 +205,7 @@ export async function captureIndexFlow(args: CaptureIndexArgs): Promise<CaptureI
       ftsIndexed: false,
       keywordsIndexed: false,
       deferred: false,
-      note: `not indexed: ${args.relPath} is outside the indexed notes/ tree (search + primer cover notes/ only).`,
+      note: `not indexed: ${args.relPath} is not an indexable figment (non-markdown, under the system floor, or a scaffold index.md).`,
       durationMs: Date.now() - startedAt,
     };
   }
@@ -390,15 +393,6 @@ async function subscriberRefusalNote(
 function deriveVaultNameFromPath(p: string): string {
   const parts = p.split(/[\\/]+/).filter((x) => x.length > 0);
   return parts[parts.length - 1] ?? "vault";
-}
-
-// True when a vault-relative POSIX path is inside the indexed `notes/` tree (the
-// FTS + lanes + arcs caches scan `notes/**` only). The seam-level invariant that
-// keeps the incremental index consistent with the full rebuild — see the guard
-// in captureIndexFlow (release review R2 fix-pass).
-function isUnderNotes(relPath: string): boolean {
-  const norm = relPath.replace(/\\/g, "/");
-  return norm === "notes" || norm.startsWith("notes/");
 }
 
 function deferNote(reason: string): string {

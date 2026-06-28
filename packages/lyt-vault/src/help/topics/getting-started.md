@@ -41,8 +41,8 @@ This scaffolds `~/lyt/vaults/alex/main/` with:
 - `.lyt/memscope.yon` — access policy (committed)
 - `.lyt/mesh-context.md` — auto-regenerated mesh context (committed)
 - `.obsidian/` — Obsidian config (committed)
-- `lyt-overview.md` — your identity page (user-owned; transcludes mesh-context)
-- `agents.md` — instructions for AI agents driving Lyt in this vault
+- `.lyt/lyt-overview.md` — your identity page (transcludes mesh-context)
+- `.lyt/agents.md` — instructions for AI agents driving Lyt in this vault
 - `notes/index.md` — optional starter Figment (suppress with `--no-starter-figment`)
 - `.gitignore`, `README.md`
 

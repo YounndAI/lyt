@@ -84,7 +84,7 @@ missing, and **stops + notifies if the vault already exists**:
 lyt vault init notes              # bare → personal/notes (personal mesh auto-created)
 lyt vault init company/handbook   # creates the `company` mesh if absent, then the vault
 lyt vault init handbook --mesh company           # same, via the flag
-lyt vault init company/handbook --push-to allemaar   # auto-created mesh is a SHARING mesh
+lyt vault init company/handbook --push-to myorg      # auto-created mesh is a SHARING mesh
 ```
 
 Without `--push-to`, an auto-created mesh is **local-only** (the personal

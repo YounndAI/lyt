@@ -16,10 +16,16 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { getVaultByName, getVaultByRid, listVaults, type VaultRow } from "../registry/repo.js";
+import {
+  getVaultByName,
+  getVaultByPath,
+  getVaultByRid,
+  listVaults,
+  type VaultRow,
+} from "../registry/repo.js";
 import { computeDisplayName, vaultOriginCoordinate } from "../registry/vault-addressing.js";
 import { deriveVaultWritable, type WritabilityVerdict } from "./writability.js";
 import type { GhExecutor } from "../util/gh-discover.js";
@@ -220,4 +226,28 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+// 0.9.7 — `lyt vault info --by-path <cwd>` resolver. Returns the registered vault
+// whose root CONTAINS the given path, or null when the path is not inside any vault.
+// Walks up from the resolved path through its parents (registry stores vault ROOTS,
+// and getVaultByPath matches an exact root), so a cwd inside a vault subdir resolves
+// to its containing vault — matching the documented "resolves only inside a registered
+// vault" contract. Reuses the existing getVaultByPath primitive + the standard
+// openRegistry/closeRegistry lifecycle; no new db-open logic.
+export async function resolveVaultNameByPath(path: string): Promise<string | null> {
+  const db = await openRegistry();
+  try {
+    let dir = resolvePath(path);
+    // Walk parents until a registered vault root matches or we hit the fs root.
+    for (;;) {
+      const row = await getVaultByPath(db, dir);
+      if (row) return row.name;
+      const parent = dirname(dir);
+      if (parent === dir) return null; // reached filesystem root, no match
+      dir = parent;
+    }
+  } finally {
+    await closeRegistry(db);
+  }
 }

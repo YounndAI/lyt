@@ -16,7 +16,7 @@
 
 import { execSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { getIdentity, validateVaultName } from "../util/identity.js";
@@ -26,7 +26,6 @@ import {
   DEFAULT_TEMPLATE,
   type TemplateName,
   getObsidianScaffold,
-  getReadmeContent,
   getVaultGitignore,
 } from "../templates/index.js";
 import {
@@ -35,7 +34,23 @@ import {
   getLytOverviewContent,
   getNotesIndexContent,
 } from "../templates/priming.js";
-import { writeMeshContextFile } from "./mesh-context.js";
+import { FRONTMATTER_CONTRACT_VERSION } from "../templates/contract.js";
+import {
+  payloadForVault,
+  renderSeedFigment,
+  resolveScaffoldTier,
+  type ScaffoldTier,
+} from "../templates/tier-payloads.js";
+import { regenAgentsMd } from "../flows/agents-md-regen.js";
+import { regenReadme } from "../flows/readme-regen.js";
+import {
+  AGENTS_MD_REL_WRITE_PATH,
+  LYT_OVERVIEW_REL_WRITE_PATH,
+  agentsMdWritePath,
+  lytOverviewWritePath,
+  resolveLytOverviewReadPath,
+} from "../util/agent-file-paths.js";
+import { isMeshDefiner, writeMeshContextFile } from "./mesh-context.js";
 import { renderMemscopeYon } from "../yon/memscope.js";
 import { renderVaultYon } from "../yon/vault.js";
 
@@ -102,6 +117,9 @@ export interface InitResult {
   gitInitialized: boolean;
   initialCommitMade: boolean;
   primingFilesWritten: string[];
+  // Phase C (UNIT 1) — which tier payload was materialised. "rich" for a
+  // `{mesh}/main` vault (full seed + mesh-prop write); "mini" for a member vault.
+  tier: ScaffoldTier;
 }
 
 export function initVault(opts: InitOptions): InitResult {
@@ -115,6 +133,12 @@ export function initVault(opts: InitOptions): InitResult {
   const vaultRid = newUuidv7Bytes();
   const memscopeRid = newUuidv7Bytes();
   const createdAt = new Date().toISOString();
+
+  // Phase C (UNIT 1) — branch the scaffold payload by tier. `{mesh}/main` →
+  // rich (full seed + mesh-prop write); non-main → mini. Data-driven: the
+  // branch SELECTS a payload-definition object (templates/tier-payloads.ts); it
+  // does NOT inline the contents, so B-1's contract can later supply the data.
+  const tier = resolveScaffoldTier(opts.name);
 
   writeVaultYon({ vaultPath, name: opts.name, vaultRid, memscopeRid, owner, createdAt, opts });
   writeMemscopeYon({ vaultPath, name: opts.name, vaultRid, memscopeRid, owner });
@@ -132,6 +156,7 @@ export function initVault(opts: InitOptions): InitResult {
     owner,
     parentVaultDisplay: opts.parent ?? null,
     starterFigment: opts.starterFigment !== false,
+    tier,
   });
 
   const gitInit = opts.gitInit ?? true;
@@ -153,6 +178,7 @@ export function initVault(opts: InitOptions): InitResult {
     gitInitialized,
     initialCommitMade,
     primingFilesWritten,
+    tier,
   };
 }
 
@@ -201,6 +227,11 @@ function writeVaultYon(args: WriteVaultYonArgs): void {
     primaryOwner: args.owner,
     lifecycle: "active",
     agentTemplateVersion: AGENTS_MD_TEMPLATE_VERSION,
+    // Phase A — scaffold-system version stamps (reconciled with `version` in @VAULT).
+    // `templateVersion` mirrors AGENTS_MD_TEMPLATE_VERSION (same scaffold generation).
+    // `contractVersion` is the yai.lyt v1 frontmatter contract revision from contract.ts.
+    templateVersion: AGENTS_MD_TEMPLATE_VERSION,
+    contractVersion: FRONTMATTER_CONTRACT_VERSION,
     ...(args.opts.homeMesh !== undefined
       ? {
           homeMesh: {
@@ -250,8 +281,13 @@ function writeObsidianScaffold(vaultPath: string, template: TemplateName): void 
   writeFile(join(dir, "community-plugins.json"), scaffold.communityPluginsJson);
 }
 
+// Phase C (UNIT 4) — the README is written via the managed-block init-once flow
+// (regenReadme). At init the file is absent, so regenReadme writes the full
+// template (markers + boilerplate). Routing through regenReadme (rather than a
+// raw write) keeps the write path identical to the later marker-bounded regen
+// and to the conformance path, so there is ONE README-writing chokepoint.
 function writeReadme(vaultPath: string, name: string): void {
-  writeFile(join(vaultPath, "README.md"), getReadmeContent(name));
+  regenReadme(vaultPath, name);
 }
 
 function writeVaultGitignore(vaultPath: string): void {
@@ -273,7 +309,7 @@ function writeNotesPlaceholder(vaultPath: string): void {
 function writeAuditDirPlaceholder(vaultPath: string): void {
   writeFile(
     join(vaultPath, ".lyt", "audit", ".gitkeep"),
-    "# `lyt audit export` writes per-window markdown files here (arc §8.4).\n",
+    "# `lyt audit export` writes per-window markdown files here.\n",
   );
 }
 
@@ -315,38 +351,140 @@ interface WritePrimingFilesArgs {
   // Not a rid — see writeMeshContextFile which renders it inside a code span.
   parentVaultDisplay: string | null;
   starterFigment: boolean;
+  // Phase C (UNIT 1) — the resolved tier; selects the payload definition.
+  tier: ScaffoldTier;
 }
 
 function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
   const written: string[] = [];
+  const payload = payloadForVault(args.name);
 
-  const overviewPath = join(args.vaultPath, "lyt-overview.md");
+  // Phase D (SC6) — agent-priming files write under `.lyt/` (resolver-owned).
+  const overviewPath = lytOverviewWritePath(args.vaultPath);
   writeFile(
     overviewPath,
     getLytOverviewContent({ vaultName: args.name, desc: args.desc, owner: args.owner }),
   );
-  written.push("lyt-overview.md");
+  written.push(LYT_OVERVIEW_REL_WRITE_PATH);
 
+  // Phase C (UNIT 3 / M1a fix) — render the initial .lyt/mesh-context.md. The
+  // "this vault defines the mesh" signal is NOT seeded as stored prose here:
+  // doing so wrote into the DERIVED mesh-context.md only, and the first mesh op
+  // (regenMeshContextFromYon) erased it. Instead the definer line is DERIVED in
+  // renderMeshContext from the durable structural fact (mesh.yon main_vault_rid
+  // === this vault's rid; see isMeshDefiner). At scaffold time mesh.yon does not
+  // exist yet (mesh-init writes it later), so isMeshDefiner is false now and the
+  // line appears on the first regen after mesh.yon lands — durable by
+  // construction. An explicit --desc still flows through normally; without one,
+  // desc is null exactly as before Phase C.
+  const meshDesc = args.desc ?? null;
   writeMeshContextFile(args.vaultPath, {
     vaultName: args.name,
     parentVaultRid: args.parentVaultDisplay,
     shareWith: [],
     acceptsFrom: [],
-    desc: args.desc ?? null,
+    desc: meshDesc,
+    isMeshDefiner: isMeshDefiner(args.vaultPath),
   });
   written.push(".lyt/mesh-context.md");
 
-  const agentsPath = join(args.vaultPath, "agents.md");
+  const agentsPath = agentsMdWritePath(args.vaultPath);
   writeFile(agentsPath, getAgentsMdContent({ vaultName: args.name }));
-  written.push("agents.md");
+  written.push(AGENTS_MD_REL_WRITE_PATH);
 
+  // Phase C (UNIT 2) — tier seed Figments. Both tiers write a conformant
+  // welcome Figment (sentinel-bearing, FTS-excluded); the rich tier's copy
+  // orients to the whole mesh, the mini tier's to the single vault. The CONTENTS
+  // come from the payload-definition object (tier-payloads.ts), not inlined here.
   if (args.starterFigment) {
     const starterPath = join(args.vaultPath, "notes", "index.md");
     writeFile(starterPath, getNotesIndexContent(args.name));
     written.push("notes/index.md");
+
+    for (const seed of payload.seedFigments) {
+      writeFile(join(args.vaultPath, seed.relativePath), renderSeedFigment(seed));
+      written.push(seed.relativePath);
+    }
   }
 
   return written;
+}
+
+export interface ScaffoldConformanceArgs {
+  vaultPath: string;
+  name: string;
+  desc?: string | undefined;
+  owner?: string | undefined;
+}
+
+export interface ScaffoldConformanceResult {
+  /** Relative paths of files written or regenerated for conformance. */
+  written: string[];
+}
+
+// UNIT 4 — apply scaffold conformance on clone + adopt, not just init.
+//
+// init() scaffolds the priming seeds (lyt-overview.md / agents.md) carrying the
+// `lyt-scaffold: true` sentinel so the g6 gate FTS-excludes them. A vault that
+// arrives via `lyt vault adopt <path>` (B-4 alm-os migration path) or `lyt vault
+// clone <url>` may have NO priming seeds at all — or, worse, a pre-existing
+// agents.md / lyt-overview.md WITHOUT the sentinel that would FTS-pollute the
+// primer. This brings such a vault to conformance.
+//
+// BLAST-RADIUS DISCIPLINE (system-first, but never clobber handler content):
+//   • lyt-overview.md / README.md — ADDITIVE: written only when ABSENT. Their
+//     bodies carry handler-evolvable content (the vault description); we never
+//     overwrite an existing one.
+//   • agents.md — when ABSENT, written fresh (sentinel-bearing). When PRESENT,
+//     run regenAgentsMd: it is marker-bounded (replaces only the LYT_PATTERNS /
+//     LYT_PRIMER sections, preserving user edits + any existing leading
+//     frontmatter). SCOPE BOUNDARY: this conformance does NOT *upgrade* an
+//     existing agents.md to carry the sentinel — if the file is PRESENT WITH
+//     LYT_PATTERNS markers but WITHOUT a `lyt-scaffold:` frontmatter (the shape
+//     a pre-Phase-B / hand-authored agents.md has), the marker-bounded branch
+//     preserves it as-is and it stays sentinel-less (and thus FTS-indexed). The
+//     full-rewrite branch that re-emits the sentinel fires ONLY when markers are
+//     ABSENT. Migrating such existing files to conformance is Phase D's
+//     doctor/heal job, not this fresh-scaffold path. See the Phase-D
+// adopt-upgrade follow-up (release review #2-behavior, deferred per plan).
+//   • README.md + notes/index.md are basename-excluded from FTS regardless of a
+//     sentinel, so they are NOT FTS-pollution vectors; README is still seeded
+//     when absent for a complete scaffold, but no sentinel mutation is forced.
+export function writeScaffoldConformance(
+  args: ScaffoldConformanceArgs,
+): ScaffoldConformanceResult {
+  const written: string[] = [];
+  const owner = args.owner ?? getIdentity();
+
+  // Phase D (SC6) — ADDITIVE: write lyt-overview.md under `.lyt/` only when the
+  // vault has NEITHER a `.lyt/` copy NOR a legacy-root copy (resolveLytOverview-
+  // ReadPath returns the legacy path when one exists, so an adopted vault that
+  // already carries a root lyt-overview.md is left untouched — never duplicated).
+  const overviewReadPath = resolveLytOverviewReadPath(args.vaultPath);
+  if (!existsSync(overviewReadPath)) {
+    const overviewPath = lytOverviewWritePath(args.vaultPath);
+    writeFile(
+      overviewPath,
+      getLytOverviewContent({ vaultName: args.name, desc: args.desc, owner }),
+    );
+    written.push(LYT_OVERVIEW_REL_WRITE_PATH);
+  }
+
+  // README: regenReadme writes-if-absent (managed-block) AND marker-bounded-
+  // regens-if-present (diff-guarded). Mirrors the agents.md conformance below.
+  const readmeRes = regenReadme(args.vaultPath, args.name);
+  if (readmeRes.written) written.push("README.md");
+
+  // agents.md: regenAgentsMd writes-if-absent (sentinel-bearing) AND
+  // marker-bounded-regens-if-present. Either way the conformant file lands.
+  // Phase D (SC6) — regenAgentsMd resolves `.lyt/` (new) vs legacy root; report
+  // the actual relative path it wrote (vault-relative POSIX).
+  const r = regenAgentsMd(args.vaultPath, args.name);
+  if (r.written) {
+    written.push(relative(args.vaultPath, r.path).split(sep).join(posix.sep));
+  }
+
+  return { written };
 }
 
 function runGitInit(vaultPath: string): boolean {
@@ -364,6 +502,13 @@ function runGitInit(vaultPath: string): boolean {
 // Per Phase 5.5 smoke Observation #2: opt-in helper to commit only the lyt
 // scaffold (explicit path list, never `git add -A`) so a user's pre-existing
 // files in --path <existing-dir> are not auto-committed.
+//
+// Phase D (SC6) — the agent-priming files (`agents.md`, `lyt-overview.md`) now
+// live under `.lyt/`, so they are committed transitively by the `.lyt` entry
+// here. They ALSO appear in the per-call `primingFiles` list (as
+// `.lyt/agents.md` / `.lyt/lyt-overview.md`) appended in runInitialCommit — the
+// overlap is harmless (`git add` is idempotent). README + seed Figments stay in
+// the vault tree (README.md + notes/* below).
 const SCAFFOLD_COMMIT_PATHS = [".lyt", ".obsidian", ".gitignore", "README.md", "notes/.gitkeep"];
 
 function runInitialCommit(vaultPath: string, primingFiles: readonly string[]): boolean {

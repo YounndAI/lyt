@@ -14,12 +14,21 @@
  * limitations under the License.
  */
 
+import { buildFrontmatter } from "./contract.js";
+import { renderTemplate } from "./render.js";
+
 // v1.D.5 — bumped 2 → 3 with the addition of the LYT_PRIMER section
 // (agents.md `## Vault primer` between LYT_PRIMER_BEGIN/END markers) and
 // the `## Vault Primer` transclusion in lyt-overview.md. Older v2 agents.md
 // files without LYT_PRIMER markers stay untouched on regen (no surprise-
 // edit) — only NEW files (via `getAgentsMdContent` / `scaffold/init.ts`)
 // get the full v3 template.
+//
+// COUPLED CONSTANT SEE ALSO (bump ALL three when bumping this value):
+//   - yon/vault.ts  `template_version` @META — uses the SAME integer (both
+//     describe the same scaffold-file-set generation; see VaultDoc.templateVersion).
+//   - scaffold/init.ts `writeVaultYon` — passes this value as both
+//     `agentTemplateVersion` AND `templateVersion` to renderVaultYon.
 export const AGENTS_MD_TEMPLATE_VERSION = 3;
 
 export const MESH_CONTEXT_AUTO_BANNER =
@@ -41,44 +50,66 @@ export const AGENTS_MD_PATTERNS_END = "<!-- LYT_PATTERNS_END -->";
 export const AGENTS_MD_PRIMER_BEGIN = "<!-- LYT_PRIMER_BEGIN -->";
 export const AGENTS_MD_PRIMER_END = "<!-- LYT_PRIMER_END -->";
 
+// Phase B (UNIT 1 — C2 sentinel-wiring) — fixed scaffold timestamp.
+//
+// The priming builders (getLytOverviewContent / getAgentsMdContent) now emit a
+// real frontmatter block via the contract SoT (buildFrontmatter) carrying
+// `lyt-scaffold: true`, so the g6 gate (util/indexable.ts SCAFFOLD_RE) FTS-
+// excludes these Lyt-authored seed files. Because these are SCAFFOLD seeds (not
+// user Figments) and the regen chokepoint (flows/agents-md-regen.ts) rewrites
+// the whole file when markers are absent, the frontmatter MUST be deterministic
+// — a wall-clock `created`/`modified` would (a) churn the file on every regen
+// and (b) break the regen-idempotency contract (priming.test.ts). A fixed epoch
+// sentinel timestamp keeps the emitted bytes stable + honest: scaffold seeds are
+// not authored at a meaningful instant, so `created == modified == epoch` is the
+// truthful value, not a fabricated "now".
+const SCAFFOLD_FRONTMATTER_TIMESTAMP = "1970-01-01T00:00:00.000Z";
+
+// Build the deterministic `lyt-scaffold: true` frontmatter block prepended to
+// the priming seed files. Frontmatter ALWAYS flows through buildFrontmatter
+// (the single SoT) — never hand-rolled here.
+function scaffoldFrontmatter(title: string, purpose: string): string {
+  return buildFrontmatter({
+    title,
+    created: SCAFFOLD_FRONTMATTER_TIMESTAMP,
+    modified: SCAFFOLD_FRONTMATTER_TIMESTAMP,
+    tags: [],
+    purpose,
+    topic: "scaffold",
+    lytScaffold: true,
+  });
+}
+
 export interface LytOverviewInput {
   vaultName: string;
   desc: string | null | undefined;
   owner: string;
 }
 
+// UNIT 2 — lyt-overview body is externalized to `templates/lyt-overview.md`.
+// Per-template variable manifest: { vaultName, descBlock, owner }.
+//   - descBlock: the author's `desc` when present, else the "(Add a
+//     description…)" placeholder. render() has no conditionals by design, so the
+//     caller resolves the branch and passes the final block.
+// v1.D.5 `## Vault Primer` transclusion (`![[.lyt/primers/vault-primer]]`) lives
+// statically in the template after `## Mesh Context`.
 export function getLytOverviewContent(input: LytOverviewInput): string {
   const desc = (input.desc ?? "").trim();
-  const lines: string[] = [
-    `# ${input.vaultName}`,
-    ``,
-    `## What this vault is`,
-    ``,
+  const descBlock =
     desc.length > 0
       ? desc
-      : `_(Add a description here. Lyt scaffolded this section once at \`lyt vault init\` and never touches it again — it is yours to evolve.)_`,
-    ``,
-    `## Owner`,
-    ``,
-    input.owner,
-    ``,
-    `## Mesh Context`,
-    ``,
-    `![[.lyt/mesh-context]]`,
-    ``,
-    // v1.D.5 — additive `## Vault Primer` section AFTER `## Mesh Context`
-    // per the ratified default. Transcludes the markdown emitted by `lyt primer
-    // --scope vault` so handlers opening lyt-overview.md in Obsidian see
-    // the primer's hot keywords / active arcs / recent activity / top lanes
-    // inline. The transclusion target may not exist on a fresh vault — in
-    // that case Obsidian renders the embed as an empty placeholder; run
-    // `lyt primer --scope vault --target <vault-name>` to populate it.
-    `## Vault Primer`,
-    ``,
-    `![[.lyt/primers/vault-primer]]`,
-    ``,
-  ];
-  return lines.join("\n");
+      : `_(Add a description here. Lyt scaffolded this section once at \`lyt vault init\` and never touches it again — it is yours to evolve.)_`;
+  // UNIT 1 (C2) — prepend the `lyt-scaffold: true` frontmatter (via the SoT
+  // buildFrontmatter) so this Lyt-authored seed file is FTS/primer-excluded by
+  // the g6 gate (util/indexable.ts SCAFFOLD_RE). Frontmatter NEVER goes through
+  // render() — it flows through the single contract.ts SoT.
+  const frontmatter = scaffoldFrontmatter(input.vaultName, "Lyt vault overview (scaffold seed)");
+  const body = renderTemplate("lyt-overview.md", {
+    vaultName: input.vaultName,
+    descBlock,
+    owner: input.owner,
+  });
+  return frontmatter + body;
 }
 
 export interface InstalledPatternSummary {
@@ -102,60 +133,30 @@ export interface AgentsMdInput {
 export function getAgentsMdContent(input: AgentsMdInput): string {
   const patternsBlock = renderInstalledPatternsSection(input.installedPatterns);
   const primerBlock = renderInstalledPrimerSection(input.vaultName);
-  return [
-    `# Working with Lyt in this vault (for AI agents)`,
-    ``,
-    `<!-- @AGENT_TEMPLATE version=${AGENTS_MD_TEMPLATE_VERSION} -->`,
-    ``,
-    `This vault is a Lyt Vault, part of a federated mesh. Read this file before editing.`,
-    ``,
-    `## What this vault is`,
-    ``,
-    `\`${input.vaultName}\` — see [lyt-overview.md](./lyt-overview.md) for identity + mesh context.`,
-    ``,
-    `## Commands you can run`,
-    ``,
-    `- \`lyt vault info <name>\` — show this vault's metadata`,
-    `- \`lyt vault list\` — show every registered vault on this machine`,
-    `- \`lyt mesh status\` — show the federation graph`,
-    `- \`lyt mesh init --from <manifest>\` — bulk-init a mesh from a YON manifest`,
-    `- \`lyt vault regen-context <name>\` — rewrite \`.lyt/mesh-context.md\` from current edge state`,
-    `- \`lyt vault sync-metadata --vault <name> [--apply]\` — push vault.yon metadata to GitHub (dry-run default)`,
-    `- \`lyt primer --scope vault --target <name>\` — regenerate the vault primer (hot keywords + arcs + recent activity)`,
-    `- \`lyt federation canvas\` / \`lyt mesh canvas --mesh <name>\` — emit Obsidian Canvas visualisations`,
-    `- \`lyt pattern list\` / \`lyt pattern verbs <name>\` / \`lyt pattern run <p> <v> ...\` — manage operational patterns`,
-    `- \`lyt help <topic>\` — full help surface (try \`lyt help patterns\` or \`lyt help skills\`)`,
-    ``,
-    `## How to read this vault`,
-    ``,
-    `- \`.lyt/vault.yon\` — this vault's identity + mesh edges (parent, share_with, topics)`,
-    `- \`.lyt/mesh-context.md\` — auto-regenerated mesh context (transcluded into \`lyt-overview.md\`)`,
-    `- \`.lyt/primers/\` — agent-priming markdown (committed by default; regenerated by \`lyt primer\`)`,
-    `- \`.lyt/canvases/\` — Obsidian Canvas visualisations of federation + mesh graphs (committed; regenerated by \`lyt federation canvas\` + \`lyt mesh canvas\`)`,
-    `- \`.obsidian/\` — Obsidian config (committed)`,
-    `- \`notes/\` — Figments (markdown notes) live here`,
-    `- \`Patterns/\` — symlinks to installed Lyt patterns (machine-local; gitignored)`,
-    ``,
-    `## Etiquette`,
-    ``,
-    `- Tag new Figments with \`tags:\` frontmatter — the federated index uses them.`,
-    `- Use \`[[wikilinks]]\` for cross-Figment + cross-vault references.`,
-    `- Never edit \`.lyt/indexes/*.db\` (libSQL derived state at \`.lyt/indexes/{lyt,audit,provenance}.db\` post-v1.A.2c DB SPLIT, regenerated by \`lyt vault rebuild-index\` from YON ledger SoT in \`.lyt/ledgers/\`).`,
-    `- Never \`git add -A\` — name the paths.`,
-    ``,
-    `## Vault primer`,
-    ``,
-    `${AGENTS_MD_PRIMER_BEGIN}`,
+  // UNIT 1 (C2) — prepend the `lyt-scaffold: true` frontmatter (via the SoT
+  // buildFrontmatter) so agents.md is FTS/primer-excluded by the g6 gate. The
+  // marker-bounded regen (regenAgentsMd) replaces ONLY content between the
+  // LYT_PATTERNS / LYT_PRIMER markers, so this leading frontmatter is preserved
+  // on regen; the full-rewrite branch (markers absent) re-emits it here.
+  const frontmatter = scaffoldFrontmatter(
+    "Working with Lyt in this vault (for AI agents)",
+    "Lyt agent onboarding (scaffold seed)",
+  );
+  // UNIT 2 — agents.md body is externalized to `templates/agents.md`.
+  // Per-template variable manifest: { version, vaultName, primerBlock,
+  // patternsBlock }. The marker-bounded LYT_PRIMER / LYT_PATTERNS sections
+  // live statically in the template; their dynamic CONTENT (computed in TS
+  // below) is injected as the primerBlock / patternsBlock variables. The
+  // marker comments in the template MUST stay byte-identical to the exported
+  // AGENTS_MD_*_BEGIN/END constants (the regen chokepoint locates them by these
+  // literals).
+  const body = renderTemplate("agents.md", {
+    version: String(AGENTS_MD_TEMPLATE_VERSION),
+    vaultName: input.vaultName,
     primerBlock,
-    `${AGENTS_MD_PRIMER_END}`,
-    ``,
-    `## Installed patterns + skills`,
-    ``,
-    `${AGENTS_MD_PATTERNS_BEGIN}`,
     patternsBlock,
-    `${AGENTS_MD_PATTERNS_END}`,
-    ``,
-  ].join("\n");
+  });
+  return frontmatter + body;
 }
 
 function renderInstalledPatternsSection(
@@ -242,19 +243,10 @@ export function regenInstalledPrimerSection(existingContent: string, vaultName: 
   return before + middle + after;
 }
 
+// UNIT 2 — notes/index.md body externalized to `templates/notes-index.md`.
+// Per-template variable manifest: { vaultName }. This seed is excluded from FTS
+// by the isScaffoldNote BASENAME gate (index.md), so it intentionally carries
+// NO lyt-scaffold frontmatter — its body has no frontmatter at all.
 export function getNotesIndexContent(vaultName: string): string {
-  return [
-    `# Index`,
-    ``,
-    `Starter Figment for \`${vaultName}\`. Replace with your own first note, or delete it.`,
-    ``,
-    `## A few wikilink prompts`,
-    ``,
-    `- [[notes/welcome]]`,
-    `- [[notes/inbox]]`,
-    `- [[notes/decisions]]`,
-    ``,
-    `These targets do not exist yet — click any of them in Obsidian to create the file.`,
-    ``,
-  ].join("\n");
+  return renderTemplate("notes-index.md", { vaultName });
 }

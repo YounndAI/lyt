@@ -36,7 +36,7 @@ import type { AutomatorRunEventLevel } from "../registry/vault-db-repo.js";
 
 export function buildAutomatorCommand(): Command {
   const cmd = new Command("automator").description(
-    "Inspect declared automators and their run history (block-B). The `run` subcommand is attached by the meta `lyt` CLI.",
+    "Inspect declared automators and their run history. The `run` subcommand is attached by the meta `lyt` CLI.",
   );
   cmd.addCommand(buildAutomatorListSubcommand());
   cmd.addCommand(buildAutomatorLogSubcommand());

@@ -23,7 +23,12 @@
 // (best-effort recovery) — pod.yon is recoverable from `lyt
 // federation rebuild` if individual records corrupt.
 
-import { vaultRepoName } from "../util/federation-paths.js";
+import { existsSync, readFileSync } from "node:fs";
+
+import type { Client } from "@libsql/client";
+
+import { listFederationStates } from "../registry/federation-state.js";
+import { getFederationYonPath, vaultRepoName } from "../util/federation-paths.js";
 import type {
   FedMeshPushKind,
   FedMeshRecord,
@@ -35,6 +40,34 @@ import type {
   FederationVisibility,
 } from "./federation-write.js";
 import { unescapeQuoted } from "./_helpers.js";
+
+// Phase E — read the pod.yon SoT across every federation state and return the set
+// of vault NAMES whose per-vault `visibility === "public"` (FedVaultRecord;
+// default "private"). This is the LOCKED `lyt-public` trigger — NOT
+// `mesh-visibility` (the per-note frontmatter field). Best-effort + fail-closed:
+// ANY failure (no pod yet, unparseable manifest, missing handle) returns an EMPTY
+// set, so no vault is ever mistakenly tagged public.
+//
+// Extracted from the byte-identical resolvers that previously lived in
+// flows/sync-metadata.ts and flows/doctor.ts (Phase E release review de-dupe). Both
+// import this single function; behavior is unchanged.
+export async function resolvePublicVaultNames(db: Client): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const states = await listFederationStates(db);
+    for (const state of states) {
+      const podYonPath = getFederationYonPath(state.handle);
+      if (!existsSync(podYonPath)) continue;
+      const doc = parseFederationYon(readFileSync(podYonPath, "utf8"));
+      for (const v of doc.vaults) {
+        if (v.visibility === "public") out.add(v.vaultName);
+      }
+    }
+  } catch {
+    // No pod / unparseable manifest → every vault falls back to private.
+  }
+  return out;
+}
 
 export function parseFederationYon(content: string): FederationDoc {
   const fed = parseFederation(content);

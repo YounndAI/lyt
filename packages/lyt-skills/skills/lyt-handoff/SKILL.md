@@ -41,12 +41,12 @@ A good handoff has:
 - **Sources (@SOURCES.required + .optional)** — every file the next agent MUST read before drafting any plan
 - **Resume command** — numbered steps the next agent should follow
 - **Sign-off** — canonical retro path; structured @SESSION_REPORT format if applicable
-- **Activation phrase** — the `/handoff-execute "..."` command to paste into the fresh session
+- **Activation phrase** — the prompt to paste into the fresh session to resume the work
 
-The frontmatter `acceptance` field is load-bearing: the executing agent (via `/handoff-execute`) walks its clauses to verify the work matches the brief.
+The frontmatter `acceptance` field is load-bearing: the executing agent walks its clauses to verify the work matches the brief.
 
 ## Companion skills
 
-- `/handoff-execute` (in the handoff-execute skill) — consumes briefs written by this skill
+- a fresh agent session — consumes the brief written by this skill
 - `/lyt-result` — what the prior session shipped (context for the handoff)
 - `/lyt-retro` — usually written alongside or after the next-session retro

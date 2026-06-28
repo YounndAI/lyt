@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
+import { resolveAgentsMdReadPath } from "../util/agent-file-paths.js";
 import {
   AGENTS_MD_TEMPLATE_VERSION,
   getAgentsMdContent,
@@ -93,7 +94,12 @@ export interface RegenAgentsMdResult {
 // when present (NEW v3 files from getAgentsMdContent OR users who hand-
 // added the markers), the section content refreshes in-place.
 export function regenAgentsMd(vaultPath: string, vaultName: string): RegenAgentsMdResult {
-  const path = join(vaultPath, "agents.md");
+  // Phase D (SC6) — route through the resolver: regen an EXISTING agents.md
+  // in place (whether it lives under `.lyt/` post-move or at the legacy root
+  // pre-migration — back-compat), and write a FRESH one under `.lyt/`. The
+  // resolver returns the `.lyt/` target when neither copy exists, so a brand-new
+  // file is born in the new location.
+  const path = resolveAgentsMdReadPath(vaultPath);
   const installed = collectInstalledPatterns(vaultPath);
   let written = false;
   if (existsSync(path)) {
@@ -105,6 +111,7 @@ export function regenAgentsMd(vaultPath: string, vaultName: string): RegenAgents
       written = true;
     }
   } else {
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, getAgentsMdContent({ vaultName, installedPatterns: installed }), "utf8");
     written = true;
   }

@@ -25,10 +25,11 @@
 // watched vault on startup so a stale pod self-heals.
 //
 // It deliberately delegates to the existing FULL-WALK reconcile
-// (`upsertFtsCache` — `walkMarkdownFiles` + `deleteAllFts` + re-insert).
-// A full-walk truncate+reinsert is the correct shape for a one-time
-// repair: it drops orphan rows (notes deleted off-disk while the index
-// was stale) AND de-duplicates any rows the old bare-INSERT path left
+// (`upsertFtsCache`, which now walks the WHOLE vault via the shared
+// `walkVaultMarkdownFiles` + `isIndexable` predicate — B-4 — + `deleteAllFts`
+// + re-insert). A full-walk truncate+reinsert is the correct shape for a
+// one-time repair: it drops orphan rows (figments deleted off-disk while the
+// index was stale) AND de-duplicates any rows the old bare-INSERT path left
 // behind. The PER-WRITE path stays incremental
 // (flows/reconcile-figment-write.ts) — full-walk is heal-only.
 //
@@ -40,8 +41,9 @@ import { upsertFtsCache } from "./upsert-fts-cache.js";
 
 export interface BackfillFigmentCachesResult {
   vaultPath: string;
-  // True when the vault had at least one note under `notes/` and the FTS
-  // cache was (re)built. False when `notes/` is missing/empty.
+  // True when the vault had at least one indexable figment ANYWHERE under the
+  // vault root (B-4: no longer `notes/`-scoped) and the FTS cache was (re)built.
+  // False when the vault holds no indexable markdown.
   ran: boolean;
   // Number of figment rows written to the FTS cache.
   ftsDocsUpserted: number;

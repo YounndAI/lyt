@@ -63,7 +63,7 @@ interface SearchCliOpts {
   // dense-retrieval fusion. Commander negatable flag: `semantic` defaults
   // true; `--no-semantic` → false. The flow's gate (semantic ?? embeddingsEnabled())
   // still decides whether fusion actually runs, so a pod with embeddings off
-  // stays byte-identical (ARC-D2) even with the default-on flag.
+  // stays byte-identical even with the default-on flag.
   semantic?: boolean;
 }
 

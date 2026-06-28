@@ -16,7 +16,7 @@
 
 // Mesh op stubs (block-B Commit 4 → block-C consumer).
 //
-// Per brief @TASK clause (3) and arc-thoughts §6.11:449-450:
+// Per brief clause (3) and arc-thoughts §6.11:449-450:
 // std:mesh.pull@v1 — block-C: Pattern B pull from child vault
 // std:mesh.propagate@v1 — block-C: tag/metadata propagation
 //
@@ -42,7 +42,7 @@ function makeMeshStub(op: string): OpHandler {
     return {
       status: "stub",
       op,
-      warning: `${op} is stubbed in block-B; real handler ships at block-C (mesh automator core)`,
+      warning: `${op} is not yet implemented; a real handler is planned for a future release (mesh automator core)`,
       args,
     };
   };

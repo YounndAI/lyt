@@ -668,12 +668,12 @@ function renderPrimerMarkdown(args: RenderArgs): string {
   lines.push("");
 
   if (args.isFederationStub) {
-    lines.push("> [!warning] Federation-repo not shipped yet (v1.A.0 pending).");
+    lines.push("> [!warning] Federation-repo not shipped yet.");
     lines.push(
       "> This file is a per-vault stub written into the first-vault-by-name's `.lyt/primers/`.",
     );
     lines.push(
-      "> Full federation aggregation across `~/lyt/pod/primers/` lands in v1.A.0 + v1.D.4d.",
+      "> Full federation aggregation across `~/lyt/pod/primers/` is coming in a future release.",
     );
     lines.push("");
   }

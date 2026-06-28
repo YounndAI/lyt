@@ -67,7 +67,7 @@ export interface RebuildIndexResult {
 const SPLIT_DB_BASES = ["lyt", "audit", "provenance"] as const;
 const DB_SIDECAR_SUFFIXES = ["", "-shm", "-wal"] as const;
 
-const STUB_SCHEMA_VERSION = "v1.0-block-a";
+const STUB_SCHEMA_VERSION = "v1.0";
 
 // Re-derives the per-vault libSQL projection from the markdown YON source-of-
 // truth in `.lyt/`. Per arc §8.5: libSQL is per-machine, .gitignore'd, and

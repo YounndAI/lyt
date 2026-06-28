@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Lyt op surface (block-B Commit 4).
+// Lyt op surface.
 //
 // Per arc-thoughts §6.11:443-450 lyt-runner registers 7 std ops with the
 // underlying yon-runner:

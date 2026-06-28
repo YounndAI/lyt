@@ -40,7 +40,7 @@ import type { Client } from "@libsql/client";
 
 import { closeVaultDb, openLytDb } from "../registry/vault-db.js";
 import { deleteAllEmbeddings, upsertEmbeddingForFigment } from "../registry/embeddings-repo.js";
-import { extractFtsBody, toVaultRelPosix, walkVaultMarkdownFiles } from "./upsert-fts-cache.js";
+import { extractFtsBody, toVaultRelPosix, walkVaultFigmentFiles } from "./upsert-fts-cache.js";
 import { loadEmbedder, type Embedder } from "../util/embeddings.js";
 
 export interface UpsertEmbeddingsCacheResult {
@@ -105,7 +105,7 @@ export async function upsertEmbeddingsCache(
   // loadEmbedder(). This closes the C-1 chain where `lyt reindex` on a fresh
   // (note-less) vault silently downloaded the model. (Was: loadEmbedder ran
   // first, the empty-check second — so the fetch happened even with 0 notes.)
-  const noteFiles = walkVaultMarkdownFiles(vaultPath);
+  const noteFiles = walkVaultFigmentFiles(vaultPath);
   if (noteFiles.length === 0) {
     return {
       vaultPath,

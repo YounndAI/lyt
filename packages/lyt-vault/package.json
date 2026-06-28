@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-vault",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Lyt vault primitive — CLI verbs to create and manage individual Lyt Vaults (folder + .obsidian + .lyt scaffold).",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -37,6 +37,7 @@
   },
   "files": [
     "dist",
+    "templates",
     "obsidian-plugins",
     "scripts/postinstall.mjs",
     "README.md",
@@ -48,9 +49,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
+    "test:changed": "vitest run --changed",
+    "test:related": "vitest run related --",
     "clean": "rimraf --glob dist .turbo *.tsbuildinfo",
+    "smoke:dist": "node ./scripts/smoke-built-dist.mjs",
     "postinstall": "node ./scripts/postinstall.mjs",
-    "prepack": "npm run clean && npm run build",
+    "prepack": "npm run clean && npm run build && npm run smoke:dist",
     "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
   },
   "dependencies": {

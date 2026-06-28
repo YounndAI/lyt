@@ -203,11 +203,39 @@ interface InstallOneOutput {
 function installOne(input: InstallOneInput): InstallOneOutput {
   const { sourceSkillDir, targetSkillDir, copy, force, symlinkFn, collisionStampFn } = input;
 
-  if (!existsSync(targetSkillDir)) {
-    return { status: createLink(sourceSkillDir, targetSkillDir, copy, symlinkFn) };
+  // Use lstatSync (does NOT follow symlinks) to detect the entry — even when
+  // existsSync would return false because the link is dangling (link entry on
+  // disk but its target directory was removed, e.g. bundled-skills source moved
+  // on a version upgrade).
+  //
+  // The pre-0.9.6 guard was `if (!existsSync(targetSkillDir))` which follows
+  // symlinks: a dangling link makes existsSync return false → we fell into
+  // createLink → symlinkFn(source, target) threw EEXIST (target entry exists as
+  // a dead link) → EEXIST is not EPERM/EACCES so the copy-fallback did NOT catch
+  // it → crash. Fix: lstat first; if the entry is a dangling symlink, heal it
+  // (rmSync the dead link) then install fresh.
+  let stat: ReturnType<typeof lstatSync> | null = null;
+  try {
+    stat = lstatSync(targetSkillDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      // Nothing there at all — genuine fresh install.
+      return { status: createLink(sourceSkillDir, targetSkillDir, copy, symlinkFn) };
+    }
+    throw err;
   }
 
-  const stat = lstatSync(targetSkillDir);
+  // stat is non-null: something exists at targetSkillDir.
+  // Dangling-symlink case: the entry is a symlink but its resolved target is gone.
+  if (stat.isSymbolicLink() && !existsSync(targetSkillDir)) {
+    // Dead link — heal by removing it before installing fresh.
+    rmSync(targetSkillDir, { recursive: true, force: true });
+    const newStatus = createLink(sourceSkillDir, targetSkillDir, copy, symlinkFn);
+    return {
+      status: "replaced",
+      message: `healed dangling symlink (target was missing); now ${newStatus}`,
+    };
+  }
 
   if (stat.isSymbolicLink()) {
     const existingTarget = resolve(readlinkSync(targetSkillDir));

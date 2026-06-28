@@ -84,5 +84,4 @@ lyt mesh list --json                               # 4 meshes, 4 home vaults
 ## See also
 
 - `lyt help federation` — Your Pod (the per-user federation repo).
-- `lyt help public-mesh` — publishing and subscribing across pods.
-- `lyt help multi-mesh` — the full vault/mesh/federation model.
+- `lyt help multi-mesh` — the full vault/mesh/federation model (incl. publishing + subscribing across pods).

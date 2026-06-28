@@ -37,6 +37,7 @@ import { meshInitFlow } from "./mesh-init.js";
 import type { FederationGhClient, FederationRepoVisibility } from "../util/gh-federation.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import { registerVaultFromYon } from "./register.js";
+import { indexScaffoldFtsOnCreate } from "./upsert-fts-cache.js";
 
 export interface InitFlowResult extends InitResult {
   registered: boolean;
@@ -285,6 +286,12 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
     // Per-vault libSQL initialised on creation so the 6 schemas are queryable
     // on first read, not lazily on first write. Block-A Commit 4 invariant.
     await initVaultDbs(result.vaultPath);
+
+    // B-4 / Decision-B (B2): index the scaffold figments into FTS at create so a
+    // freshly-init'd vault has FTS == on-disk-indexable and doctor's
+    // index-fts-smoke canary does not false-warn (exit 2) on it. Shared seam +
+    // full rationale: indexScaffoldFtsOnCreate (upsert-fts-cache.ts).
+    await indexScaffoldFtsOnCreate(result.vaultPath);
 
     const registered = await registerVaultFromYon(db, { vaultPath: result.vaultPath });
 
