@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-vault",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Lyt vault primitive — CLI verbs to create and manage individual Lyt Vaults (folder + .obsidian + .lyt scaffold).",
   "homepage": "https://linkyourthink.com",
   "repository": {

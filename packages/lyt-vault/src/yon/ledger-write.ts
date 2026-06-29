@@ -34,7 +34,7 @@
 // Chain-hash contract: every `@STAMP` carries `hash="<sha256-of-prior-record-bytes>"`
 // — for the first record in a file, `hash="-"`. Tamper detection lives at
 // rebuild time: the walker re-computes the chain and warns on mismatch
-// (cheap to compute, expensive to forge). Per arc §11.4 + brief
+// (cheap to compute, expensive to forge). Per arc §11.4 + brief @TASK
 // clause (h).
 //
 // v1.A.2 ships @AUDIT + @PROVENANCE record types; new types are appended

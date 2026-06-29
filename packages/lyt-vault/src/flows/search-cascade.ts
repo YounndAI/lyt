@@ -688,7 +688,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
   // embed the query), reorder `results` by fusing the dense cosine ranking into
   // the lexical ranking via the proven confidence-gated rank-preserve rule. ANY
   // miss (model unavailable, zero vectors gathered, embed throws) leaves the
-  // lexical order UNTOUCHED → byte-identical to semantic:false. The
+  // lexical order UNTOUCHED → byte-identical to semantic:false (ARC-D2). The
   // fusion is pure reordering over the already-gathered candidates (no new DB
   // reads), so it cannot starve or change the candidate SET — only its order.
   let semanticFused = false;

@@ -32,6 +32,8 @@ When the user runs `/lyt-primer-context`, or says something like:
 
 Invoke this skill **proactively** before a knowledge-work task whenever the agent needs scope-wide situational awareness (recent activity, dominant themes, in-progress arcs). Don't bypass it and start fabricating context.
 
+**Disambiguator vs `/lyt-mesh-explore`** (mesh-scope only). "**state / active arcs / what's happening / lately** in mesh `<name>`" (recent activity, top keywords, in-progress arcs) → `/lyt-primer-context --scope mesh --target <name>` (this skill — dynamic live state). "**structure / metadata / what's IN** mesh `<name>`" (which vaults, rid, push target) → `/lyt-mesh-explore` (static mesh shape). The split is live-state-vs-static-shape: if the user asks what's _going on_ in the mesh, route here; if they ask what the mesh _contains_, route to `/lyt-mesh-explore`.
+
 ## Phase 1 — Determine scope + target from user signal
 
 The `lyt primer` verb requires `--scope` and rejects ambiguity. Pick by the user's wording (default is federation when no scope signal):

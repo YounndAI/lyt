@@ -40,11 +40,11 @@ import { indexScaffoldFtsOnCreate } from "./upsert-fts-cache.js";
 
 // v1.B.1 — `lyt mesh init <name>` flow.
 //
-// Source: Brief steps 1-2 + lyt-federation-design.md §3 (mesh.yon
+// Source: Brief @TASK steps 1-2 + lyt-federation-design.md §3 (mesh.yon
 // schema verbatim, lines 121-151) + lyt-master-plan.md §5 v1.B.1 + Brief
 // @CONTINUATION §5 (mesh.yon initial-state shape).
 //
-// Order of operations (Brief step 2):
+// Order of operations (Brief @TASK step 2):
 // (a) validate <name> as mesh-name slot (no `/`, slug-safe — validateMeshName)
 // (b) resolve --parent <existing-mesh> → mesh's main_vault_rid as parentVaultRid
 // for the new main vault (BLOB FK on vaults.parent_vault per v1.A.1b)

@@ -45,7 +45,8 @@
     "manypkg:check": "manypkg check",
     "manypkg:fix": "manypkg fix",
     "precheck-publish": "node scripts/check-no-vendored-deps.mjs && node scripts/npm-publish-precheck.mjs && node scripts/doc-cli-accuracy-check.mjs && node scripts/doc-facts-check.mjs",
-    "prepublishOnly": "npm run precheck-publish"
+    "prepublishOnly": "npm run precheck-publish",
+    "promote-latest": "node scripts/public-release/promote-dist-tag.mjs"
   },
   "devDependencies": {
     "@manypkg/cli": "^0.25.1",

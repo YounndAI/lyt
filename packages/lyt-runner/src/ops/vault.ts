@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Real vault ops.
+// Real vault ops (block-B Commit 4).
 //
 // Per arc-thoughts §6.6:201-216 the 5-step protocol fronts the automator
 // body with `std:vault.sync@v1` (git pull) and follows it with

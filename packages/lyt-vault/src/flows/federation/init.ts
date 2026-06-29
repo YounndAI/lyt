@@ -312,7 +312,7 @@ export async function federationInitFlow(
     // is genuinely no manifest to preserve (fresh / local forge, or an adopted pod
     // whose remote lacked one). The end-of-flow regen re-derives pod.yon from the
     // registry once the recovered vaults are registered, so the derived-manifest
-    // invariant still holds on every branch.
+    // invariant (Brief A) still holds on every branch.
     const podYonAlreadyCloned = branch === "adopted" && existsSync(fedYonPath);
     if (!podYonAlreadyCloned) {
       const yon = renderFederationYon({

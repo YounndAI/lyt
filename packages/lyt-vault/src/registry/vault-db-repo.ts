@@ -25,7 +25,7 @@
 //
 // Source: arc-thoughts §6.6 (5-step protocol) + §6.9 (observability —
 // automator_run_events level enum + audit_log action enum) + §11.4
-// (pre-write hook 6-step contract) + brief clauses 5 + 8 + @ACCEPT.h.
+// (pre-write hook 6-step contract) + brief @TASK clauses 5 + 8 + @ACCEPT.h.
 
 import type { Client } from "@libsql/client";
 

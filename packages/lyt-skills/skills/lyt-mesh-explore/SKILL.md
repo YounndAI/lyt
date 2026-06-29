@@ -35,6 +35,8 @@ When the user runs `/lyt-mesh-explore <mesh>`, or says something like:
 
 If the user wants a survey across _all_ their meshes (the pod-level view), prefer `/lyt-pod`. If the user wants to search content _inside_ the mesh's vaults, prefer `/lyt-search --mesh <name>`. This skill is the mesh-scoped drill-down between those two surfaces.
 
+**Disambiguator vs `/lyt-primer-context`.** "**structure / metadata / what's IN** mesh `<name>`" (which vaults, rid, push target) → `/lyt-mesh-explore` (this skill — static mesh shape). "**state / active arcs / what's happening / lately** in mesh `<name>`" (recent activity, top keywords, in-progress arcs) → `/lyt-primer-context --scope mesh --target <name>` (dynamic priming context). The split is static-shape-vs-live-state: if the user asks what the mesh _contains_, route here; if they ask what's _going on_ in it, route to `/lyt-primer-context`.
+
 ## Phase 1 — Resolve mesh name from user signal
 
 The CLI verb takes one required positional `<mesh>` (the mesh name). Pick by the user's wording:
@@ -135,7 +137,7 @@ Synthesis rules:
 - **MUST pass `--json`** on every invocation. Human-readable output is not a contract this skill parses.
 - **MUST resolve mesh names via `lyt mesh list --json` before passing them.** The canonical mesh-enumeration verb is `lyt mesh list`. Do not guess names.
 - **MUST reject `--`-leading resolved mesh names** before passing them to the positional `<mesh>` argument (the flag-injection defense family).
-- **MUST NOT cite `lyt mesh status`** as a verb. It does not exist. The canonical mesh-listing verb is `lyt mesh list`; the canonical single-mesh-inspection verb is `lyt mesh info` (this skill).
+- **MUST NOT cite `lyt mesh status` for single-mesh inspection.** It DOES exist, but it renders the local mesh graph (vault list grouped by parent_vault subtrees), not one mesh's metadata. The canonical mesh-listing verb is `lyt mesh list`; the canonical single-mesh-inspection verb is `lyt mesh info` (this skill).
 - **MUST NOT modify or write any vault file.** This is a read-only skill (`requires_writable_vault: false`). If the user wants the mesh overview persisted to a Figment, run `/lyt-capture` separately on the formatted output.
 - **MUST NOT pass `--remote` by default.** LOCAL is the default; pass `--remote` only on explicit user signal ("without cloning", "from GitHub", "peek at the published mesh.yon", "remote").
 - **MUST NOT invent edge or subscription bullets.** `lyt mesh info` does not emit them. For pod-wide subscription overview use `/lyt-pod`; for cross-mesh edges, inspect `.lyt/mesh.yon` directly (out of scope for this skill).

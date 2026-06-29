@@ -143,7 +143,7 @@ export async function rebuildVaultFlow(args: RebuildVaultArgs): Promise<RebuildV
     // search's self-heal — the M2 vector-build UX blocker. The gate decides
     // skip / build-silently / prompt-then-visible-fetch / non-interactive-skip
     // per the tree (see embeddingsBuildGate). rebuildEmbeddingsFlow still
-    // self-degrades to a clean no-op if the model fails to load.
+    // self-degrades to a clean no-op if the model fails to load (ARC-D2).
     const embeddings = await embeddingsBuildGate({
       vault,
       vaultPath: vaultRow.path,

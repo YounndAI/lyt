@@ -559,7 +559,7 @@ async function doFreshBranch(
 
   // (a) Scaffold the personal mesh (which scaffolds personal/main as the
   // mesh's main vault per meshInitFlow). `noPush: true` per the ratified default;
-  // the handler explicitly publishes later via `lyt sync`. The
+  // the handler explicitly publishes later via `lyt sync` (Brief B). The
   // identity established above lets the scaffold's getIdentity() resolve
   // locally gh-less (V-A-1).
   await onPhase("git-init", "your personal mesh + main vault");

@@ -26,6 +26,8 @@ When the user runs `/lyt-sync`, or says something like:
 
 If the user says "save and sync" or "/lyt-capture then sync", run /lyt-capture first, then /lyt-sync on the destination vault.
 
+**Pod-wide sync: the `lyt sync` verb.** This skill's per-vault git flow (below) is the documented default for a **single named vault**. When the user wants to **sync everything** ("sync all my vaults", "sync my whole pod", "sync everything"), there is a real pod-wide CLI verb: `lyt sync` (no vault argument) syncs all registered active vaults — commit + push + pull --rebase — and also runs the federation publish pass. `lyt sync --watch` is a foreground daemon that auto-commits watched vaults (event-driven). `lyt sync --check` reports per-vault freshness without writing. There is **no** `lyt sync --mesh` flag; mesh-scoped sync is not a current verb.
+
 ## Phase 1 — Resolve the target vault
 
 Follow this chain, in order, and stop at the first success (mirrors /lyt-capture Phase 1):
@@ -111,7 +113,7 @@ The actual reason strings emitted by `vault info --json` are listed in the **emi
 | `subscriber-default-false`           | (subscriber)                | `false`     | Skip push. Report: _"Skipped push: this is a subscriber vault. Subscriber vaults pull but don't push. Capture into your home vault instead."_                  |
 | `gh-unavailable`                     | (gh-offline)                | `"unknown"` | Skip push. Report: _"Skipped push: gh CLI is unavailable (offline / rate-limited / not authenticated). Re-try when network is available."_                     |
 | `no-remote`                          | (no-remote)                 | `"unknown"` | Skip push. Report: _"Skipped push: vault has no git remote configured. Configure a remote with `gh repo create` or `git remote add origin <url>`."_            |
-| `orphan-vault`                       | (orphan)                    | `"unknown"` | Skip push. Report: _"Skipped push: vault has no mesh role (orphan). Adopt into a mesh with `lyt mesh adopt --cluster <name>`."_                                |
+| `orphan-vault`                       | (orphan)                    | `"unknown"` | Skip push. Report: _"Skipped push: vault has no mesh role (orphan). Re-attach it with `lyt repair --target <vault> --apply --mesh <mesh>` (the single-orphan-vault verb; `lyt mesh adopt --cluster` is for orphan-MESH clusters, not one vault)."_                                |
 
 **Note on emitted vs semantic names.** The semantic names `home-pushable-true` and `home-not-pushable-false` are documentation aliases for the actual emitted strings `gh-viewerCanPush-true` and `gh-viewerCanPush-false`, kept so future renames of the underlying enum don't silently break the skill prose. The 4 other reason strings (`subscriber-default-false`, `gh-unavailable`, `no-remote`, `orphan-vault`) are identical in both surfaces.
 
@@ -135,7 +137,7 @@ Final handler-facing result shape:
 - **MUST gate push on `vault.writable` / `vault.writableDetermination`.** Never `git push` unless `writableDetermination === "gh-viewerCanPush-true"` (equivalently, `writable === true`). The other 5 reasons all skip push.
 - **MUST branch on all 6 reasons.** Each has a distinct handler-facing message; collapsing them into a generic "can't push" message loses semantic signal the handler needs to recover.
 - **MUST NOT add a `Co-Authored-By` trailer** to the auto-commit. Per the project's `CLAUDE.md` commit conventions, unless the user explicitly requests one.
-- **MUST NOT touch any vault other than the resolved target.** Sync is single-vault. A multi-vault sweep is `mesh clone-all` / a future `lyt sync --mesh` verb, not this skill.
+- **MUST NOT touch any vault other than the resolved target.** This skill's per-vault flow is single-vault. A pod-wide multi-vault sweep is the `lyt sync` verb (no vault argument — see "Pod-wide sync" above) or `mesh clone-all`, not this skill's per-vault path. There is no `lyt sync --mesh` flag.
 - **MUST NOT modify `.lyt/vault.yon`, `.lyt/mesh.yon`, ledger YONs, or `@STAMP` blocks.** Those are runner / writer concerns; sync only commits handler-authored content as-is.
 - **MUST NOT silently degrade `writable === "unknown"` to push.** Surface the reason to the handler.
 

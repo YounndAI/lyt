@@ -16,7 +16,7 @@
 
 // Mesh op stubs (block-B Commit 4 → block-C consumer).
 //
-// Per brief clause (3) and arc-thoughts §6.11:449-450:
+// Per brief @TASK clause (3) and arc-thoughts §6.11:449-450:
 // std:mesh.pull@v1 — block-C: Pattern B pull from child vault
 // std:mesh.propagate@v1 — block-C: tag/metadata propagation
 //

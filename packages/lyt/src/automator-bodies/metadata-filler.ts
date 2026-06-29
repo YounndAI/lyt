@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Metadata-filler automator body.
+// Metadata-filler automator body (block-B Commit 7).
 //
 // Per arc-thoughts §6.13 Example 1 (LOCKED 2026-05-27) + the bundled
 // declaration at packages/lyt-vault/src/scaffold/defaults/automators/

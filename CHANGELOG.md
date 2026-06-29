@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.9.8] — 2026-06-29
+
+### Fixed
+- **`/lyt-recall` no longer instructs filesystem grep.** It predated `lyt search` and told agents to discover vault content via the Grep tool; it now wraps `lyt search "<query>" --vault <name> --json` (the tiered-cascade engine). Surfaced by dogfooding a live Codex agent that string-searched a vault instead of searching it.
+- **Stale skill-body claims corrected:** `lyt-mesh-explore` (`lyt mesh status` wrongly called nonexistent — it renders the mesh graph), `lyt-sync` orphan-vault recovery (`mesh adopt --cluster` → `lyt repair --target … --apply --mesh …`), `lyt-recall` vault-scope cascade tiers, and stale `lyt-search` cross-references.
+- **Routing-collision disambiguators** across the search/pod/mesh-explore/primer/capture skills (incl. a `When NOT to invoke` block for `lyt-capture`).
+
+### Added
+- **Manual `[lyt.no-grep]` hard-negative:** the injected agent manual now bans filesystem discovery (`Grep`/`rg`/`find`/`Glob`/`Get-ChildItem`) of vault content — discovery goes through `lyt search`/`lyt recall` only. A behavioral class-fence independent of any skill body.
+- **Build-time skill-body staleness lint** — gates the grep-discovery anti-pattern and ensures search-capability skills route through `lyt search`.
+- **`lyt doctor` agent-manual freshness check** — warns when an installed manual's marker version lags the CLI version, with the `lyt agent-manual --install` remedy.
+
+### Changed
+- Coordinated monorepo version bump to 0.9.8 across the publish set + the Obsidian plugin manifest.
+
+---
 ## [0.9.7] — 2026-06-27
 
 Alpha update — release hardening, test-gate reliability, and scaffold-layout cleanup. No user-facing CLI or format changes beyond the `.lyt/` priming-file move below.

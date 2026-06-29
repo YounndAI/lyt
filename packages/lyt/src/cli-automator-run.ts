@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// `lyt automator run <rid|name>` subcommand.
+// `lyt automator run <rid|name>` subcommand (block-B Commit 7).
 //
 // Lives in the meta @younndai/lyt CLI because runFiveStep pulls in lyt-runner
 // and lyt-runner depends on lyt-vault — registering `run` inside lyt-vault

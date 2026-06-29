@@ -42,6 +42,12 @@ import {
 } from "../util/failure-log.js";
 import { isNearExpiry, readFrozenLock } from "../util/freeze-check.js";
 import { checkReadmePresent } from "./readme-regen.js";
+import {
+  INSTALLABLE_RUNTIMES,
+  MARKER_VERSION_RE,
+  readPackageVersion,
+  resolveRuntimeDestination,
+} from "./agent-manual.js";
 import { findLegacyAgentFiles } from "../util/agent-file-paths.js";
 import { baseTopicsForClass } from "../scaffold/github-defaults.js";
 import { parseOwnerRepoFromUrl, realGhClient, type GhClient } from "../util/gh.js";
@@ -108,6 +114,14 @@ export interface DoctorOptions {
   // gh is authenticated AND a client is present; otherwise it emits `info`
   // (skipped) so an offline doctor never fails on it.
   ghClient?: GhClient | undefined;
+  // Agent-manual freshness check seams. `homedirOverride` defaults to os
+  // homedir() (resolves ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md,
+  // ~/.agents/AGENTS.md via the agent-manual flow's resolver). `versionOverride`
+  // defaults to the lyt-vault package version (the same source the agent-manual
+  // flow stamps into the marker). Tests inject both to fixture a stale/matching
+  // manual without touching the real home dir.
+  homedirOverride?: string | undefined;
+  agentManualVersionOverride?: string | undefined;
 }
 
 export interface DoctorResult {
@@ -362,6 +376,13 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
   }
 
   checks.push(await checkMachineState());
+
+  checks.push(
+    checkAgentManualFreshness({
+      homedirOverride: opts.homedirOverride,
+      versionOverride: opts.agentManualVersionOverride,
+    }),
+  );
 
   checks.push(checkSettingsJson(cwdFn()));
 
@@ -908,6 +929,86 @@ function checkSettingsJson(repoCwd: string): CheckResult {
     message: exists
       ? `found at ${settingsPath}`
       : `not found at ${settingsPath} (optional — see 'lyt help settings')`,
+  };
+}
+
+// Agent-manual freshness probe. The agent manual is injected into each
+// runtime's global instructions file (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md,
+// ~/.agents/AGENTS.md) wrapped in `<!-- lyt-manual vX.Y.Z BEGIN -->` ... END
+// markers. The marker version should track the lyt-vault package version; when
+// it lags, the installed manual is stale and the remedy is
+// `lyt agent-manual --install`. Nothing else surfaces this drift, so doctor is
+// the canary. READ-ONLY: this check only reads each destination file (never
+// writes — the install is a separate, explicit verb).
+//
+// Status mapping:
+// - no manual installed anywhere → info (nothing to grade)
+// - every present manual's marker version === the package version → pass
+// - any present manual lags (or its marker is unparseable) → warn, naming the
+//   file + stale version + the `lyt agent-manual --install` remedy. WARN, not
+//   fail: a stale manual is a documentation-freshness issue, never a broken pod.
+// (marker-version capture regex `MARKER_VERSION_RE` imported from agent-manual.js — single source of the marker grammar)
+
+function checkAgentManualFreshness(opts: {
+  homedirOverride?: string | undefined;
+  versionOverride?: string | undefined;
+}): CheckResult {
+  const id = "agent-manual.freshness";
+  const group = "agent-manual";
+  const label = "installed agent manual matches lyt version";
+  const current = opts.versionOverride ?? readPackageVersion();
+
+  const present: { runtime: string; path: string; version: string | null }[] = [];
+  for (const runtime of INSTALLABLE_RUNTIMES) {
+    const dest = resolveRuntimeDestination(runtime, opts.homedirOverride);
+    if (dest === null || !existsSync(dest)) continue;
+    let markerVersion: string | null = null;
+    try {
+      const content = readFileSync(dest, "utf8");
+      const m = MARKER_VERSION_RE.exec(content);
+      markerVersion = m && m[1] !== undefined ? m[1] : null;
+    } catch {
+      // Unreadable destination — treat as absent (skipped below), not graded.
+      markerVersion = null;
+    }
+    if (markerVersion === null) continue; // file exists but carries no manual block
+    present.push({ runtime, path: dest, version: markerVersion });
+  }
+
+  if (present.length === 0) {
+    return {
+      id,
+      group,
+      label,
+      status: "info",
+      message: `no agent manual installed (run \`lyt agent-manual --install\` to inject it; current lyt v${current})`,
+    };
+  }
+
+  const stale = present.filter((p) => p.version !== current);
+  if (stale.length > 0) {
+    return {
+      id,
+      group,
+      label,
+      status: "warn",
+      message: `${stale.length} installed agent manual(s) lag lyt v${current}: ${stale
+        .map((s) => `${s.path} (v${s.version})`)
+        .join("; ")}`,
+      remediation: "Run: lyt agent-manual --install (re-injects the current manual block)",
+      detail: {
+        current,
+        stale: stale.map((s) => ({ runtime: s.runtime, path: s.path, version: s.version })),
+      },
+    };
+  }
+
+  return {
+    id,
+    group,
+    label,
+    status: "pass",
+    message: `${present.length} installed agent manual(s) at v${current}`,
   };
 }
 

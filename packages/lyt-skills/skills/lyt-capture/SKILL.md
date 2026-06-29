@@ -27,6 +27,16 @@ When the user runs `/lyt-capture`, or says something like:
 
 If the user pastes content and only says "save it," interpret as `/lyt-capture` on the pasted content.
 
+## When NOT to invoke
+
+`/lyt-capture` writes a **plain Figment note** — not a work-management artifact. When the durable thing is a structured type, defer to the dedicated skill (each writes the same 8-field ceremony to its own home, with type-specific framing):
+
+- A distilled, durable **project lesson** ("this is an insight", "lesson learned about Lyt") → `/lyt-insight`.
+- A locked **decision** ("lock this decision", "record the decision") → `/lyt-decision`.
+- A **plan / progress / result / retro / handoff** → the matching `/lyt-plan` · `/lyt-progress` · `/lyt-result` · `/lyt-retro` · `/lyt-handoff`.
+
+Use `/lyt-capture` only for a free-form note that doesn't fit one of those work-management types. When in doubt between a plain note and a typed artifact, prefer the typed skill — it carries the right frontmatter and lands in the right folder.
+
 ## Phase 1 — Resolve the target vault
 
 Follow this chain, in order, and stop at the first success:
@@ -103,7 +113,7 @@ e.g. `lyt capture --index-only notes/2026-06-10-my-note.md --vault personal/main
 
 > Captured to `<relative-path-from-vault-root>` in `<vault-path>`.
 
-4. Do **not** run any git operations. Phase 8's sync watcher (when shipped) will handle commits.
+4. Do **not** run any git operations. Capture writes the file only — it does NOT git. Sync is a separate step: `/lyt-sync` (or the `lyt sync --watch` foreground daemon, which auto-commits watched vaults) handles commits.
 
 ## Rules
 
@@ -113,7 +123,7 @@ e.g. `lyt capture --index-only notes/2026-06-10-my-note.md --vault personal/main
 - **User Figments are plain Obsidian-flavored markdown.** Wikilinks (`[[other-note]]`), tags (`#tag`), callouts, embeds — all fine. **Do NOT write YON inside user Figments.** YON is reserved for system files (`.lyt/vault.yon`, `.lyt/memscope.yon`, pattern.yon).
 - **Never overwrite an existing Figment.** Always pick a fresh slug suffix.
 - **Never touch files outside `<vault>/notes/`** unless the user explicitly says so.
-- **Never run `git add`/`git commit`** — sync is a Phase 8 concern.
+- **Never run `git add`/`git commit`** — sync is a separate step (`/lyt-sync` or `lyt sync --watch`).
 - If the user's content references other Figments by name, use `[[wikilinks]]` so Obsidian resolves them; don't expand them yourself.
 
 ## Direct CLI path (when no content yet)

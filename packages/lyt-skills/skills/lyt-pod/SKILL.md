@@ -37,6 +37,8 @@ Invoke this skill **proactively** as the first move whenever the user asks a pod
 
 If the user wants to drill into a single mesh (vault list + edges for one mesh), prefer `/lyt-mesh-explore`. If the user wants per-vault writable status or agent priming, use `/lyt-primer-context`.
 
+**Disambiguator vs `/lyt-search`.** A bare **inventory** request ("what's in my pod", "list my vaults", "what meshes do I have") → `/lyt-pod` (this skill — enumerates the pod's structure). A **content query with a topic** ("what's in my pod **about X**", "...about `<topic>`", "find anything on `<topic>`") → `/lyt-search` (queries figment content across the pod). The split is structure-vs-content: if the user names a subject they want found, route to `/lyt-search`, not here.
+
 ## Phase 1 — Determine pod-scope intent
 
 The default is **full pod overview** — both verbs run, every mesh and vault rendered. Pick by the user's wording:
@@ -130,6 +132,7 @@ The CLI emits stable, deterministically key-ordered JSON on stdout:
       "verifyFailCount": 0
     }
   ],
+  "displayNames": { "<ridHex>": "<mesh>/<vault>" },   // ridHex → canonical qualified display name
   "rollupTombstones": { ... },        // only when --include-tombstones is passed
   "rollupThresholdDays": <int>,       // only when --include-tombstones is passed
   "rollupThresholdIso": "<iso>"       // only when --include-tombstones is passed

@@ -1,7 +1,7 @@
 ---
 name: lyt-search
 description: >
-  Search a Lyt pod (or a single mesh or vault) using the tiered-cascade engine — Tier 0 arcs (0.95) → Tier 1 lanes (0.90) → Tier 2 FTS5 (0.70) → Tier 3 edges (0.50) — with confidence ranking. Trigger when the user runs /lyt-search <query>, or says "search my pod for X", "find anything about X across my vaults", "search across all meshes for X", "what's in my pod about X", or similar phrasing on a query wider than a single vault. Wraps the `lyt search` CLI verb — federation scope by default; --vault / --mesh narrow scope; --limit caps results. Returns ranked Figments with vault, mesh, snippet, and confidence. Companion to lyt-recall (single-vault keyword grep) for narrower local searches.
+  Search a Lyt pod (or a single mesh or vault) using the tiered-cascade engine — Tier 0 arcs (0.95) → Tier 1 lanes (0.90) → Tier 2 FTS5 (0.70) → Tier 3 edges (0.50) — with confidence ranking. Trigger when the user runs /lyt-search <query>, or says "search my pod for X", "find anything about X across my vaults", "search across all meshes for X", "what's in my pod about X", or similar phrasing on a query wider than a single vault. Wraps the `lyt search` CLI verb — federation scope by default; --vault / --mesh narrow scope; --limit caps results. Returns ranked Figments with vault, mesh, snippet, and confidence. Companion to lyt-recall (single-vault scope) for narrower local searches.
 visibility: public
 lyt-version: 0.5.0
 capabilities: [search]
@@ -21,11 +21,13 @@ When the user runs `/lyt-search <query>`, or says something like:
 - "search across all my vaults for <topic>"
 - "find anything about <topic>"
 - "what's in my pod about <topic>"
-- "what did I write about <topic>" — _if the user's pod has multiple vaults_; for a single-vault keyword grep, prefer `/lyt-recall`
+- "what did I write about <topic>" — _if the user's pod has multiple vaults_; for single-vault recall, prefer `/lyt-recall`
 - "search the `<mesh-name>` mesh for <topic>"
 - "search vault `<vault-name>` for <topic>"
 
 If the user's question depends on prior captured knowledge across multiple vaults, invoke this skill proactively — don't fabricate; check the pod first.
+
+**Disambiguator vs `/lyt-pod`.** A **content query with a topic** ("what's in my pod **about X**", "...about `<topic>`", "find anything on `<topic>`") → `/lyt-search` (this skill — queries figment content). A bare **inventory** request ("what's in my pod", "list my vaults", "what meshes do I have") → `/lyt-pod` (enumerates the pod's structure, no content query). The split is content-vs-structure: if the user names a subject they want found, this is the right skill; if they want a survey of what exists, route to `/lyt-pod`.
 
 ## Phase 1 — Determine scope from user signal
 
@@ -124,7 +126,7 @@ Format:
 
 Show each result as `[<confidence>] <vault>/<figment_path> — <snippet>`. Truncate snippets to ~80 characters with an ellipsis. The top-of-output tier-hit summary uses the CLI's `trace.perTierHitCount` map (`{0:N, 1:M, 2:K, 3:L}`) so the handler sees confidence distribution at a glance.
 
-On **empty results**: surface _"No matches for `"<query>"` across <scope>."_ and offer scope-widening hints (`--mesh` → federation; `--vault` → `--mesh`).
+On **empty results**: surface _"No matches for `"<query>"` across <scope>."_ and offer scope-widening hints (`--mesh` → federation; `--vault` → `--mesh`). If a vault that should contain the figment still returns nothing, its FTS index may be stale — suggest rebuilding it with `lyt vault rebuild-index <name>` (or `lyt reindex` across the pod), then re-running the search.
 
 ## Rules
 
@@ -133,12 +135,13 @@ On **empty results**: surface _"No matches for `"<query>"` across <scope>."_ and
 - **MUST resolve mesh/vault names via `lyt vault list --json` or `lyt mesh list --json` before passing `--vault` or `--mesh`.** Do not guess names.
 - **MUST NOT pass `--all` explicitly.** Federation is the default; `--all` is a redundant alias. Use no scope flag instead.
 - **MUST NOT combine `--vault` and `--mesh`.** The CLI exits 1 with `conflicting-scope-flags`.
+- **`--no-self-heal` is a no-op under `--json`** — the empty-result self-heal (reindex stale vaults + re-query on 0 hits) is auto-disabled whenever `--json` is set, so passing `--no-self-heal` alongside the mandatory `--json` changes nothing. (`--no-semantic`, which forces the pure lexical cascade, is NOT auto-disabled under `--json` — pass it explicitly if you need to suppress dense-embedding fusion.)
 - **MUST NOT re-interpret confidence tiers.** The CLI emits them as `0.95 / 0.90 / 0.70 / 0.50` per Tier 0/1/2/3 spec. Display verbatim; do not "smooth" or "round" or invent a derived score.
 - **MUST NOT modify or write any vault file.** This is a read-only skill (`requires_writable_vault: false`). If the user wants results persisted to a Figment, run `/lyt-capture` separately on the formatted output.
 - **MUST NOT widen scope without user signal.** If the user said "in my work vault", do not silently fall back to federation when the named vault is missing — surface the miss and stop.
 
 ## Companion skills
 
-- **`/lyt-recall`** — single-vault keyword grep. Use when the user has only one vault in mind and wants filesystem-level grep semantics rather than the tiered-cascade engine.
+- **`/lyt-recall`** — single-vault recall. Use when the user has only one vault in mind; same tiered-cascade engine as `/lyt-search`, pinned to `--vault` scope.
 - **`/lyt-sync`** — pull-then-push a vault. Run before `/lyt-search` if the user has unpushed local edits and wants the FTS5 index reflect them (the cascade reads the local vault's libSQL state).
 - **`/lyt-capture`** — write a Figment. Pair with `/lyt-search` if the user wants the recall results persisted.

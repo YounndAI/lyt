@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// 5-step protocol orchestrator.
+// 5-step protocol orchestrator (block-B Commit 4).
 //
 // Per arc-thoughts §6.6:201-216 (LOCKED 2026-05-27) every automator run
 // follows the same five-step shape regardless of archetype:

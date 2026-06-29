@@ -133,6 +133,12 @@ export function parseAgentManualRuntime(value: unknown): AgentManualRuntime {
 const MARKER_BEGIN_RE = /<!-- lyt-manual v[0-9][0-9A-Za-z.\-+]* BEGIN -->/g;
 const MARKER_END_RE = /<!-- lyt-manual v[0-9][0-9A-Za-z.\-+]* END -->/g;
 
+// Capture variant (non-global) — the SINGLE source consumers use to EXTRACT a
+// marker's version. Mirrors MARKER_BEGIN_RE's grammar; keep both in lockstep
+// (the marker-shape stability contract above). SEE ALSO: flows/doctor.ts
+// checkAgentManualFreshness, which imports this to grade installed manuals.
+export const MARKER_VERSION_RE = /<!-- lyt-manual v([0-9][0-9A-Za-z.\-+]*) BEGIN -->/;
+
 export function makeMarkerBegin(version: string): string {
   return `<!-- lyt-manual v${version} BEGIN -->`;
 }
@@ -316,8 +322,19 @@ function buildGetOutSection(): string {
     "|---|---|",
     "| what did I write about X | `/lyt-recall <X>` (one vault) |",
     "| search my pod for X | `/lyt-search <X>` (ranked, pod-wide) |",
+    "| find my notes on X / what did I write about X (ambiguous scope) | `/lyt-search` (default; federation naturally covers the sole vault when the pod has one) — use `/lyt-recall` only when ONE vault is named/pinned |",
     "| what's in my pod | `/lyt-pod` |",
     "| prime me / get context | `/lyt-primer-context` |",
+    "",
+    "## `[lyt.no-grep]` Content discovery is `lyt search`/`lyt recall` ONLY — never the filesystem",
+    "",
+    "**NEVER** use Grep / `rg` / `find` / Glob / `Get-ChildItem` (or any directory walk) to **FIND**",
+    "figments in a registered vault. Vault content discovery goes through `lyt search` (pod-wide) or",
+    "`lyt recall` (one vault) — the libSQL FTS5 index is the source of truth (whole-vault, not just",
+    "`notes/`), and a filesystem scan bypasses its ranking, tier provenance, and confidence. You MAY",
+    "open a single figment by the exact path a lyt query already returned (reading a known source);",
+    "you may NOT enumerate or grep the vault to locate one. If `lyt search` fails, say so and label any",
+    "filesystem fallback as fallback-derived, not lyt-index-derived.",
   ].join("\n");
 }
 
@@ -390,7 +407,10 @@ function buildGateSection(): string {
     "",
     "`lyt vault info <name> --json` -> read the `writable` field (`vault.writable`):",
     "true = proceed | false = offer {save local-only, capture to home vault, request access}",
-    '| "unknown" = PAUSE and ASK. The `writableDetermination` reason tailors the prompt.',
+    '| "unknown" = first run `lyt vault refresh <name>` (re-probes gh write access + refreshes the',
+    "cached verdict — the deterministic remedy for a stale/unknown verdict), then re-read `writable`.",
+    "Only if it stays `unknown` after the refresh: PAUSE and ASK. The `writableDetermination` reason",
+    "tailors the prompt.",
   ].join("\n");
 }
 
@@ -629,10 +649,16 @@ async function buildSkillIndex(skillsDir: string): Promise<string> {
   return [
     "## `[lyt.skills]` Installed skill index",
     "",
-    `${skills.length} Lyt skills installed via \`lyt skills install\`. The fast paths above cover the`,
-    "common ones; this is the full list (auto-synced on install):",
+    `${skills.length} Lyt skills installed via \`lyt skills install\` (matches the row count of`,
+    "`lyt skills list`). This is the full list (auto-synced on install):",
     "",
     ...rows,
+    "",
+    "> The WHEN-USER-SAYS fast-path tables above cover the high-traffic skills (recall/search/pod/",
+    "> primer/sync); the work-management skills (`/lyt-plan` `/lyt-progress` `/lyt-result` `/lyt-retro`",
+    "> `/lyt-insight` `/lyt-decision` `/lyt-handoff`) route via this full index rather than the fast",
+    "> path. Note: `lyt-version` in `lyt skills list` output is the per-skill version COLUMN (a",
+    "> maintenance field), not a skill — it is not counted in the total above.",
   ].join("\n");
 }
 
@@ -743,7 +769,7 @@ export async function generateAgentManual(args: AgentManualArgs): Promise<AgentM
   };
 }
 
-function readPackageVersion(): string {
+export function readPackageVersion(): string {
   try {
     const here = fileURLToPath(import.meta.url);
     const candidate = pathResolve(here, "..", "..", "..", "package.json");

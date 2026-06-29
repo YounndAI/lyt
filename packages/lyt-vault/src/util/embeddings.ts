@@ -18,7 +18,7 @@
 //
 // Wraps fastembed's BGE-small-en-v1.5 (int8 ONNX, 384-dim, CPU/onnxruntime —
 // NO cloud, NO Ollama) behind a lazy `import()` so the package has ZERO hard
-// dependency on it. fastembed lives in `optionalDependencies`: if its
+// dependency on it (ARC-D2). fastembed lives in `optionalDependencies`: if its
 // native onnxruntime can't build, `npm install` still succeeds and this module
 // reports "unavailable" cleanly — base search degrades to the lexical+keyphrase
 // cascade with no error, no crash. The ~23MB model is NOT bundled; fastembed
