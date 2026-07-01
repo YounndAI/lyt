@@ -161,7 +161,7 @@ export interface LlmGateway {
 }
 
 // Errors surfaced at the gateway boundary. Each carries enough context for
-// the lyt-runner pre-write hook (block-B Commit 5) to write a structured
+// the lyt-runner pre-write hook to write a structured
 // automator_run_events row.
 
 export class NoEligibleAdapterError extends Error {

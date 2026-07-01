@@ -67,7 +67,7 @@ A stable MCP tool set covering the vault + mesh + registry operations, including
 
 Tool schemas use [Zod](https://zod.dev), so MCP clients validate inputs before they ever touch your vaults. The operation surface grows as new verbs land in [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault) and [`@younndai/lyt-mesh`](https://www.npmjs.com/package/@younndai/lyt-mesh).
 
-**Semantic search and MCP.** The `search` tool inherits your pod's semantic-search setting, so an agent gets the same dense-embedding fusion you do at the CLI — *if the embedding model is already downloaded*. Because the MCP transport is non-interactive, the server **never** triggers the one-time ~23 MB model download itself: with no cached model it degrades silently to lexical search. To enable semantic search for agents, run `lyt reindex` once on an interactive terminal and accept the download.
+**Semantic search and MCP.** The `search` tool inherits your pod's semantic-search setting, so an agent gets the same dense-embedding fusion you do at the CLI — *if the embedding model is already downloaded*. Because the MCP transport is non-interactive, the server **never** triggers the one-time local model download itself: with no cached model it degrades silently to lexical search. To enable semantic search for agents, run `lyt reindex` once on an interactive terminal and accept the download.
 
 Agent writes obey the same permission semantics as human writes: a vault that is read-only for you is read-only for your agent. Mutating share/invite/abandon tools are **handler-gated** and, because MCP has no interactive approval seam, fail closed over this transport — the equivalent `lyt vault ...` CLI verbs (with `--yes`) are the path for those operations today.
 

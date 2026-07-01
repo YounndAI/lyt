@@ -76,10 +76,10 @@ The full v1 verb set also includes `vault clone|forget|disconnect|delete|add-edg
 
 ## Search
 
-`lyt search` runs a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — each tier carrying a confidence score, ranked into one list. On top of that, an **optional on-device semantic layer** surfaces notes keyword matching misses (different words, same meaning): a small local embedding model (`bge-small-en-v1.5`, ~23 MB, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) whose results are fused into the cascade under a confidence gate.
+`lyt search` runs a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — each tier carrying a confidence score, ranked into one list. On top of that, an **optional on-device semantic layer** surfaces notes keyword matching misses (different words, same meaning): a one-time local embedding model (`bge-small-en-v1.5`, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) whose results are fused into the cascade under a confidence gate.
 
 - Semantic search is **on by default when the model is available**, and degrades silently to the lexical cascade when it isn't — no error, no cloud call, byte-identical to `--no-semantic`.
-- The one-time ~23 MB model download is **handler-gated**: `lyt reindex` on an interactive terminal prompts before fetching; non-interactive / scripted / MCP runs never auto-download. The model caches under `~/lyt/.embeddings-cache/`, never inside a vault.
+- The one-time local model download is **handler-gated**: `lyt reindex` on an interactive terminal prompts before fetching; non-interactive / scripted / MCP runs never auto-download. The model caches under `~/lyt/.embeddings-cache/`, never inside a vault.
 - Embeddings run **locally on CPU** — there is no remote inference and `fastembed` is an `optionalDependency`, so install succeeds even where its native runtime can't build.
 - Turn fusion off with `lyt search --no-semantic`, or disable it globally via `LYT_EMBEDDINGS=0`.
 

@@ -17,7 +17,7 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   a deterministic agent-priming digest (top keywords, active arcs, recent activity).
 - `lyt reindex [--all|--mesh <m>|--vault <n>]` — rebuild the libSQL search caches
   from the markdown source of truth. On an interactive terminal this is also where
-  the optional ~23 MB semantic-search model is fetched (with a prompt first).
+  the optional one-time local semantic-search model is fetched (with a prompt first).
 - `lyt sync [--check] [--watch] [--no-publish] [--message <msg>]` — reconcile
   every registered active vault with its remote (commit named paths, pull
   `--rebase`, push) under the writable gate, then publish Your Pod. `--check`

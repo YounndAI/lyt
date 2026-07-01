@@ -71,6 +71,18 @@ const baseTest = {
 // validated by the full ×7 re-gate. Track-B redesigns isolation post-release.
 const ACCESS_ISOLATED = ["tests/access/**/*.test.ts"];
 
+// The embeddings download-progress spy hoists a
+// vi.mock("../../src/util/fetch-model.js") so loadEmbedder's owned fetch fires a
+// KNOWN monotonic byte sequence (a model-absent path) WITHOUT a real network
+// download. Under the shared single-fork module graph (isolate:false +
+// fileParallelism:false), a sibling file importing the REAL embeddings.js →
+// fetch-model.js first leaves the un-mocked module cached, so this file's hoisted
+// mock is dropped and a REAL GCS download runs (thousands of progress events +
+// network). Same shared-state-pollution class as ACCESS_ISOLATED — carve it into
+// its own project with isolate:true so its mock can never be stripped (and the
+// real fetch never fires). Passes in isolation; only flaked in the full run.
+const EMBEDDINGS_PROGRESS_ISOLATED = ["tests/util/embeddings-download-progress.test.ts"];
+
 export default defineConfig({
   test: {
     projects: [
@@ -79,7 +91,18 @@ export default defineConfig({
           ...baseTest,
           name: "main",
           include: ["tests/**/*.test.ts"],
-          exclude: ACCESS_ISOLATED,
+          exclude: [...ACCESS_ISOLATED, ...EMBEDDINGS_PROGRESS_ISOLATED],
+        },
+      },
+      {
+        test: {
+          ...baseTest,
+          name: "embeddings-progress-isolated",
+          include: EMBEDDINGS_PROGRESS_ISOLATED,
+          // Fresh module graph so the hoisted fetch-model mock can never be
+          // stripped by a sibling — guarantees the spy sees the mocked monotonic
+          // byte sequence and NEVER triggers a real network download.
+          isolate: true,
         },
       },
       {

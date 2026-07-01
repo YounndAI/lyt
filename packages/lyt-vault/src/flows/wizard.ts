@@ -28,6 +28,10 @@ import {
   type ReconcilePublishResult,
 } from "./federation/reconcile-publish.js";
 import { adoptAndPrimeFlow } from "./adopt-and-prime.js";
+import { embeddingsOfferGate } from "./embeddings-offer.js";
+import { resolveAskedState } from "./embeddings-offer-state.js";
+import { markAsked } from "../registry/nudge-state-repo.js";
+import { closeRegistry, openRegistry } from "../registry/client.js";
 import { generatePodMapFlow, installPodManagerPlugin } from "./pod-map-generate.js";
 import { detectInstalledRuntimes } from "./agent-manual.js";
 import {
@@ -141,6 +145,10 @@ export interface WizardRunOptions {
   // end-of-wizard staged-HIL publish prompt can be exercised without live
   // gh/git. Defaults to the real reconcilePublishFlow.
   publishFlowOverride?: typeof reconcilePublishFlow;
+  // Phase C test seam — override the interactive embeddings offer so the
+  // no-flag wizard route's neutral+recommend gate can be exercised without a
+  // real model download. Defaults to the real embeddingsOfferGate.
+  embeddingsOfferOverride?: typeof embeddingsOfferGate;
 }
 
 export interface WizardRunResult {
@@ -465,6 +473,61 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   if (!opts.dryRun) {
     const localMode = mode === "local";
     emitPodCard(firstVaultPath, localMode);
+
+    // Phase C (C4) — interactive-only embeddings offer. The no-flag init
+    // routes here (the wizard is the primary non-tech entry), so this is where
+    // the neutral+recommend "enable semantic search?" offer lives. The gate
+    // self-suppresses when the model is already cached OR the invocation isn't
+    // interactive (isEmbeddingsInteractive), so a non-TTY/--json wizard call
+    // never prompts. Accept → owned fetch (loadEmbedder/fetch-model); decline →
+    // enable-later hint, no persistence (Phase D owns decline-state). Wrapped
+    // best-effort so an offer failure never derails a finished pod setup.
+    const offerGate = opts.embeddingsOfferOverride ?? embeddingsOfferGate;
+    try {
+      // Phase D Slice 2b — thread the LIVE pod-global nudge-state into the
+      // init offer so it consults the SAME coherent state as the rebuild gate +
+      // first-search nudge (option (c), idempotent offer surface): the user is
+      // offered AT MOST ONCE per decision-epoch across init/rebuild/search. We
+      // open the registry best-effort and snapshot askedState via the pinned
+      // synchronous `() => OfferState` resolver. A registry open failure (or a
+      // test override that replaces the gate) leaves askedState undefined → the
+      // gate falls back to its inert () => "not-yet-asked" default, preserving
+      // Phase-C behavior. The embeddingsOfferOverride seam is untouched: when an
+      // override is supplied we still pass the resolved state, but a test that
+      // overrides the gate controls its own assertions.
+      let askedState: (() => "not-yet-asked" | "asked" | "declined" | "enabled") | undefined;
+      let registryDb: Awaited<ReturnType<typeof openRegistry>> | undefined;
+      try {
+        registryDb = await openRegistry();
+        askedState = await resolveAskedState(registryDb);
+      } catch {
+        // Registry unreachable → leave askedState undefined (inert default).
+      }
+      try {
+        await offerGate({
+          json: false,
+          stdinTTY: process.stdin.isTTY === true,
+          stdoutTTY: process.stdout.isTTY === true,
+          promptConfirm: (q) => ph.confirm(q),
+          emit,
+          ...(askedState !== undefined ? { askedState } : {}),
+          // release review FIX 4(b) — stamp the pod-global ask when this real
+          // offer surfaces, so the wizard offer shares the agent's cadence +
+          // auto-quiet. Only with a live registry (inert-seam default otherwise).
+          ...(registryDb !== undefined
+            ? {
+                onSurfaced: async () =>
+                  void (await markAsked(registryDb!, new Date().toISOString())),
+              }
+            : {}),
+        });
+      } finally {
+        if (registryDb !== undefined) await closeRegistry(registryDb);
+      }
+    } catch {
+      // Non-fatal — the pod is set up; semantic can be enabled later.
+    }
+
     if (skillsDegraded) {
       // hardening pass recap — the pod is ready WITHOUT the agent skills; re-surface the
       // remedy at the end so it isn't lost in scrollback. Plain language; the

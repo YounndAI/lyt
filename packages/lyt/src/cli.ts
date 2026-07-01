@@ -40,6 +40,7 @@ import { buildAutomatorRunSubcommand } from "./cli-automator-run.js";
 import { buildBenchCommand } from "./commands/bench.js";
 import { buildCaptureCommand } from "./commands/capture.js";
 import { buildLytInitCommand } from "./commands/init.js";
+import { buildModelCommand } from "./commands/model.js";
 import { buildPrimerCommand } from "./commands/primer.js";
 import { buildReindexCommand } from "./commands/reindex.js";
 import { buildSearchCommand } from "./commands/search.js";
@@ -140,6 +141,13 @@ program.addCommand(buildPrimerCommand());
 // is pod-wide. The reindexFlow lives in @younndai/lyt-vault (data-layer
 // ownership); this is the CLI-surface adapter.
 program.addCommand(buildReindexCommand());
+
+// Phase D — `lyt model fetch | nudge`: the affirmative semantic-model
+// fetch + the pod-global discovery-nudge cadence verbs. Top-level (like
+// search/primer/reindex) because the model is ONE shared pod-level artifact and
+// the nudge-state is pod-global. The pure policy + registry seam live in
+// @younndai/lyt-vault; this is the CLI-surface adapter.
+program.addCommand(buildModelCommand());
 
 // Lane V Workstream 2 — `lyt bench`: privacy-trivial retrieval self-test over a
 // synthetic temp pod (never the user's ~/lyt). Top-level like search/primer/

@@ -19,8 +19,15 @@ import { Command } from "commander";
 import {
   reindexFlow,
   withSpinner,
+  startSpinner,
   isEmbeddingsInteractive,
+  embeddingsPhaseLabel,
+  formatDownloadProgress,
+  formatEmbedProgress,
+  buildReindexJson,
   type ReindexScope,
+  type EmbeddingsBuildProgress,
+  type PhaseSpinnerHandle,
 } from "@younndai/lyt-vault";
 
 interface ReindexCliOpts {
@@ -53,7 +60,7 @@ export function buildReindexCommand(): Command {
         const scope = resolveScope(opts);
         const threshold =
           opts.threshold !== undefined ? Number.parseInt(opts.threshold, 10) : undefined;
-        // C-1 — the build path may prompt + visibly fetch the ~23MB model
+        // C-1 — the build path may prompt + visibly fetch the one-time local model
         // ONLY from an interactive terminal: BOTH stdin AND stdout a real TTY,
         // AND not --json (a --json run is machine-consumed, so it must stay
         // non-interactive/no-fetch). stdin must be a TTY too — the prompt reads
@@ -64,23 +71,55 @@ export function buildReindexCommand(): Command {
           stdinTTY: process.stdin.isTTY === true,
           stdoutTTY: process.stdout.isTTY === true,
         });
+        // Phase E Unit 2 — drive the embeddings-build phase labels
+        // (fetch → index → ready / offline-deferred / timed-out) + live
+        // download/embed lines on the phase-spanning spinner. HUMAN STDOUT ONLY:
+        // wired ONLY when embeddingsInteractive (a real interactive TTY, not
+        // --json) — exactly the path that may prompt + visibly fetch. A --json
+        // run / non-TTY leaves this undefined → byte-stable, no spinner.
+        // (phaseSpinner is assigned below, before reindexFlow runs; the reporter
+        // reads it lazily via the getter, so the binding is always set by call time.)
+        let phaseSpinner: PhaseSpinnerHandle | undefined;
+        const embeddingsProgress: EmbeddingsBuildProgress | undefined = embeddingsInteractive
+          ? makeEmbeddingsProgress(() => phaseSpinner)
+          : undefined;
         const reindexArgs = {
           scope: scope.scope,
           ...(scope.target !== undefined ? { target: scope.target } : {}),
           ...(threshold !== undefined && Number.isFinite(threshold) ? { threshold } : {}),
           ...(embeddingsInteractive ? { embeddingsInteractive: true } : {}),
+          ...(embeddingsProgress !== undefined ? { embeddingsProgress } : {}),
         };
         // V-DX-1 — liveness spinner over the multi-vault reindex window.
         // --json stays spinner-free; non-TTY prints "Reindexing…" once.
-        const result =
-          opts.json !== true
-            ? await withSpinner(scope.target ?? scope.scope, () => reindexFlow(reindexArgs), {
-                op: "reindex",
-              })
-            : await reindexFlow(reindexArgs);
+        // Phase E — when the embeddings build can surface phase labels
+        // (interactive TTY), use a phase-spanning startSpinner so the reporter
+        // can re-label it (fetch/index/ready); otherwise keep the simple
+        // withSpinner liveness wrap.
+        let result;
         if (opts.json === true) {
+          result = await reindexFlow(reindexArgs);
+        } else if (embeddingsInteractive) {
+          phaseSpinner = startSpinner();
+          phaseSpinner.phase("reindex", scope.target ?? scope.scope);
+          try {
+            result = await reindexFlow(reindexArgs);
+          } finally {
+            phaseSpinner.stop();
+          }
+        } else {
+          result = await withSpinner(scope.target ?? scope.scope, () => reindexFlow(reindexArgs), {
+            op: "reindex",
+          });
+        }
+        if (opts.json === true) {
+          // Phase E Unit 3 — emit the VERSIONED envelope (schemaVersion +
+          // model + index [+ nudge]) built by the shared builder, NOT the raw
+          // flow result. The agent skill parses this exact shape via the shared
+          // ReindexJsonSchema (single source → no drift). reindex runs no nudge
+          // surface, so `nudge` is absent (optional).
           // eslint-disable-next-line no-console
-          console.log(JSON.stringify(result, null, 2));
+          console.log(JSON.stringify(buildReindexJson(result), null, 2));
           return;
         }
         if (result.vaultsReindexed === 0 && result.vaultsSkippedFrozen.length === 0) {
@@ -118,6 +157,27 @@ export function buildReindexCommand(): Command {
         process.exitCode = 2;
       }
     });
+}
+
+// Phase E Unit 2 — build the embeddings-build progress reporter that
+// re-labels the phase-spanning spinner with the honest fetch/index/ready labels
+// + the live download/embed lines. Takes a getter for the spinner so it stays
+// valid across the (later-assigned) handle. Human-stdout only — only constructed
+// on the interactive path (the caller never wires it under --json/non-TTY).
+function makeEmbeddingsProgress(
+  getSpinner: () => PhaseSpinnerHandle | undefined,
+): EmbeddingsBuildProgress {
+  return {
+    onPhase: (phase) => {
+      getSpinner()?.phase("reindex", embeddingsPhaseLabel(phase));
+    },
+    onDownload: (bytesDone, totalBytes) => {
+      getSpinner()?.phase("reindex", formatDownloadProgress(bytesDone, totalBytes));
+    },
+    onEmbed: (done, total) => {
+      getSpinner()?.phase("reindex", formatEmbedProgress(done, total));
+    },
+  };
 }
 
 function resolveScope(opts: ReindexCliOpts): { scope: ReindexScope; target?: string } {

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// LLM op composition (block-B Commit 4).
+// LLM op composition.
 //
 // Per arc-thoughts §6.12:489-494 (LOCKED 2026-05-27) `@younndai/lyt-llm`
 // registers four ops with the underlying yon-runner via lyt-runner:
@@ -25,7 +25,7 @@
 // src/index.ts:9 documents the deferral)
 // std:llm.generate_object@v1 — stub-with-warning (block-D — zod-schema
 // structured output deferred per lyt-llm
-// src/index.ts:9; brief @TASK clause (4))
+// src/index.ts:9; brief clause (4))
 //
 // Real handlers convert @STEP-string args to LlmGateway request shape and
 // surface the gateway's structured GenerateResult / EmbedResult unchanged

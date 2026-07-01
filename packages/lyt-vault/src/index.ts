@@ -394,9 +394,28 @@ export {
 export type { FigmentMeta, RecentFigmentRow, KeywordSignal } from "./registry/figment-meta-repo.js";
 // Lane V Phase 0 (0.5 / C1-C3) — all-tiers rebuild umbrella + pod/mesh/vault reindex.
 export { rebuildVaultFlow } from "./flows/rebuild-vault.js";
-export type { RebuildVaultArgs, RebuildVaultResult } from "./flows/rebuild-vault.js";
+export type {
+  RebuildVaultArgs,
+  RebuildVaultResult,
+  EmbeddingsBuildProgress,
+} from "./flows/rebuild-vault.js";
 export { reindexFlow } from "./flows/reindex.js";
 export type { ReindexArgs, ReindexResult, ReindexScope } from "./flows/reindex.js";
+// Phase E Unit 3 — the VERSIONED `lyt reindex --json` schema (zod), shared
+// by the command emit-path AND the agent skill consumer (single source). Carries
+// model + index + nudge-trace; the schema is itself the Unit-3 test target.
+export {
+  ReindexJsonSchema,
+  REINDEX_JSON_SCHEMA_VERSION,
+  buildReindexJson,
+} from "./util/reindex-json-schema.js";
+export type {
+  ReindexJson,
+  ReindexJsonModelFacet,
+  ReindexJsonVaultEntry,
+} from "./util/reindex-json-schema.js";
+export { NudgeDecisionTraceSchema } from "./util/nudge-json-schema.js";
+export type { NudgeDecisionTraceJson } from "./util/nudge-json-schema.js";
 // Lane M Wave 0 (P0-a/P0-c) — couple capture (and any figment write) to
 // the derived FTS5 + provenance caches via a single incremental reconcile
 // entry point, plus a one-time full-walk backfill heal for existing pods.
@@ -485,12 +504,21 @@ export {
   blobToVector,
   embeddingsCacheDir,
   modelCachePresent,
+  semanticEvicted,
   isEmbeddingsInteractive,
   __resetEmbedderCache,
   EMBEDDING_DIM,
   EMBEDDING_MODEL_ID,
 } from "./util/embeddings.js";
 export type { Embedder, EmbedderLoad } from "./util/embeddings.js";
+// Phase E Unit 2 — embeddings-build progress surface (phase labels +
+// download/embed line formatters). Pure; the CLI spinner consumes these.
+export {
+  embeddingsPhaseLabel,
+  formatDownloadProgress,
+  formatEmbedProgress,
+} from "./util/embeddings-progress.js";
+export type { EmbeddingsBuildPhase } from "./util/embeddings-progress.js";
 export { embeddingsEnabled } from "./util/config.js";
 export {
   deleteAllEmbeddings,
@@ -510,6 +538,21 @@ export type {
   UpsertEmbeddingsCacheResult,
   UpsertEmbeddingsCacheOpts,
 } from "./flows/upsert-embeddings-cache.js";
+// Phase C (C4, F-C.1) — interactive-only embeddings offer at init.
+export {
+  embeddingsOfferGate,
+  EMBEDDINGS_OFFER_PROMPT,
+  EMBEDDINGS_OFFER_DECLINE_HINT,
+  EMBEDDINGS_OFFER_FETCHED,
+  EMBEDDINGS_OFFER_FETCH_FAILED,
+} from "./flows/embeddings-offer.js";
+// Phase D Slice 2a — the idempotent-offer-surface resolver (separate
+// module so embeddings-offer.ts stays clean of nudge-state symbols).
+export { resolveAskedState } from "./flows/embeddings-offer-state.js";
+export type {
+  EmbeddingsOfferArgs,
+  EmbeddingsOfferOutcome,
+} from "./flows/embeddings-offer.js";
 export { fuseDense } from "./flows/search-cascade.js";
 export type {
   SearchCascadeArgs,
@@ -517,6 +560,7 @@ export type {
   SearchCascadeScope,
   SearchResult,
   SearchTrace,
+  NudgeDecisionTrace,
   DenseCandidate,
 } from "./flows/search-cascade.js";
 export { createQueryEngine, searchMesh, searchPod, searchVault } from "./flows/query-engine.js";
@@ -700,6 +744,36 @@ export type { GhClient, GhRepoInfo } from "./util/gh.js";
 export { parseOwnerRepoFromUrl } from "./util/gh.js";
 
 export { openRegistry, closeRegistry, getRegistryPath } from "./registry/client.js";
+
+// Phase D — pod-global discovery nudge engine. Pure policy (util) + the
+// registry.db I/O seam (registry). Exported so the @younndai/lyt meta CLI's
+// `lyt model` verbs and the offer surfaces (init offer, rebuild gate) can drive
+// ONE coherent pod-global nudge-state.
+export {
+  deriveOfferState,
+  isEligible,
+  classifyEligibility,
+  recordAsked,
+  recordDecline,
+  recordNever,
+  recordSearch,
+  coherentInitRow,
+  NUDGE_STATE_SCHEMA_VERSION,
+  AUTO_QUIET_DECLINE_THRESHOLD,
+  NUDGE_CADENCE_DAYS,
+  MS_PER_DAY,
+} from "./util/nudge-state.js";
+export type { NudgeState, OfferState, NudgeIneligibleReason } from "./util/nudge-state.js";
+export {
+  ensureNudgeState,
+  saveNudgeState,
+  bumpSearchCounter,
+  bumpDeclineCount,
+  markAsked,
+  markNever,
+  clearDeclineCount,
+} from "./registry/nudge-state-repo.js";
+
 export { migrate } from "./registry/migrate.js";
 export { MIGRATIONS } from "./registry/migrations.js";
 export type { Migration } from "./registry/migrations.js";

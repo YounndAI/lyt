@@ -33,10 +33,10 @@ import { registerVaultFromYon } from "./register.js";
 
 // v1.B.1 — `lyt mesh join <name> --from <gh-target>` flow.
 //
-// Source: Brief @TASK steps 3-4 + lyt-federation-design.md §3 (mesh.yon
+// Source: Brief steps 3-4 + lyt-federation-design.md §3 (mesh.yon
 // schema) + lyt-master-plan.md §5 v1.B.1.
 //
-// Order of operations (Brief @TASK step 4):
+// Order of operations (Brief step 4):
 // (a) MeshGhClient.cloneRepo(<gh-target>, '<vaults-root>/<name>/main')
 // (b) read .lyt/mesh.yon from the clone via parseMeshYon
 // (c) extract @MESH record fields

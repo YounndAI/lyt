@@ -110,7 +110,7 @@ export function adoptVault(opts: AdoptOptions): AdoptResult {
   // Commit 10.
   copyBundledAutomators(abs);
 
-  // UNIT 4 — scaffold conformance on adopt (the B-4 alm-os migration path for
+  // UNIT 4 — scaffold conformance on adopt (the adopt-an-existing-vault path for
   // semantic-folder vaults). Additively writes the sentinel-bearing priming
   // seeds (lyt-overview.md / agents.md) so an adopted vault does NOT FTS-pollute
   // the primer with un-flagged Lyt-authored boilerplate. Never clobbers existing

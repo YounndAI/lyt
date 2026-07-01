@@ -46,7 +46,11 @@ import {
 } from "./rebuild-embeddings.js";
 import { embeddingsEnabled } from "../util/config.js";
 import { modelCachePresent as defaultModelCachePresent } from "../util/embeddings.js";
+import type { EmbeddingsBuildPhase } from "../util/embeddings-progress.js";
 import { walkVaultFigmentFiles } from "./upsert-fts-cache.js";
+import { resolveAskedState } from "./embeddings-offer-state.js";
+import { markAsked } from "../registry/nudge-state-repo.js";
+import type { OfferState } from "../util/nudge-state.js";
 
 export interface RebuildVaultArgs {
   // Registered vault name.
@@ -59,7 +63,7 @@ export interface RebuildVaultArgs {
   nowIso?: string;
   // C-1 (build-path model-fetch gate) — interactivity signal for the
   // embeddings build path ONLY. DEFAULT-undefined = NON-INTERACTIVE (the
-  // hang-safe default): when the ~23MB model is absent the build NEVER prompts
+  // hang-safe default): when the local model is absent the build NEVER prompts
   // and NEVER auto-fetches — it skips the embeddings build, degrades to lexical
   // cleanly, and emits a one-line hint. Set true ONLY from a verified TTY entry
   // point (the `lyt reindex` / `lyt vault rebuild` CLI on an interactive
@@ -72,6 +76,25 @@ export interface RebuildVaultArgs {
   // for the handler's [Y/n]; `modelCachePresentFn` overrides the fs probe.
   promptConfirm?: (question: string) => Promise<boolean>;
   modelCachePresentFn?: () => boolean;
+  // Phase E Unit 2 — optional embeddings-build progress reporter. The
+  // reindex/rebuild CLI passes this on an interactive TTY (NEVER under --json /
+  // non-TTY) to drive the spinner's phase labels (fetch → index → ready /
+  // offline-deferred / timed-out) + live download/embed lines. Threaded straight
+  // into the embeddings build gate; inert/undefined for every other caller.
+  embeddingsProgress?: EmbeddingsBuildProgress;
+}
+
+// Phase E Unit 2 — the embeddings-build progress reporter. Human-stdout
+// surface only (the CLI suppresses it under --json/non-TTY by not passing it).
+// All callbacks optional: a caller can take just the phase transitions, or also
+// the live download/embed lines.
+export interface EmbeddingsBuildProgress {
+  // Phase transition (fetch → index → ready / offline-deferred / timed-out).
+  onPhase?: (phase: EmbeddingsBuildPhase) => void;
+  // Model-download byte-progress (only on a consented fetch; model absent).
+  onDownload?: (bytesDone: number, totalBytes: number) => void;
+  // Embed-loop progress ("embedding N/M").
+  onEmbed?: (done: number, total: number) => void;
 }
 
 export interface RebuildVaultResult {
@@ -139,11 +162,11 @@ export async function rebuildVaultFlow(args: RebuildVaultArgs): Promise<RebuildV
     // feat/microrag-semantic + C-1 — build the per-doc dense-vector cache,
     // gated by embeddingsBuildGate() (the handler-ratified prompt+visible-fetch
     // decision tree). With default-ON embeddings the BUILD path can otherwise
-    // SILENTLY download a ~23MB model on a fresh `lyt reindex` / a 0-hit
+    // SILENTLY download a one-time local model on a fresh `lyt reindex` / a 0-hit
     // search's self-heal — the M2 vector-build UX blocker. The gate decides
     // skip / build-silently / prompt-then-visible-fetch / non-interactive-skip
     // per the tree (see embeddingsBuildGate). rebuildEmbeddingsFlow still
-    // self-degrades to a clean no-op if the model fails to load (ARC-D2).
+    // self-degrades to a clean no-op if the model fails to load.
     const embeddings = await embeddingsBuildGate({
       vault,
       vaultPath: vaultRow.path,
@@ -154,6 +177,9 @@ export async function rebuildVaultFlow(args: RebuildVaultArgs): Promise<RebuildV
       ...(args.promptConfirm !== undefined ? { promptConfirm: args.promptConfirm } : {}),
       ...(args.modelCachePresentFn !== undefined
         ? { modelCachePresentFn: args.modelCachePresentFn }
+        : {}),
+      ...(args.embeddingsProgress !== undefined
+        ? { progress: args.embeddingsProgress }
         : {}),
     });
     const rollup = await rebuildRollupFlow({
@@ -207,13 +233,27 @@ interface EmbeddingsBuildGateArgs {
   interactive?: boolean;
   promptConfirm?: (question: string) => Promise<boolean>;
   modelCachePresentFn?: () => boolean;
+  // Phase D Slice 2a — the idempotent-offer-surface seam. The PINNED
+  // synchronous OfferState verdict (option (c)): this gate is the THIRD offer
+  // surface (alongside the init offer + the first-search nudge) and consults the
+  // SAME pod-global nudge-state, so the user is offered AT MOST ONCE per
+  // decision-epoch regardless of entry point. A "declined" verdict (3 explicit
+  // declines OR the hard never-flag) suppresses this prompt; "enabled" likewise
+  // (defensive — Branch 3 already short-circuits a present model). Injectable
+  // for tests; defaults to resolving over this gate's own registryDb. The
+  // resolution is async, so the gate awaits it ONCE before the prompt branch.
+  askedStateFn?: () => Promise<() => OfferState>;
+  // Phase E Unit 2 — the progress reporter from the CLI (human-stdout TUI).
+  // Drives phase labels (fetch/index/ready/offline-deferred/timed-out) + live
+  // download/embed lines. Inert when absent.
+  progress?: EmbeddingsBuildProgress;
 }
 
 const EMBEDDINGS_BUILD_PROMPT =
-  "Semantic search needs a one-time ~23MB model download. Build the semantic index now? [Y/n]";
+  "Semantic search needs a one-time local model. Build the semantic index now? [Y/n]";
 
 const EMBEDDINGS_NONINTERACTIVE_HINT =
-  "ℹ Semantic search is available but its ~23MB model isn't downloaded yet. " +
+  "ℹ Semantic search is available but its one-time local model isn't downloaded yet. " +
   "Run `lyt reindex` on an interactive terminal to fetch it and build the semantic index " +
   "(search works now, lexical-only).";
 
@@ -229,11 +269,12 @@ export async function embeddingsBuildGate(
   const modelCachePresent = args.modelCachePresentFn ?? defaultModelCachePresent;
 
   // Branch 3 — model already cached → build silently (one-time fetch paid).
+  // No fetch phase (the model is present) — straight to index → ready.
   if (modelCachePresent()) {
-    return rebuildEmbeddingsFlow({ vault: args.vault, registryDb: args.registryDb });
+    return runEmbeddingsBuild(args, { fetch: false });
   }
 
-  // Model is ABSENT below here — a build WOULD fetch ~23MB.
+  // Model is ABSENT below here — a build WOULD fetch the one-time local model.
   const interactive = args.interactive === true;
   if (!interactive) {
     // Branch 5 — non-interactive (incl. the self-heal path): NEVER fetch.
@@ -242,9 +283,36 @@ export async function embeddingsBuildGate(
     return null;
   }
 
+  // Branch 3.5 (Phase D Slice 2a — idempotent offer surface, option (c)).
+  // Consult the SAME pod-global nudge-state the init offer + first-search nudge
+  // read, so this rebuild gate offers AT MOST ONCE per decision-epoch. A
+  // "declined" verdict (3 explicit declines OR the hard never-flag) — or the
+  // defensive "enabled" — SUPPRESSES the prompt: skip to lexical with the same
+  // hint, never re-nag. "not-yet-asked"/"asked" (within the quiet window) fall
+  // through to the prompt as before. Resolution is async + read-once; default
+  // resolves over this gate's registryDb, injectable for tests.
+  const resolveAsked = args.askedStateFn ?? (() => resolveAskedState(args.registryDb));
+  const askedState = await resolveAsked();
+  const verdict = askedState();
+  if (verdict === "declined" || verdict === "enabled") {
+    emitHint(EMBEDDINGS_NONINTERACTIVE_HINT);
+    return null;
+  }
+
   // Branch 4 — interactive TTY + model absent → PROMPT. Reuse the repo's
   // confirm primitive (ReadlinePromptHandler.confirm shape) via the injected
   // promptConfirm; default to a real readline confirm when not supplied.
+  //
+  // release review FIX 4(b) — this rebuild gate is a REAL offer surface (not an
+  // ambient hint), so SURFACING the prompt stamps the pod-global ask (atomic
+  // markAsked) against this gate's own registryDb. The same 7-day cadence +
+  // auto-quiet then govern the rebuild offer too, whether the user accepts or
+  // declines. Best-effort: a stamp failure never blocks the build decision.
+  try {
+    await markAsked(args.registryDb, new Date().toISOString());
+  } catch {
+    // never block the rebuild on a cadence-stamp write.
+  }
   const confirm = args.promptConfirm ?? defaultReadlineConfirm;
   let consented: boolean;
   try {
@@ -259,12 +327,64 @@ export async function embeddingsBuildGate(
     // NO → lexical-only, no fetch, no hang.
     return null;
   }
-  // YES → VISIBLE fetch (showDownloadProgress:true) + build.
-  return rebuildEmbeddingsFlow({
+  // YES → VISIBLE fetch (showDownloadProgress:true) + build, with the fetch
+  // phase label surfaced (model is absent here → a download WILL happen).
+  return runEmbeddingsBuild(args, { fetch: true });
+}
+
+// Phase E Unit 2 — run the embeddings build with phase reporting. Drives
+// the progress reporter's phase transitions around rebuildEmbeddingsFlow and
+// threads the live download/embed callbacks. `fetch` is true when the model is
+// absent (a download will happen → emit the `fetch` phase first); false when the
+// cache is present (straight to `index`). The terminal phase is derived from the
+// build result: ran → ready; unavailable with a timeout reason → timed-out;
+// otherwise → offline-deferred. All reporting is inert when no reporter wired.
+async function runEmbeddingsBuild(
+  args: EmbeddingsBuildGateArgs,
+  opts: { fetch: boolean },
+): Promise<RebuildEmbeddingsResult> {
+  const progress = args.progress;
+  if (opts.fetch) progress?.onPhase?.("fetch");
+  else progress?.onPhase?.("index");
+
+  const res = await rebuildEmbeddingsFlow({
     vault: args.vault,
     registryDb: args.registryDb,
-    showDownloadProgress: true,
+    ...(opts.fetch ? { showDownloadProgress: true } : {}),
+    ...(progress?.onDownload !== undefined ? { onDownloadProgress: progress.onDownload } : {}),
+    ...(progress?.onEmbed !== undefined ? { onProgress: progress.onEmbed } : {}),
   });
+
+  // Once the fetch resolved (model now present), the embed loop is the `index`
+  // phase. Only meaningful on the fetch path (Branch 3 already started at index).
+  if (opts.fetch && res.available) progress?.onPhase?.("index");
+
+  // Terminal phase from the result.
+  if (res.ran) {
+    progress?.onPhase?.("ready");
+  } else if (!res.available) {
+    progress?.onPhase?.(deriveUnavailableTerminalPhase(res));
+  }
+  return res;
+}
+
+// Phase E fix-pass (release review R1 FIX 1) — derive the honest terminal phase
+// for an UNAVAILABLE embeddings-build result. Prefer the STRUCTURED classification
+// when present (a real fetch stall is `stalled` → `timed-out`, NOT the dishonest
+// `offline-deferred`; every other fetch class — offline/locked/error/corrupt — is
+// `offline-deferred`). When classification is ABSENT (non-fetch unavailability:
+// fastembed missing, or the ONNX-init backstop that THROWS "timed out"), fall back
+// to the reason-regex — that path legitimately catches the init-backstop timeout
+// and must not regress. Exported pure so FIX 1 can be pinned by a unit test (the
+// untested mapping is exactly why the bug slipped).
+export function deriveUnavailableTerminalPhase(
+  res: Pick<RebuildEmbeddingsResult, "classification" | "reason">,
+): "timed-out" | "offline-deferred" {
+  if (res.classification !== undefined) {
+    return res.classification === "stalled" ? "timed-out" : "offline-deferred";
+  }
+  const timedOut = res.reason !== undefined && /timed out|timeout/i.test(res.reason);
+  return timedOut ? "timed-out" : "offline-deferred";
 }
 
 function emitHint(msg: string): void {

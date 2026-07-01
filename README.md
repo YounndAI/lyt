@@ -94,9 +94,9 @@ For a deeper tour, run `lyt help getting-started` after install.
 
 `lyt search "<query>"` ranks results across your whole pod (or a single `--mesh` / `--vault`) through a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — each tier carrying a confidence score.
 
-On top of the lexical cascade, Lyt adds **optional on-device semantic search** to surface notes that keyword matching misses (different words, same meaning). It runs a small local embedding model (`bge-small-en-v1.5`, ~23 MB, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) and fuses its results into the cascade under a confidence gate. Semantic search is **on by default when the model is available**, and degrades silently to the lexical cascade when it isn't — no errors, no cloud calls, nothing leaves your machine.
+On top of the lexical cascade, Lyt adds **optional on-device semantic search** to surface notes that keyword matching misses (different words, same meaning). It runs a one-time local embedding model (`bge-small-en-v1.5`, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) and fuses its results into the cascade under a confidence gate. Semantic search is **on by default when the model is available**, and degrades silently to the lexical cascade when it isn't — no errors, no cloud calls, nothing leaves your machine.
 
-The one-time ~23 MB model download is **handler-gated**: on an interactive terminal, `lyt reindex` asks before fetching and shows progress; in non-interactive, scripted, or MCP contexts Lyt never auto-downloads and simply uses lexical search. Disable semantic fusion any time with `lyt search --no-semantic` or globally via `LYT_EMBEDDINGS=0`.
+The one-time local model download is **handler-gated**: on an interactive terminal, `lyt reindex` asks before fetching and shows progress; in non-interactive, scripted, or MCP contexts Lyt never auto-downloads and simply uses lexical search. Disable semantic fusion any time with `lyt search --no-semantic` or globally via `LYT_EMBEDDINGS=0`.
 
 ## Storage
 

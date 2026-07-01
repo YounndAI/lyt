@@ -40,7 +40,7 @@ vault (content edited outside Lyt) and re-queries before reporting "no matches".
 
 ## Semantic search isn't kicking in
 
-Semantic search needs its one-time ~23 MB embedding model. It is only downloaded
+Semantic search needs its one-time local embedding model. It is only downloaded
 on an interactive terminal, with a prompt — run `lyt reindex` and accept. In
 non-interactive, scripted, or MCP contexts Lyt never downloads it and uses lexical
 search. Disable semantic fusion entirely with `LYT_EMBEDDINGS=0` or

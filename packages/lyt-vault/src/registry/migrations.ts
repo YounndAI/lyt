@@ -681,6 +681,57 @@ PRAGMA foreign_keys=ON;
 `,
 };
 
+// Phase D (2026-06-30) — additive migration 007: the pod-global
+// embeddings discovery nudge-state. ONE singleton row (PK pinned to the
+// constant 1) tracks whether/how often the user has been offered the one-time
+// local-model setup, so the first-search nudge, the init offer, and the
+// rebuild gate all consult ONE coherent state (the "idempotent offer surface").
+//
+// COLUMNS (per plan Phase D row + the `asked|declined|enabled` state shape):
+//  - schema_version       — forward-compat marker for the row shape itself
+//                           (distinct from schema_migrations.version; lets a
+//                           future shape change reconcile a row in place).
+//  - searches_since_ask   — searches counted since the last surfaced ask;
+//                           cadence requires ≥1 before re-asking.
+//  - last_ask_at          — ISO-8601 of the last surfaced ask (NULL = never
+//                           asked); cadence requires ≥N days since.
+//  - explicit_decline_count — count of EXPLICIT declines only (a skip / non-
+//                           response is NOT counted); auto-quiet at 3.
+//  - disabled             — the hard "never ask again" flag (1 = silent forever).
+//
+// WHY A DEDICATED TABLE (not machine_state key/value): the nudge state is a
+// fixed-shape record (counters + a timestamp + a flag) with derived-state
+// semantics, not a free-form config key — the same reasoning block-B used to
+// split machine_leases out of machine_state. A singleton (PK = 1, CHECK id = 1)
+// keeps it pod-global: exactly one row, no per-vault fan-out.
+//
+// COHERENT INIT (plan C10): the migration is pure SQL and CANNOT probe the
+// filesystem for an existing model, so it seeds NO row here. The row is seeded
+// LAZILY by the repo accessor (registry/nudge-state-repo.ts ensureNudgeState),
+// which derives the coherent initial state from modelCachePresent() at first
+// access: an existing-model pod initializes to the `enabled` state (no pending
+// nudge, counters zero, never asked) — it is NEVER re-asked from zero on a
+// 0.9.8→0.9.9 upgrade. Keeping the FS probe in TS (not SQL) is what makes the
+// init policy a PURE, unit-testable function (nudge-state.ts coherentInitRow).
+//
+// RUNNER CONTRACT: purely additive (CREATE TABLE IF NOT EXISTS) — no FK toggle,
+// no table-rebuild, no data mutation. The per-version skip in migrate.ts makes
+// it run exactly once; IF NOT EXISTS keeps it crash-retry safe.
+const migration007NudgeState: Migration = {
+  version: 7,
+  name: "embeddings-nudge-state",
+  sql: `
+CREATE TABLE IF NOT EXISTS embeddings_nudge_state (
+  id                     INTEGER PRIMARY KEY CHECK (id = 1),
+  schema_version         INTEGER NOT NULL DEFAULT 1,
+  searches_since_ask     INTEGER NOT NULL DEFAULT 0,
+  last_ask_at            TEXT,
+  explicit_decline_count INTEGER NOT NULL DEFAULT 0,
+  disabled               INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1))
+);
+`,
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   migration001Init,
   migration002Aliases,
@@ -688,4 +739,5 @@ export const MIGRATIONS: readonly Migration[] = [
   migration004NamesIndex,
   migration005DropExternalMesh,
   migration006MeshEdgePk,
+  migration007NudgeState,
 ];

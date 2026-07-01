@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-skills",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "Lyt harness skills — 16 skills (/lyt-plan, /lyt-progress, /lyt-result, /lyt-retro, /lyt-insight, /lyt-handoff, /lyt-decision, /lyt-pattern, /lyt-capture, /lyt-recall, /lyt-pod, /lyt-mesh-explore, /lyt-primer-context, /lyt-search, /lyt-sync, /lyt-alias) symlinked tri-runtime into ~/.claude/skills/, ~/.codex/skills/, ~/.agents/skills/. Composed into the `lyt skills install` and `lyt skills list` meta-CLI verbs.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -49,7 +49,7 @@
     "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
   },
   "dependencies": {
-    "@younndai/lyt-vault": "^0.9.8",
+    "@younndai/lyt-vault": "^0.9.9",
     "commander": "^12.1.0"
   },
   "devDependencies": {

@@ -473,6 +473,40 @@ function buildProactiveSection(): string {
   ].join("\n");
 }
 
+// Phase D — agent-relay for the concept-search discovery nudge. A `lyt
+// search --json` run may carry `trace.nudge`; this section tells the agent how
+// to read it, how to voice the one-time offer (user-benefit framing only), and
+// the response-capture contract that maps the user's reply to exactly one verb.
+function buildModelNudgeSection(): string {
+  return [
+    "## `[lyt.nudge]` Concept-search offer — read the trace, capture an explicit reply",
+    "",
+    "`lyt search --json` may carry a `trace.nudge` block — the signal for a ONE-TIME offer to",
+    "enable **concept search** (finding notes by meaning, not just keywords). Read it; voice the",
+    "offer ONLY when it says to:",
+    "- **`eligible: true`** (null `reason`) → voice the offer once. **`eligible: false`** → say",
+    "  nothing (`reason`: `model-present` already set up · `disabled` user opted out · `auto-quiet`",
+    "  declined enough · `cadence` asked recently). **`trace.nudge` absent** → nothing to do.",
+    "",
+    "When eligible, relay it in plain language — **framed as a benefit to the user, never \"to help",
+    'improve Lyt"**: _"I can also search your notes by meaning, not just keywords. It needs a',
+    'one-time local setup (nothing leaves your machine). Want me to set it up?"_ Then **capture an',
+    "explicit yes or no** before acting, and map the reply to exactly one verb:",
+    "",
+    "| User reply | Do |",
+    "|---|---|",
+    "| yes (set it up) | `lyt model fetch` (runs the one-time local setup; marks the offer resolved) |",
+    "| no (explicit decline) | `lyt model nudge --decline` (records ONE decline; 3 → auto-quiet) |",
+    '| "never ask again" | `lyt model nudge --never` (turns the offer off permanently) |',
+    "| surfaced / bookkeeping only | `lyt model nudge --asked` (records the offer was shown) |",
+    "",
+    "- **A non-response is NOT a decline** — if the user doesn't answer, record nothing (do NOT run",
+    "  `nudge --decline` on silence). Only an explicit \"no\" counts.",
+    "- Inspect anytime with `lyt model nudge --status` (read-only). Honor a `disabled` / `auto-quiet`",
+    "  state — once the user has opted out, never re-raise the offer.",
+  ].join("\n");
+}
+
 // Enabler session (2026-06-11, never-phone-home lock) — the alpha feedback
 // channel is this directive, not telemetry. Feedback is user-initiated, the
 // payload is an inspectable markdown Figment in the user's own pod, and
@@ -708,6 +742,8 @@ export async function generateAgentManual(args: AgentManualArgs): Promise<AgentM
     buildHealSection(),
     "",
     buildProactiveSection(),
+    "",
+    buildModelNudgeSection(),
     "",
     buildFeedbackSection(),
     "",

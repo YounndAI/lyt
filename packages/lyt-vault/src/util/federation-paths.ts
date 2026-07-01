@@ -86,7 +86,7 @@ export function getFederationYonPath(handle: string): string {
 // master-plan §5 `{handle}/lyt-federation` convention → `{handle}/lyt-pod`).
 // = Option B: rename ONLY the user-visible repo name to "pod"; "federation"
 // stays the internal architecture term (CLI verbs, symbols, design docs all
-// unchanged). (Brief A) then renamed the FILE federation.yon → pod.yon
+// unchanged). then renamed the FILE federation.yon → pod.yon
 // too; the repo name + this constant are unaffected. This single constant is
 // the chokepoint — both
 // `gh repo create` (federation/init.ts) AND the cross-machine adopt-detect

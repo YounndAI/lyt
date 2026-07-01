@@ -25,7 +25,7 @@
 // is absent, offline-with-no-cached-model, or the runtime fails to load, it
 // returns { ran: false, available: false, reason } WITHOUT touching the table
 // and WITHOUT throwing. The base pod therefore builds + searches with zero
-// embeddings present and no error. The ~23MB model is lazy-fetched on first
+// embeddings present and no error. The one-time local model is lazy-fetched on first
 // successful init (see util/embeddings.ts), never bundled.
 //
 // Mirrors upsert-keyphrases-cache.ts: same walk, same extractFtsBody body, same
@@ -53,6 +53,10 @@ export interface UpsertEmbeddingsCacheResult {
   // dense skipped, lexical-only path unchanged. `reason` explains why.
   available: boolean;
   reason?: string;
+  // Phase E fix-pass (release review R1 FIX 1) — structured fetch-failure signal
+  // carried up from the failed EmbedderLoad, so the terminal-phase mapper can label
+  // a stall honestly. Present only on the fetch-fail path; absent otherwise.
+  classification?: "offline" | "stalled" | "locked" | "corrupt" | "error";
   figmentsProcessed: number;
   embeddingRowsUpserted: number;
   durationMs: number;
@@ -68,6 +72,18 @@ export interface UpsertEmbeddingsCacheOpts {
   // this after the handler consents on a TTY). Default-undefined keeps the
   // prior silent behavior.
   showDownloadProgress?: boolean;
+  // Phase E (C6) — optional embed-loop progress. Fired as each batch of
+  // passage vectors completes: `done` is the running count of embedded docs,
+  // `total` is the corpus size. A CLI caller passes a TUI updater ("embedding
+  // N/M"); test/--json/non-TTY callers leave it undefined → ZERO behavior change
+  // (the embed loop is byte-identical, the callback is simply never wired).
+  onProgress?: (done: number, total: number) => void;
+  // Phase E (C6) — optional model-DOWNLOAD byte-progress. Distinct from
+  // `onProgress` (the embed loop): this fires during the one-time GCS model
+  // fetch with (bytesDone, totalBytes). Threaded into loadEmbedder → fetchModel.
+  // Only meaningful on a consented fetch path (model absent + showDownloadProgress);
+  // a cache-present build never downloads, so it never fires. Inert when absent.
+  onDownloadProgress?: (bytesDone: number, totalBytes: number) => void;
 }
 
 // Cheap deterministic content hash for the body text (FNV-1a over the embedded
@@ -100,7 +116,7 @@ export async function upsertEmbeddingsCache(
 
   // C-1 (no-notes guard, moved AHEAD of loadEmbedder) — an EMPTY vault has
   // nothing to embed, so there is no reason to load (and possibly FETCH) the
-  // ~23MB model. The empty-check therefore runs BEFORE the embedder resolve:
+  // local model. The empty-check therefore runs BEFORE the embedder resolve:
   // walk first, and if there are no note files, skip cleanly WITHOUT touching
   // loadEmbedder(). This closes the C-1 chain where `lyt reindex` on a fresh
   // (note-less) vault silently downloaded the model. (Was: loadEmbedder ran
@@ -123,15 +139,22 @@ export async function upsertEmbeddingsCache(
   if (opts.embedder !== undefined) {
     embedder = opts.embedder;
   } else {
-    const load = await loadEmbedder(
-      opts.showDownloadProgress === true ? { showDownloadProgress: true } : {},
-    );
+    const load = await loadEmbedder({
+      ...(opts.showDownloadProgress === true ? { showDownloadProgress: true } : {}),
+      // Phase E (C6) — forward download byte-progress into the owned fetch.
+      // Only fires on a consented fetch (model absent + showDownloadProgress);
+      // forwarded only when wired so the silent path is unchanged.
+      ...(opts.onDownloadProgress !== undefined
+        ? { onProgress: opts.onDownloadProgress }
+        : {}),
+    });
     if (!load.available) {
       return {
         vaultPath,
         ran: false,
         available: false,
         reason: load.reason,
+        ...(load.classification !== undefined ? { classification: load.classification } : {}),
         figmentsProcessed: 0,
         embeddingRowsUpserted: 0,
         durationMs: Date.now() - startedAt,
@@ -156,7 +179,14 @@ export async function upsertEmbeddingsCache(
 
   let vectors: Float32Array[];
   try {
-    vectors = await embedder.embedPassages(docs.map((d) => d.text));
+    // Phase E (C6) — thread the optional embed-loop progress callback into
+    // embedPassages. embeddings.ts fires it per completed batch with the running
+    // (done,total). When opts.onProgress is undefined the arg is undefined and
+    // the embed loop is unchanged (the wrap() callback guard is a no-op).
+    vectors = await embedder.embedPassages(
+      docs.map((d) => d.text),
+      opts.onProgress,
+    );
   } catch (err) {
     // A mid-embed runtime failure also degrades cleanly — leave the table
     // untouched (we have not truncated yet) and report unavailable.

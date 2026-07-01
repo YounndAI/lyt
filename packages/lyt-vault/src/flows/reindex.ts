@@ -34,7 +34,11 @@ import { getMeshByName } from "../registry/meshes-repo.js";
 import { listVaultsInMesh } from "../registry/mesh-vaults-repo.js";
 import { getVaultByName, listVaults, type VaultRow } from "../registry/repo.js";
 import { readFrozenLock } from "../util/freeze-check.js";
-import { rebuildVaultFlow, type RebuildVaultResult } from "./rebuild-vault.js";
+import {
+  rebuildVaultFlow,
+  type EmbeddingsBuildProgress,
+  type RebuildVaultResult,
+} from "./rebuild-vault.js";
 
 export type ReindexScope = "all" | "mesh" | "vault";
 
@@ -47,9 +51,14 @@ export interface ReindexArgs {
   nowIso?: string;
   // C-1 — interactivity signal threaded to each rebuildVaultFlow's
   // embeddings build gate. The CLI sets this true ONLY on an interactive TTY
-  // (not --json), so the build path may prompt + visibly fetch the ~23MB model;
+  // (not --json), so the build path may prompt + visibly fetch the one-time local model;
   // default-undefined (non-interactive) → never prompt, never auto-fetch.
   embeddingsInteractive?: boolean;
+  // Phase E Unit 2 — optional embeddings-build progress reporter, passed by
+  // the reindex CLI on an interactive TTY (NEVER under --json / non-TTY). Drives
+  // the spinner phase labels + live download/embed lines. Threaded per-vault into
+  // rebuildVaultFlow; inert when absent.
+  embeddingsProgress?: EmbeddingsBuildProgress;
 }
 
 export interface ReindexResult {
@@ -95,6 +104,9 @@ export async function reindexFlow(args: ReindexArgs): Promise<ReindexResult> {
           ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
           ...(args.embeddingsInteractive !== undefined
             ? { embeddingsInteractive: args.embeddingsInteractive }
+            : {}),
+          ...(args.embeddingsProgress !== undefined
+            ? { embeddingsProgress: args.embeddingsProgress }
             : {}),
         }),
       );

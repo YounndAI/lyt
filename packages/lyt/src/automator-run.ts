@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Meta CLI automator-run composition (block-B Commit 7).
+// Meta CLI automator-run composition.
 //
 // This is the single function the `lyt automator run` CLI subcommand and
 // the metadata-filler end-to-end integration test both consume. It glues

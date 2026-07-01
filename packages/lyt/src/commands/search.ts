@@ -45,6 +45,9 @@
 import { Command } from "commander";
 
 import {
+  closeRegistry,
+  markAsked,
+  openRegistry,
   searchCascadeFlow,
   withSpinner,
   type SearchCascadeArgs,
@@ -63,7 +66,7 @@ interface SearchCliOpts {
   // dense-retrieval fusion. Commander negatable flag: `semantic` defaults
   // true; `--no-semantic` → false. The flow's gate (semantic ?? embeddingsEnabled())
   // still decides whether fusion actually runs, so a pod with embeddings off
-  // stays byte-identical (ARC-D2) even with the default-on flag.
+  // stays byte-identical even with the default-on flag.
   semantic?: boolean;
 }
 
@@ -159,6 +162,12 @@ export function buildSearchCommand(): Command {
           query: trimmed,
           scope,
           limit,
+          // Phase D Slice 2b — the `lyt search` CLI is the discovery-nudge
+          // surface: turn the nudge ON for BOTH human and --json runs (the flow
+          // increments the pod-global cadence counter + computes trace.nudge).
+          // The HUMAN ambient hint vs the --json trace are mutually exclusive
+          // (F-D.2), enforced in the emitters below.
+          nudge: true,
           ...(scopeTarget !== undefined ? { scopeTarget } : {}),
           ...(selfHeal ? { selfHeal: true } : {}),
           // the semantic DEFAULT now lives in the FLOW (semantic ??
@@ -185,6 +194,18 @@ export function buildSearchCommand(): Command {
           emitJsonResult(res);
         } else {
           emitHumanResult(res);
+          // release review FIX 4(a) — the CLI ambient hint is now STATEFUL.
+          // When the human path actually SURFACED the eligible hint, stamp the
+          // ask against the pod-global singleton (atomic markAsked) so the SAME
+          // 7-day cadence + auto-quiet that govern the agent path apply to CLI
+          // users too (a human is no longer nagged on every search). XOR with the
+          // --json agent path is preserved: this branch is the non-json path
+          // only; the agent drives its own `nudge --asked`/`--decline`, so we do
+          // NOT stamp under --json. Best-effort — a registry failure never fails
+          // the search.
+          if (res.trace.nudge?.eligible === true) {
+            await maybeStampCliAsk();
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -197,7 +218,34 @@ export function buildSearchCommand(): Command {
     });
 }
 
-function emitJsonResult(res: SearchCascadeResult): void {
+// release review FIX 4(a) — stamp the ask after the CLI surfaced the ambient
+// hint to a human, so the CLI hint shares the agent's 7-day cadence + auto-quiet.
+// Atomic markAsked (resets searches_since_ask, stamps last_ask_at). Best-effort:
+// a registry-open / write failure is swallowed — surfacing the hint must never
+// fail the search, and a missed stamp only means one extra (harmless) future
+// hint. Exported for the human-cadence unit test.
+export async function maybeStampCliAsk(): Promise<void> {
+  let db: Awaited<ReturnType<typeof openRegistry>> | undefined;
+  try {
+    db = await openRegistry();
+    await markAsked(db, new Date().toISOString());
+  } catch {
+    // best-effort — never fail the search on a nudge-cadence write.
+  } finally {
+    if (db !== undefined) await closeRegistry(db);
+  }
+}
+
+// Phase D Slice 2b — the terminal ambient discovery hint (drafted copy,
+// pinned per the release review trust-safety finding). USER-BENEFIT framing only;
+// names the exact re-enable verb; NO size word ("one-time local"). Emitted on
+// HUMAN stdout ONLY when the nudge trace is `eligible`. NEVER under --json (the
+// --json run surfaces the decision-trace instead — F-D.2 mutual exclusion).
+export const NUDGE_AMBIENT_HINT =
+  "tip: concept search can find this by meaning, not just keywords — set it up " +
+  "once with 'lyt model fetch' (one-time local, nothing leaves your machine).";
+
+export function emitJsonResult(res: SearchCascadeResult): void {
   // Stable-key-ordered output per Lock 0.3 — Object construction order
   // determines JSON.stringify key order in Node.
   const stable = {
@@ -217,6 +265,12 @@ function emitJsonResult(res: SearchCascadeResult): void {
       tiersRun: res.trace.tiersRun,
       perTierHitCount: res.trace.perTierHitCount,
       vaultsSearched: res.trace.vaultsSearched,
+      // Phase D Slice 2b — surface the nudge decision-trace under --json so
+      // the agent knows model state + WHY it should/shouldn't voice the nudge.
+      // Additive: present ONLY when the flow ran the nudge (CLI runs always do),
+      // so any existing --json snapshot without it is unchanged. The --json run
+      // emits the TRACE, never the human hint (F-D.2 mutual exclusion).
+      ...(res.trace.nudge !== undefined ? { nudge: res.trace.nudge } : {}),
     },
     durationMs: res.durationMs,
   };
@@ -224,7 +278,7 @@ function emitJsonResult(res: SearchCascadeResult): void {
   console.log(JSON.stringify(stable, null, 2));
 }
 
-function emitHumanResult(res: SearchCascadeResult): void {
+export function emitHumanResult(res: SearchCascadeResult): void {
   // V-C-1 Phase C (L3) — when the empty-result self-heal reindexed stale
   // vault(s) and re-queried, say so (the results below are post-heal).
   if (res.trace.selfHealed !== undefined) {
@@ -239,6 +293,10 @@ function emitHumanResult(res: SearchCascadeResult): void {
     console.log(
       `No matches for ${JSON.stringify(res.query)} (scope=${res.scope}, vaults searched: ${res.trace.vaultsSearched.length}).`,
     );
+    // A 0-hit search is a PRIME moment for the discovery hint — semantic might
+    // find by meaning what lexical missed. Same eligibility + mutual-exclusion
+    // (F-D.2) as the with-results path.
+    maybeEmitNudgeHint(res);
     return;
   }
   // eslint-disable-next-line no-console
@@ -252,6 +310,20 @@ function emitHumanResult(res: SearchCascadeResult): void {
       // eslint-disable-next-line no-console
       console.log(`         ${r.snippet}`);
     }
+  }
+  maybeEmitNudgeHint(res);
+}
+
+// Phase D Slice 2b — the ambient discovery hint, on HUMAN stdout only, iff
+// the nudge trace says eligible (model absent, not declined/disabled, cadence
+// due). This is the human counterpart to the --json decision-trace: the human
+// path NEVER emits the trace, the --json path NEVER emits this hint (F-D.2
+// mutual exclusion — emitJsonResult does not call this). Absent trace /
+// ineligible → silent.
+function maybeEmitNudgeHint(res: SearchCascadeResult): void {
+  if (res.trace.nudge?.eligible === true) {
+    // eslint-disable-next-line no-console
+    console.log(NUDGE_AMBIENT_HINT);
   }
 }
 

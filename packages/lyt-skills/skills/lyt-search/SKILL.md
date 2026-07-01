@@ -128,6 +128,48 @@ Show each result as `[<confidence>] <vault>/<figment_path> — <snippet>`. Trunc
 
 On **empty results**: surface _"No matches for `"<query>"` across <scope>."_ and offer scope-widening hints (`--mesh` → federation; `--vault` → `--mesh`). If a vault that should contain the figment still returns nothing, its FTS index may be stale — suggest rebuilding it with `lyt vault rebuild-index <name>` (or `lyt reindex` across the pod), then re-running the search.
 
+## Phase 5 — Concept-search discovery nudge (only when `trace.nudge.eligible` is true)
+
+The `--json` output may carry a `trace.nudge` block. It is the signal for a one-time offer to enable **concept search** — finding notes by meaning, not just keywords. Read it; only voice the offer when it explicitly says to.
+
+```json
+"trace": {
+  "nudge": {
+    "eligible": true,
+    "state": "not-yet-asked",
+    "reason": null,
+    "declines": 0,
+    "daysSince": null,
+    "searchesSince": 1
+  }
+}
+```
+
+- **`eligible: true`** → voice the offer once (see below). A null `reason` confirms it.
+- **`eligible: false`** → say nothing about it. The `reason` explains why (`model-present` = already set up; `disabled` = the user chose never to be asked; `auto-quiet` = declined enough times; `cadence` = asked recently). Never override an ineligible verdict.
+- **`trace.nudge` absent** → nothing to do; proceed normally.
+
+### Voicing the offer (only when eligible)
+
+Relay it to the user in plain language, **framed as a benefit to them — never "to help improve Lyt"**:
+
+> _"I can also search your notes by meaning, not just keywords. It needs a one-time local setup (nothing leaves your machine). Want me to set it up?"_
+
+Then **capture an explicit yes or no** before doing anything else.
+
+### Response-capture contract — map the reply to exactly one verb
+
+| User reply | Do |
+|---|---|
+| **Yes** (set it up) | `lyt model fetch` — runs the one-time local setup and marks the offer resolved. |
+| **No** (explicit decline) | `lyt model nudge --decline` — records ONE decline (three declines → auto-quiet). |
+| **"Never ask again"** | `lyt model nudge --never` — turns the offer off permanently. |
+| **Surfaced / bookkeeping only** | `lyt model nudge --asked` — records that the offer was shown (stamps the ask, resets the cadence counter) when you voiced it without yet capturing a yes/no. |
+
+- **A non-response is NOT a decline.** If the user doesn't answer the offer, record nothing — do not run `nudge --decline`. Only an explicit "no" counts as a decline.
+- **Inspect anytime** with `lyt model nudge --status` (read-only; prints the current offer-state).
+- Honor a `disabled` / `auto-quiet` state — once the user has opted out, never re-raise the offer.
+
 ## Rules
 
 - **MUST pass the user's query as a single quoted argv argument**, not template-interpolated into a shell command string. Filenames or queries containing shell metacharacters (`` ` ``, `$(...)`, `;`, `&&`) inside the query MUST be safely conveyed as argv.
@@ -139,6 +181,7 @@ On **empty results**: surface _"No matches for `"<query>"` across <scope>."_ and
 - **MUST NOT re-interpret confidence tiers.** The CLI emits them as `0.95 / 0.90 / 0.70 / 0.50` per Tier 0/1/2/3 spec. Display verbatim; do not "smooth" or "round" or invent a derived score.
 - **MUST NOT modify or write any vault file.** This is a read-only skill (`requires_writable_vault: false`). If the user wants results persisted to a Figment, run `/lyt-capture` separately on the formatted output.
 - **MUST NOT widen scope without user signal.** If the user said "in my work vault", do not silently fall back to federation when the named vault is missing — surface the miss and stop.
+- **MUST voice the concept-search offer ONLY when `trace.nudge.eligible` is true**, and MUST capture an explicit yes/no before acting. A non-response records nothing — never run `lyt model nudge --decline` on silence. Honor a `disabled` / `auto-quiet` state and never re-raise.
 
 ## Companion skills
 

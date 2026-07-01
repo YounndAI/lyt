@@ -7,6 +7,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.9.9] — 2026-07-01
+
+Hardening release — reliability + agent-UX improvements to the local semantic-search pipeline. No new user-facing capability claim.
+
+### Changed
+- **The one-time local model download is now owned + observable.** The embedding-model fetch shows live download + embed progress, sends an honest `lyt/<version>` User-Agent, is cancellable, and is guarded by a hardened atomic lockfile so concurrent fetches can't collide.
+- **Search never triggers a model download (read-never-fetches).** A search uses the semantic arm only when the model is already cached; otherwise it falls back to the byte-identical lexical path — it never phones home and never blocks a search on a download.
+
+### Added
+- **Discovery nudge.** A one-time, pod-global offer to enable meaning-based search ("find notes by meaning, not just keywords") via a local one-time setup — surfaced at most once per cadence, honors opt-out, and never sends anything off your machine.
+
+---
+
 ## [0.9.8] — 2026-06-29
 
 ### Fixed

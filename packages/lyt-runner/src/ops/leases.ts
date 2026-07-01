@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Real lease ops (block-B Commit 4).
+// Real lease ops.
 //
 // Per arc-thoughts §6.6:201-216 the 5-step protocol fronts every automator
 // run with `std:lease.acquire@v1`. Per arc-thoughts §6.11:443-446 lyt-runner

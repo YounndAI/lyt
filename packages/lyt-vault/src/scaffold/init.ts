@@ -426,7 +426,7 @@ export interface ScaffoldConformanceResult {
 //
 // init() scaffolds the priming seeds (lyt-overview.md / agents.md) carrying the
 // `lyt-scaffold: true` sentinel so the g6 gate FTS-excludes them. A vault that
-// arrives via `lyt vault adopt <path>` (B-4 alm-os migration path) or `lyt vault
+// arrives via `lyt vault adopt <path>` (the adopt-an-existing-vault path) or `lyt vault
 // clone <url>` may have NO priming seeds at all — or, worse, a pre-existing
 // agents.md / lyt-overview.md WITHOUT the sentinel that would FTS-pollute the
 // primer. This brings such a vault to conformance.

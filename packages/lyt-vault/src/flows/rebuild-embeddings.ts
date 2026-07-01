@@ -44,6 +44,14 @@ export interface RebuildEmbeddingsArgs {
   // C-1 — VISIBLE fetch on the consented build path (threaded to
   // upsertEmbeddingsCache → loadEmbedder).
   showDownloadProgress?: boolean;
+  // Phase E (C6) — optional embed-loop progress, threaded straight through
+  // to upsertEmbeddingsCache → embedPassages. Lets a CLI caller surface
+  // "embedding N/M". Optional/inert: absent → no behavior change.
+  onProgress?: (done: number, total: number) => void;
+  // Phase E (C6) — optional model-DOWNLOAD byte-progress, threaded through
+  // to upsertEmbeddingsCache → loadEmbedder → fetchModel. Fires only on a
+  // consented fetch (model absent). Inert when absent.
+  onDownloadProgress?: (bytesDone: number, totalBytes: number) => void;
 }
 
 export interface RebuildEmbeddingsResult {
@@ -54,6 +62,11 @@ export interface RebuildEmbeddingsResult {
   ran: boolean;
   available: boolean;
   reason?: string;
+  // Phase E fix-pass (release review R1 FIX 1) — structured fetch-failure signal
+  // carried alongside `reason`, so the rebuild-vault terminal-phase mapper can label
+  // a real fetch stall as `timed-out` instead of the dishonest `offline-deferred`.
+  // Present only on a fetch-fail path; absent for non-fetch unavailability.
+  classification?: "offline" | "stalled" | "locked" | "corrupt" | "error";
   durationMs: number;
 }
 
@@ -63,10 +76,20 @@ export async function rebuildEmbeddingsFlow(
   const startedAt = Date.now();
   const { vaultName, vaultPath } = await resolveVault(args);
 
-  const upsertOpts: { lytDb?: Client; embedder?: Embedder; showDownloadProgress?: boolean } = {};
+  const upsertOpts: {
+    lytDb?: Client;
+    embedder?: Embedder;
+    showDownloadProgress?: boolean;
+    onProgress?: (done: number, total: number) => void;
+    onDownloadProgress?: (bytesDone: number, totalBytes: number) => void;
+  } = {};
   if (args.lytDb !== undefined) upsertOpts.lytDb = args.lytDb;
   if (args.embedder !== undefined) upsertOpts.embedder = args.embedder;
   if (args.showDownloadProgress === true) upsertOpts.showDownloadProgress = true;
+  if (args.onProgress !== undefined) upsertOpts.onProgress = args.onProgress;
+  if (args.onDownloadProgress !== undefined) {
+    upsertOpts.onDownloadProgress = args.onDownloadProgress;
+  }
   const cacheRes: UpsertEmbeddingsCacheResult = await upsertEmbeddingsCache(vaultPath, upsertOpts);
 
   return {
@@ -77,6 +100,7 @@ export async function rebuildEmbeddingsFlow(
     ran: cacheRes.ran,
     available: cacheRes.available,
     ...(cacheRes.reason !== undefined ? { reason: cacheRes.reason } : {}),
+    ...(cacheRes.classification !== undefined ? { classification: cacheRes.classification } : {}),
     durationMs: Date.now() - startedAt,
   };
 }

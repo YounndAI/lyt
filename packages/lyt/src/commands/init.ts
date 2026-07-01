@@ -36,13 +36,18 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 
 import {
+  closeRegistry,
+  embeddingsOfferGate,
   getHandleFromIdentity,
+  markAsked,
   materializePodLocal,
+  openRegistry,
   readIdentityCache,
   reconcilePublishFlow,
   ReadlinePromptHandler,
   renderNextSteps,
   renderPodCard,
+  resolveAskedState,
   runWizard,
   startSpinner,
   validateMeshName,
@@ -333,6 +338,18 @@ export function buildLytInitCommand(): Command {
           // On yes → the consented sync engine pushes pod + vaults. Outward
           // effect ONLY behind this explicit consent.
           await maybePromptAndPublish(result);
+          // Phase C (C4) — interactive-only embeddings offer on the
+          // `--custom` walkthrough. The offer gate self-suppresses when the
+          // model is already cached OR the invocation isn't interactive
+          // (isEmbeddingsInteractive), so this never prompts under --json / a
+          // non-TTY. Scoped to `--custom` only: `--auto` is non-interactive BY
+          // DEFINITION (F-C.1) and MUST NOT fetch or prompt → it never reaches
+          // this call. Accept → owned fetch; decline → enable-later hint (no
+          // persistence; Phase D owns decline-state).
+          // (We're in the non-JSON human branch, so json is always false here.)
+          if (mode === "custom") {
+            await maybeOfferEmbeddings(false);
+          }
         }
         // Re-init with ALL-failed integrity → exit 1 (matches v1.B.2
         // skip-and-warn precedent + brief default).
@@ -782,6 +799,66 @@ async function maybePromptAndPublish(res: InitBootstrapResult): Promise<void> {
         console.log(`  ${o.status}: ${o.vaultName} — ${o.message}`);
       }
     }
+  }
+}
+
+// Phase C (C4) — the `--custom`-path interactive embeddings offer. Wraps
+// embeddingsOfferGate with a readline confirm (matching runCustomPrompts'
+// readline/promises shape) + the live TTY signals. The gate itself decides
+// whether to actually prompt (model-present + isEmbeddingsInteractive), so this
+// is a thin adapter. `--auto` NEVER calls this (F-C.1). Best-effort: an offer
+// failure never derails a finished init.
+async function maybeOfferEmbeddings(json: boolean): Promise<void> {
+  try {
+    // Phase D Slice 2b — thread the LIVE pod-global nudge-state so the
+    // `--custom` init offer consults the SAME coherent state as the rebuild gate
+    // + first-search nudge (option (c)): offered AT MOST ONCE per decision-epoch.
+    // Open the registry best-effort and snapshot askedState via the pinned
+    // synchronous `() => OfferState` resolver. A registry open failure leaves
+    // askedState undefined → the gate uses its inert () => "not-yet-asked"
+    // default, preserving Phase-C behavior.
+    let askedState: (() => "not-yet-asked" | "asked" | "declined" | "enabled") | undefined;
+    let registryDb: Awaited<ReturnType<typeof openRegistry>> | undefined;
+    try {
+      registryDb = await openRegistry();
+      askedState = await resolveAskedState(registryDb);
+    } catch {
+      // Registry unreachable → inert default.
+    }
+    try {
+      await embeddingsOfferGate({
+        json,
+        stdinTTY: process.stdin.isTTY === true,
+        stdoutTTY: process.stdout.isTTY === true,
+        promptConfirm: async (question: string): Promise<boolean> => {
+          const rl = createInterface({ input: process.stdin, output: process.stdout });
+          try {
+            const ans = (await rl.question(`${question} (y/n) `)).trim().toLowerCase();
+            // No preselect: affirmative `y`/`yes` only enables; empty Enter →
+            // decline (no accidental fetch). Matches the pinned consent copy.
+            return ans === "y" || ans === "yes";
+          } finally {
+            rl.close();
+          }
+        },
+        emit: (line: string) => {
+          // eslint-disable-next-line no-console
+          console.log(line);
+        },
+        ...(askedState !== undefined ? { askedState } : {}),
+        // release review FIX 4(b) — when this real offer surfaces, stamp the
+        // pod-global ask so init/wizard share the agent's cadence + auto-quiet.
+        // Only when we have a live registry (the inert-seam default path, where
+        // registryDb is undefined, keeps its no-persistence behavior).
+        ...(registryDb !== undefined
+          ? { onSurfaced: async () => void (await markAsked(registryDb!, new Date().toISOString())) }
+          : {}),
+      });
+    } finally {
+      if (registryDb !== undefined) await closeRegistry(registryDb);
+    }
+  } catch {
+    // Non-fatal — the pod is set up; semantic can be enabled later.
   }
 }
 

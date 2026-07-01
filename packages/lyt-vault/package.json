@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-vault",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "Lyt vault primitive — CLI verbs to create and manage individual Lyt Vaults (folder + .obsidian + .lyt scaffold).",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -62,7 +62,9 @@
     "commander": "^12.1.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
-    "uuid": "^11.0.0"
+    "tar": "^6.2.1",
+    "uuid": "^11.0.0",
+    "zod": "^3.25.76"
   },
   "optionalDependencies": {
     "fastembed": "^2.1.0"
@@ -70,6 +72,7 @@
   "devDependencies": {
     "@lyt/typescript-config": "*",
     "@types/node": "^22.10.5",
+    "@types/tar": "^6.1.13",
     "rimraf": "*",
     "typescript": "*",
     "vitest": "*"

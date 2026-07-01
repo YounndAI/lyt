@@ -44,7 +44,7 @@ export function buildRebuildVaultCommand(): Command {
       try {
         const threshold =
           opts.threshold !== undefined ? Number.parseInt(opts.threshold, 10) : undefined;
-        // C-1 — the build path may prompt + visibly fetch the ~23MB model
+        // C-1 — the build path may prompt + visibly fetch the one-time local model
         // ONLY from an interactive terminal: BOTH stdin AND stdout a real TTY,
         // AND not --json. stdin must be a TTY too — the prompt reads
         // process.stdin, so a redirected-stdin + TTY-stdout invocation must NOT

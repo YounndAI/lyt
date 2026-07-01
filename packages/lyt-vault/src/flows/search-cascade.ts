@@ -98,8 +98,17 @@ import { searchFts } from "../registry/fts-repo.js";
 import { loadAllKeyphrases } from "../registry/keyphrases-repo.js";
 import { keyphraseMatch, queryKeyphraseTokens } from "../util/keyphrase-extract.js";
 import { loadAllEmbeddings } from "../registry/embeddings-repo.js";
-import { cosine, loadEmbedder } from "../util/embeddings.js";
+import { cosine, embedderMemoized, loadEmbedder, modelCachePresent } from "../util/embeddings.js";
 import { embeddingsEnabled } from "../util/config.js";
+import { bumpSearchCounter, ensureNudgeState } from "../registry/nudge-state-repo.js";
+import {
+  classifyEligibility,
+  deriveOfferState,
+  MS_PER_DAY,
+  type NudgeIneligibleReason,
+  type NudgeState,
+  type OfferState,
+} from "../util/nudge-state.js";
 
 // Public confidence constants exposed for tests + future
 // downstream consumers (e.g. primer-generator may want to weight
@@ -241,7 +250,42 @@ export interface SearchTrace {
   // loaded). Absent on every lexical-only search, so the deterministic Lock 0.3
   // output of a base pod (and any semantic:false call) is byte-unchanged.
   semanticFused?: boolean;
+  // Phase D Slice 2b — first-search discovery-nudge decision-trace. Present
+  // ONLY when the nudge surface ran (opt-in `nudge:true`, set by the `lyt search`
+  // CLI for human + --json runs, NEVER by the deterministic retrieval harness /
+  // bench / direct test callers). Absent on every direct-call search, so the
+  // Lock 0.3 deterministic output is byte-unchanged when the nudge is off. The
+  // `eligible` field is what the agent reads under --json to decide whether to
+  // voice the nudge; the CLI emits the human ambient hint iff `eligible` AND the
+  // run is NOT --json (F-D.2 mutual exclusion). `reason` explains an ineligible
+  // verdict; `declines`/`daysSince`/`searchesSince` mirror the plan C6 trace.
+  nudge?: NudgeDecisionTrace;
 }
+
+// Phase D Slice 2b — the discovery-nudge decision-trace (plan C6). `state`
+// is the derived offer-state ("not-yet-asked" | "asked" | "declined" |
+// "enabled"); `eligible` is the live isEligible() verdict (model absent, not
+// declined/disabled, cadence due). `daysSince` is null when never asked.
+export interface NudgeDecisionTrace {
+  eligible: boolean;
+  state: OfferState;
+  reason: NudgeIneligibleReason | null;
+  declines: number;
+  daysSince: number | null;
+  searchesSince: number;
+  // release review FIX 7 — set true ONLY when the cadence-counter WRITE threw
+  // (the pre-write read succeeded, so the decision-trace is still meaningful, but
+  // the increment did NOT persist). Lets the agent distinguish a write failure
+  // from a genuine nudge-off — without it a swallowed write error is invisible.
+  // Absent (omitted) on the happy path, so the deterministic baseline trace is
+  // byte-unchanged.
+  persistError?: boolean;
+}
+
+// `NudgeIneligibleReason` is re-exported from util/nudge-state.ts (the single
+// source — release review FIX 5). Imported above; re-exported here so existing
+// consumers importing it from this module keep working.
+export type { NudgeIneligibleReason };
 
 export interface SearchCascadeArgs {
   query: string;
@@ -294,6 +338,27 @@ export interface SearchCascadeArgs {
   // paths can't catch) is reindexed once, then the query is re-run before
   // reporting "no matches".
   selfHeal?: boolean;
+  // Phase D Slice 2b — first-search discovery-nudge. DEFAULT FALSE: the
+  // flow stays byte-deterministic for the Lane V retrieval harness, the latency
+  // bench, and every test that calls it directly (none set this). The `lyt
+  // search` CLI turns it ON for both human and --json runs. When true the flow:
+  //   (1) increments the pod-global cadence counter via the ATOMIC
+  // bumpSearchCounter (release review FIX 1) — ADDITIVE: it does NOT touch
+  //       ranking/results, only the nudge-state singleton row;
+  //   (2) computes the nudge decision-trace (classifyEligibility / deriveOfferState) into
+  //       `trace.nudge` so the CLI can emit the human ambient hint (human run,
+  //       eligible) or surface the trace (--json) — F-D.2 mutual exclusion is
+  //       enforced at the CLI.
+  // When false NONE of this runs and `trace.nudge` is absent → byte-identical.
+  // A registry/db error in the nudge path is swallowed (the search result is
+  // never failed by a best-effort nudge).
+  nudge?: boolean;
+  // Test seam — injectable clock for the nudge cadence check (isEligible). The
+  // `now` is read ONCE at the nudge step; production uses the live clock.
+  nudgeNowFn?: () => Date;
+  // Test seam — injectable model-present probe for the nudge decision (mirrors
+  // the rebuild gate / resolver seam). Production uses modelCachePresent().
+  nudgeModelPresentFn?: () => boolean;
 }
 
 export interface SearchCascadeResult {
@@ -688,11 +753,35 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
   // embed the query), reorder `results` by fusing the dense cosine ranking into
   // the lexical ranking via the proven confidence-gated rank-preserve rule. ANY
   // miss (model unavailable, zero vectors gathered, embed throws) leaves the
-  // lexical order UNTOUCHED → byte-identical to semantic:false (ARC-D2). The
+  // lexical order UNTOUCHED → byte-identical to semantic:false. The
   // fusion is pure reordering over the already-gathered candidates (no new DB
   // reads), so it cannot starve or change the candidate SET — only its order.
   let semanticFused = false;
-  if (semanticActive && denseDocs.length > 0 && results.length > 0) {
+  // Phase B (C3, F-B.1) — defense-in-depth read-never-fetches guard. The
+  // foundation already prevents a fetch on a read (loadEmbedder with no opts has
+  // fetchAllowed=false → model-absent returns { available:false } with ZERO
+  // network). This `modelCachePresent()` precheck makes that explicit at the call
+  // site so we don't even attempt the dynamic import / ONNX init when the model
+  // is absent (perf + clarity). It must NOT change search RESULTS: model present
+  // → the load runs exactly as before; model absent → still falls through to the
+  // lexical order, byte-identical to semantic:false. "Vectors present but model
+  // evicted" is the semantic-evicted state (semanticEvicted()) — non-destructive,
+  // re-fusable the moment the model returns.
+  // MAJOR fix (release review 2026-06-30, FIX 4 / G1): fuse when the model is present
+  // on disk OR a live embedder is already memoized in-process. The bare
+  // `modelCachePresent()` guard short-circuited BEFORE loadEmbedder, so in a
+  // long-lived process where the model was loaded (memoized in RAM) and the disk
+  // cache was THEN evicted, fusion was silently dropped even though the in-RAM
+  // embedder is still valid. `embedderMemoized()` is a pure synchronous probe (no
+  // load, no fetch) — the read-never-fetches contract is unchanged: model never
+  // loaded + absent → embedderMemoized() false → no fusion (byte-identical to
+  // semantic:false). loadEmbedder() below never fetches on this path (no opts).
+  if (
+    semanticActive &&
+    denseDocs.length > 0 &&
+    results.length > 0 &&
+    (modelCachePresent() || embedderMemoized())
+  ) {
     try {
       const load = await loadEmbedder();
       if (load.available) {
@@ -747,7 +836,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
             // C-1 — the self-heal rebuild is ALWAYS non-interactive: we do
             // NOT pass `embeddingsInteractive`, so its embeddings build gate
             // takes the non-interactive branch (never prompt, never auto-fetch
-            // the ~23MB model). A 0-hit search must NEVER trigger a model
+            // the one-time local model). A 0-hit search must NEVER trigger a model
             // download — it degrades to lexical cleanly.
             // Reuse the caller's registry ONLY when it supplied one (still open);
             // a self-opened registry was already closed in the finally above.
@@ -763,6 +852,9 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
       }
       if (reindexedVaults.length > 0) {
         const retry = await searchCascadeFlow({ ...args, selfHeal: false });
+        // The retry carries `nudge` (it's spread from args), so its trace
+        // already holds the nudge decision-trace + the single cadence increment.
+        // We only ADD selfHealed here; ...retry.trace preserves trace.nudge.
         return {
           ...retry,
           trace: { ...retry.trace, selfHealed: { reindexedVaults } },
@@ -771,6 +863,13 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
       }
     }
   }
+
+  // Phase D Slice 2b — first-search discovery nudge. Opt-in (args.nudge),
+  // additive, best-effort: it increments the pod-global cadence counter and
+  // computes the decision-trace WITHOUT touching `truncated` (the ranked
+  // results) or `query`. When off, or on any error, `nudgeTrace` is undefined
+  // and the trace is byte-identical to the deterministic baseline.
+  const nudgeTrace = await maybeRunNudge(args);
 
   return {
     query,
@@ -783,9 +882,80 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
       perTierHitCount: perTierHits.slice(),
       vaultsSearched,
       ...(semanticFused ? { semanticFused: true } : {}),
+      ...(nudgeTrace !== undefined ? { nudge: nudgeTrace } : {}),
     },
     durationMs: Date.now() - startedAt,
   };
+}
+
+// Phase D Slice 2b — the first-search discovery-nudge step. Returns the
+// decision-trace when the nudge is active (args.nudge === true), else undefined
+// (the caller then omits `trace.nudge` → byte-identical baseline). It:
+//   1. opens the registry best-effort (its OWN short-lived handle so it never
+//      entangles the cascade's registry lifecycle), ensures the singleton row;
+// 2. records THIS search via the ATOMIC bumpSearchCounter (release review FIX 1) —
+//      this is the cadence counter the "≥1 search since last ask" rule reads;
+//   3. classifies eligibility AFTER the increment via classifyEligibility — the
+// ONE source of truth shared with isEligible (release review FIX 5), so the
+//      `reason` and `eligible` fields can never drift from each other.
+//
+// ERROR VISIBILITY (release review FIX 7). The bare `catch { return undefined }`
+// previously hid a counter-WRITE failure (indistinguishable from nudge-off). Now:
+//   • a READ failure (ensureNudgeState/registry unreachable) → undefined
+//     (best-effort availability preserved — no trace at all);
+//   • a WRITE failure (bumpSearchCounter threw, but the pre-write read succeeded)
+//     → STILL return a trace computed from the pre-write read +1 (the intended
+//     increment), with `persistError: true` so the agent isn't blinded.
+// The search result is NEVER failed by a best-effort nudge either way.
+async function maybeRunNudge(
+  args: SearchCascadeArgs,
+): Promise<NudgeDecisionTrace | undefined> {
+  if (args.nudge !== true) return undefined;
+  const now = (args.nudgeNowFn ?? (() => new Date()))();
+  const modelPresent = (args.nudgeModelPresentFn ?? modelCachePresent)();
+
+  // Reuse the caller's registry when supplied + open; else open a short-lived
+  // one for the nudge step alone.
+  const callerSupplied = args.registryDb !== undefined;
+  let db: Client | undefined;
+  try {
+    db = callerSupplied ? args.registryDb! : await openRegistry();
+
+    // READ first — a failure here yields NO trace (genuine availability loss).
+    const current = await ensureNudgeState(db, { modelPresent });
+
+    // WRITE the atomic increment. On a write failure we still emit a trace from
+    // the pre-write read +1, flagged persistError, rather than going dark.
+    let postState: NudgeState;
+    let persistError = false;
+    try {
+      postState = await bumpSearchCounter(db);
+    } catch {
+      persistError = true;
+      // Mirror the intended post-increment state from the pre-write read.
+      postState = { ...current, searchesSinceAsk: current.searchesSinceAsk + 1 };
+    }
+
+    const { eligible, reason } = classifyEligibility(postState, modelPresent, now);
+    const state = deriveOfferState(postState, modelPresent);
+    const lastAskMs =
+      postState.lastAskAt === null ? null : new Date(postState.lastAskAt).getTime();
+    const daysSince = lastAskMs === null ? null : (now.getTime() - lastAskMs) / MS_PER_DAY;
+    return {
+      eligible,
+      state,
+      reason,
+      declines: postState.explicitDeclineCount,
+      daysSince,
+      searchesSince: postState.searchesSinceAsk,
+      ...(persistError ? { persistError: true } : {}),
+    };
+  } catch {
+    // READ-path failure (registry open / ensureNudgeState threw) → no trace.
+    return undefined;
+  } finally {
+    if (db !== undefined && !callerSupplied) await closeRegistry(db);
+  }
 }
 
 // feat/microrag-semantic — per-doc dense candidate carried into fusion. A doc
