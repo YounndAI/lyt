@@ -256,6 +256,42 @@ export async function loadKeywordSignals(db: Client): Promise<KeywordSignal[]> {
   return out;
 }
 
+// C10 topic-picker source. One distinct non-blank frontmatter topic per row,
+// with the count of figments carrying it.
+export interface TopicCount {
+  topic: string;
+  figmentCount: number;
+}
+
+// DISTINCT non-blank topics across the vault, ranked figmentCount DESC then
+// topic ASC — "recommended-first" for the capture topic picker, and the
+// vocabulary the picker surfaces so agents/humans REUSE an existing topic
+// instead of coining a near-duplicate (the C10 sprawl control). Topics are
+// stored trimmed-or-NULL (upsertFigmentMeta), so the WHERE drops blanks; GROUP
+// BY is case-sensitive (BINARY) — a topic surfaces as authored. Mirrors
+// loadKeywordSignals' degrade posture: a pre-v5 schema (no topic column) yields
+// [] rather than throwing. Cheap for v1 vault sizes (<1000 figments) — one
+// grouped scan.
+export async function listDistinctTopics(db: Client): Promise<TopicCount[]> {
+  let res: ResultSet;
+  try {
+    res = await db.execute(
+      "SELECT topic, COUNT(*) AS n FROM figment_meta" +
+        " WHERE topic IS NOT NULL AND TRIM(topic) <> ''" +
+        " GROUP BY topic ORDER BY n DESC, topic ASC",
+    );
+  } catch (err) {
+    if (/no such column/i.test(err instanceof Error ? err.message : String(err))) {
+      return [];
+    }
+    throw err;
+  }
+  return res.rows.map((row) => ({
+    topic: (row["topic"] as string).trim(),
+    figmentCount: Number(row["n"] as number | bigint),
+  }));
+}
+
 export interface RecentFigmentRow {
   figmentPath: string;
   modifiedIso: string;

@@ -27,6 +27,25 @@ import {
 } from "../templates/priming.js";
 import { getUserPatternsDir } from "../util/pattern-paths.js";
 import { parsePatternYon } from "../yon/pattern.js";
+import { parseVaultYon } from "../yon/parse.js";
+
+// Read the vault's canonical init date (`created_at`) from `.lyt/vault.yon` —
+// the same instant init.ts stamps into the vault manifest. Falls back to real
+// wall-clock `now` only when the manifest is absent or carries no timestamp
+// (never the 1970 sentinel). Used by the FRESH agents.md branch so a first
+// regen stamps the vault's creation date, not the regen moment.
+function readVaultCreatedAt(vaultPath: string): string {
+  try {
+    const yonPath = join(vaultPath, ".lyt", "vault.yon");
+    if (existsSync(yonPath)) {
+      const createdAt = parseVaultYon(readFileSync(yonPath, "utf8")).createdAt;
+      if (createdAt) return createdAt;
+    }
+  } catch {
+    // fall through to now
+  }
+  return new Date().toISOString();
+}
 
 // Suggested skills-by-pattern mapping (matches the 10 default skills shipped in
 // @younndai/lyt-skills@0.2.0). Used to populate the "→ skills:" annotation.
@@ -104,15 +123,32 @@ export function regenAgentsMd(vaultPath: string, vaultName: string): RegenAgents
   let written = false;
   if (existsSync(path)) {
     const existing = readFileSync(path, "utf8");
-    const afterPatterns = regenInstalledPatternsSection(existing, vaultName, installed);
+    // MJ-2 — thread the on-disk path so the full-rewrite branch can DERIVE a real
+    // date (git-first-commit → mtime → now) for a legacy seed with no preservable
+    // `created`, instead of re-emitting the 1970 sentinel.
+    const afterPatterns = regenInstalledPatternsSection(existing, vaultName, installed, path);
     const next = regenInstalledPrimerSection(afterPatterns, vaultName);
     if (next !== existing) {
       writeFileSync(path, next, "utf8");
       written = true;
     }
   } else {
+    // Fresh file (init or an adopt/clone with no prior agents.md). Phase A
+    // (UNIT 1 / C2) — stamp the real creation instant into the seed frontmatter,
+    // not the 1970 sentinel. This is the only regen branch that CREATES the
+    // frontmatter; the marker-bounded branch above preserves whatever is on disk,
+    // and the full-rewrite branch (inside regenInstalledPatternsSection) reads
+    // back + preserves the existing dates.
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, getAgentsMdContent({ vaultName, installedPatterns: installed }), "utf8");
+    writeFileSync(
+      path,
+      getAgentsMdContent({
+        vaultName,
+        installedPatterns: installed,
+        dates: { created: readVaultCreatedAt(vaultPath) },
+      }),
+      "utf8",
+    );
     written = true;
   }
   return {

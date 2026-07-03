@@ -42,6 +42,7 @@ import {
 } from "../util/failure-log.js";
 import { isNearExpiry, readFrozenLock } from "../util/freeze-check.js";
 import { checkReadmePresent } from "./readme-regen.js";
+import { scanFrontmatterContract } from "./reconcile-frontmatter.js";
 import {
   INSTALLABLE_RUNTIMES,
   MARKER_VERSION_RE,
@@ -306,6 +307,12 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
           full: opts.full === true,
         }),
       );
+      // Phase D (0.10.0 frontmatter lane, SC6) — detect figments whose leading
+      // frontmatter violates the 8-field contract (missing fields / no block).
+      // Detect-only (doctor stays non-mutating); the heal is `lyt vault backfill`
+      // / `lyt vault reconcile --apply`. README/scaffold seeds are exempt (the
+      // shared isIndexable funnel excludes them).
+      checks.push(await checkFrontmatterContract(db, { sampleLimit, full: opts.full === true }));
     } finally {
       await closeRegistry(db);
     }
@@ -370,6 +377,13 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
       id: "github.topic-conformance",
       group: "github",
       label: "GitHub repo topics match the brand set",
+      status: "info",
+      message: "skipped (no registry yet)",
+    });
+    checks.push({
+      id: "vaults.frontmatter-contract",
+      group: "vaults",
+      label: "figment frontmatter satisfies the 8-field contract",
       status: "info",
       message: "skipped (no registry yet)",
     });
@@ -1803,6 +1817,89 @@ export async function checkTopicConformance(
     label: `${label} (${sampleLabel})`,
     status: "pass",
     message: `${subjects.length} probed vault repo(s) carry the brand topic set`,
+  };
+}
+
+// Phase D (0.10.0 frontmatter-contract lane, SC6) — detect figments whose
+// leading frontmatter violates the 8-field contract (a mandatory field missing,
+// or no frontmatter block at all — the `testus/cats.md` raw-drop case). Walks
+// each active vault through the SAME isIndexable funnel the index + backfill use,
+// so README / scaffold seeds are exempt (contract-exempt by design) with no
+// bespoke skip. DETECT-ONLY — doctor never mutates; the remediation points at the
+// dedicated heal verbs (`lyt vault backfill` / `lyt vault reconcile --apply`).
+//
+// Status: warn when any sampled vault carries a contract-violating figment (a
+// hygiene issue, never a broken pod → never `fail`); pass otherwise. Best-effort
+// per vault — a scan failure on one vault is surfaced as a probe error, not a
+// crash. Honours the doctor sample/full knob like the sibling vault checks.
+export async function checkFrontmatterContract(
+  db: Client,
+  opts: { sampleLimit: number; full: boolean },
+): Promise<CheckResult> {
+  const id = "vaults.frontmatter-contract";
+  const group = "vaults";
+  const label = "figment frontmatter satisfies the 8-field contract";
+
+  const active = (await listVaults(db)).filter((v) => v.status === "active" && existsSync(v.path));
+  if (active.length === 0) {
+    return { id, group, label, status: "pass", message: "no active vaults to check" };
+  }
+  const subjects = opts.full ? active : active.slice(0, opts.sampleLimit);
+  const sampleLabel = opts.full
+    ? `all ${active.length}`
+    : `sample ${subjects.length}/${active.length}`;
+
+  const offenders: { name: string; count: number; samples: string[] }[] = [];
+  const probeErrors: { name: string; reason: string }[] = [];
+  for (const v of subjects) {
+    try {
+      const scan = scanFrontmatterContract(v.path);
+      if (scan.invalid.length > 0) {
+        offenders.push({
+          name: v.name,
+          count: scan.invalid.length,
+          samples: scan.invalid.slice(0, 5).map((i) => i.relPath),
+        });
+      }
+    } catch (err) {
+      probeErrors.push({ name: v.name, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  if (offenders.length > 0) {
+    const totalBad = offenders.reduce((n, o) => n + o.count, 0);
+    return {
+      id,
+      group,
+      label: `${label} (${sampleLabel})`,
+      status: "warn",
+      message: `${totalBad} figment(s) across ${offenders.length} vault(s) have missing/invalid frontmatter: ${offenders
+        .map((o) => `${o.name} (${o.count})`)
+        .join(", ")}`,
+      remediation: `Run: ${offenders
+        .map((o) => `lyt vault backfill '${o.name}'`)
+        .join(" ; ")} — fills missing fields with deterministic defaults (purpose/topic left blank + flagged), or \`lyt vault reconcile '<name>' --apply\` to also re-index.`,
+      detail: { offenders, probeErrors: probeErrors.length > 0 ? probeErrors : undefined },
+    };
+  }
+  if (probeErrors.length > 0) {
+    return {
+      id,
+      group,
+      label: `${label} (${sampleLabel})`,
+      status: "warn",
+      message: `${probeErrors.length} vault(s) could not be scanned for frontmatter drift: ${probeErrors
+        .map((p) => p.name)
+        .join(", ")}`,
+      detail: { probeErrors },
+    };
+  }
+  return {
+    id,
+    group,
+    label: `${label} (${sampleLabel})`,
+    status: "pass",
+    message: `${subjects.length} sampled vault(s); all figments carry contract-valid frontmatter`,
   };
 }
 

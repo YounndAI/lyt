@@ -91,6 +91,8 @@ export function embeddingsCacheDir(): string {
 // detected BEFORE we call loadEmbedder(). Pure fs probe — no model load, no
 // network, no throw.
 export function modelCachePresent(): boolean {
+  // TEST SEAM: an injected fake embedder stands in for a cached model.
+  if (testEmbedderOverride !== null) return true;
   try {
     return existsSync(join(embeddingsCacheDir(), EMBEDDING_MODEL_ID));
   } catch {
@@ -177,6 +179,34 @@ let cached: Promise<EmbedderLoad> | null = null;
 // server / agent) — without forcing an async load on the guard path.
 let embedderReady = false;
 
+// TEST SEAM — a process-level injected embedder that stands in for the real
+// model-backed one, WITHOUT loading the on-disk ONNX model at all.
+//
+// Why this exists (fix-pass, quarantine lift): the dense-fusion arm in
+// search-cascade.ts imports loadEmbedder / modelCachePresent / embedderMemoized
+// via the INTERNAL relative binding (`../util/embeddings.js`), NOT via the
+// package barrel. A consumer package (lyt-mcp) that loads lyt-vault as an
+// un-inlined dist dep therefore CANNOT reach that binding with `vi.spyOn` on the
+// namespace export — the spy patches only the barrel object, so the cascade keeps
+// calling the real functions. This setter instead mutates the ONE module-level
+// state that BOTH the barrel re-export and the cascade's internal import observe
+// (same module instance per process — the same mechanism that makes `embedderReady`
+// a working cross-module signal). Setting it: (1) makes modelCachePresent() and
+// embedderMemoized() report present so the fusion guard passes without a real model
+// on disk; (2) makes loadEmbedder() resolve to the injected embedder with NO
+// dynamic import / fetch / ONNX init. Clear with __setTestEmbedder(null). This is
+// the query-side twin of rebuildEmbeddingsFlow({ embedder }) (the build-path seam);
+// together they drive the whole dense path model-free + deterministic. NON-
+// production: nothing in the shipped CLI/MCP wiring ever calls this — it is set
+// only from test code, so the production fetch/guard behavior is byte-unchanged.
+let testEmbedderOverride: Embedder | null = null;
+
+// TEST SEAM — inject (or clear, with null) the process-level fake embedder above.
+// See the block comment on `testEmbedderOverride` for the full rationale.
+export function __setTestEmbedder(embedder: Embedder | null): void {
+  testEmbedderOverride = embedder;
+}
+
 // C-1 / loadEmbedder options. `showDownloadProgress` is now the
 // FETCH-ALLOWED opt-in (the VISIBLE-fetch HIL branch: the build path, after the
 // handler consents on a TTY, passes true so the one-time model fetch may run).
@@ -257,6 +287,7 @@ function composeSignals(caller: AbortSignal | undefined, sigint: AbortSignal): A
 export function __resetEmbedderCache(): void {
   cached = null;
   embedderReady = false;
+  testEmbedderOverride = null;
 }
 
 // MAJOR fix (release review 2026-06-30, FIX 4 / G1) — pure synchronous predicate: is
@@ -264,6 +295,8 @@ export function __resetEmbedderCache(): void {
 // has not since been cleared. Used by search-cascade's Phase B guard so fusion
 // still runs when the embedder is in RAM even after the disk cache is evicted.
 export function embedderMemoized(): boolean {
+  // TEST SEAM: an injected fake embedder counts as a live in-process embedder.
+  if (testEmbedderOverride !== null) return true;
   return embedderReady;
 }
 
@@ -271,6 +304,11 @@ export function embedderMemoized(): boolean {
 // optional dep, model fetch failure offline, onnxruntime load error) resolves
 // to { available: false, reason } so the cascade falls back to lexical cleanly.
 export function loadEmbedder(opts: LoadEmbedderOpts = {}): Promise<EmbedderLoad> {
+  // TEST SEAM: an injected fake embedder short-circuits the real load — no
+  // dynamic import, no model fetch, no ONNX init. Deterministic + model-free.
+  if (testEmbedderOverride !== null) {
+    return Promise.resolve({ available: true, embedder: testEmbedderOverride });
+  }
   if (cached !== null) return cached;
   // `showDownloadProgress` doubles as the FETCH-ALLOWED opt-in (see
   // LoadEmbedderOpts): only a consented build path may trigger the owned fetch.

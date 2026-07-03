@@ -17,7 +17,12 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { MESH_CONTEXT_AUTO_BANNER } from "../templates/priming.js";
+import {
+  MESH_CONTEXT_AUTO_BANNER,
+  scaffoldFrontmatter,
+  type ScaffoldDates,
+} from "../templates/priming.js";
+import { readFrontmatterDates } from "../templates/contract.js";
 import { hexToUuid7Bytes, ridsEqual } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
 import { parseVaultYon } from "../yon/parse.js";
@@ -41,6 +46,13 @@ export interface MeshContextInput {
   // the mesh.yon ⟷ vault.yon rid match — see isMeshDefiner). A member vault is
   // false and emits no definer line.
   isMeshDefiner: boolean;
+  // fg-scaffold-frontmatter — the frontmatter dates for the prepended
+  // scaffold-frontmatter block. On first scaffold this is the REAL vault init
+  // time (threaded from scaffold/init.ts). On regen (writeMeshContextFile reads
+  // back the on-disk `created`), it is the PRESERVED original date so a re-emit
+  // never churns to a fresh date or the 1970 sentinel. Omit → sentinel fallback
+  // (defensive default only; production paths always supply/preserve a real date).
+  dates?: ScaffoldDates | undefined;
 }
 
 // Derive the durable structural fact: is `vaultPath` the defining vault of its
@@ -62,6 +74,17 @@ export function isMeshDefiner(vaultPath: string): boolean {
 }
 
 export function renderMeshContext(input: MeshContextInput): string {
+  // fg-scaffold-frontmatter (handler rule, from real-vault dogfood): EVERY file
+  // Lyt scaffolds MUST carry valid contract frontmatter with REAL dates — no
+  // exemption. .lyt/mesh-context.md previously shipped WITH NO frontmatter (the
+  // dogfood defect); it now leads with a scaffold-frontmatter block via the same
+  // SoT. The auto-regen banner + body follow. Preserve-on-regen (real `created`
+  // read back in writeMeshContextFile) keeps a re-emit from churning the date.
+  const frontmatter = scaffoldFrontmatter(
+    `Mesh context: ${input.vaultName}`,
+    "Lyt mesh context (auto-regenerated scaffold seed)",
+    input.dates,
+  );
   const lines: string[] = [];
   lines.push(MESH_CONTEXT_AUTO_BANNER);
   lines.push("");
@@ -106,14 +129,39 @@ export function renderMeshContext(input: MeshContextInput): string {
     lines.push("");
   }
 
-  return lines.join("\n");
+  // frontmatter (ends in "\n") is prepended so the file leads with a valid
+  // contract frontmatter block, then the auto-regen banner + body.
+  return frontmatter + lines.join("\n");
 }
 
 export function writeMeshContextFile(vaultPath: string, input: MeshContextInput): string {
   const target = join(vaultPath, ".lyt", "mesh-context.md");
-  const content = renderMeshContext(input);
+  // fg-scaffold-frontmatter — preserve-on-regen (mirrors priming.ts C3): this
+  // file is REGENERATED on every edge change. Read back the on-disk `created`
+  // (when present) and re-emit it, so a regen never churns the date to a fresh
+  // `now` nor re-introduces the 1970 sentinel. First scaffold (no file yet, or a
+  // legacy file with no frontmatter) falls through to the threaded init date the
+  // caller supplied via `input.dates`.
+  const preserved = preservedMeshContextDates(target);
+  const effectiveInput: MeshContextInput = preserved ? { ...input, dates: preserved } : input;
+  const content = renderMeshContext(effectiveInput);
   writeFileSync(target, content, "utf8");
   return target;
+}
+
+// Read back the on-disk `created`/`modified` of an existing mesh-context.md so a
+// regen re-emits the PRESERVED dates. Returns undefined when the file is absent
+// or has no `created` (a legacy no-frontmatter file), letting the caller fall
+// back to the threaded init date. `modified` defaults to the preserved `created`.
+function preservedMeshContextDates(target: string): ScaffoldDates | undefined {
+  if (!existsSync(target)) return undefined;
+  try {
+    const { created, modified } = readFrontmatterDates(readFileSync(target, "utf8"));
+    if (created === null) return undefined;
+    return { created, modified: modified ?? created };
+  } catch {
+    return undefined;
+  }
 }
 
 export function meshContextInputFromYon(vaultPath: string): MeshContextInput {
@@ -129,6 +177,22 @@ export function meshContextInputFromYon(vaultPath: string): MeshContextInput {
     // vault.yon rid match on EVERY regen, so the definer line is durable by
     // construction (never erased by a regenMeshContextFromYon pass).
     isMeshDefiner: isMeshDefiner(vaultPath),
+    // fg-scaffold-frontmatter — the DURABLE real date for the scaffold
+    // frontmatter is vault.yon's `created_at` (the true init instant, same value
+    // threaded at first scaffold). writeMeshContextFile still PREFERS the
+    // on-disk mesh-context.md `created` (read-back) when present, so genuine
+    // regens preserve the original; this vault.yon fallback fires only when the
+    // file is absent/garbage — and it is the SAME init date, so a regen after a
+    // clobber is byte-identical (never the 1970 sentinel).
+    //
+    // The `!== null` guard is DEFENSIVE and effectively unreachable for any
+    // Lyt-written manifest: renderVaultYon ALWAYS emits `created_at:ts=`
+    // (unconditional; VaultDoc.createdAt is a required field), so
+    // parseVaultYon(...).createdAt is null only for a hand-corrupted / legacy
+    // vault.yon missing the field. On that null path we omit `dates`, and
+    // scaffoldFrontmatter falls back to its own sentinel — no behavioral change
+    // intended here; the guard just avoids threading a null created downstream.
+    ...(parsed.createdAt !== null ? { dates: { created: parsed.createdAt } } : {}),
   };
 }
 

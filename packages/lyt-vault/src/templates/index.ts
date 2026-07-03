@@ -104,8 +104,15 @@ export function getObsidianScaffold(template: TemplateName): ObsidianScaffold {
 }
 
 // UNIT 2 — README body externalized to `templates/README.md`.
-// Per-template variable manifest: { vaultName }. README.md is FTS-excluded by
-// the isScaffoldNote BASENAME gate, so it carries no frontmatter.
+// Per-template variable manifest: { vaultName }.
+//
+// README frontmatter-exempt — GitHub landing renders raw YAML; single documented
+// exception, handler decision 2026-07-02. Every OTHER Lyt-scaffolded file carries
+// contract frontmatter with real dates (fg-scaffold-frontmatter), but README.md
+// is the GitHub repo landing page: GitHub renders leading `--- … ---` as visible
+// raw text above the H1 (unlike Obsidian, which hides it). So README ships with
+// NO frontmatter. FTS-exclusion is handled by the isScaffoldNote BASENAME gate
+// (util/indexable.ts), independent of any sentinel.
 export function getReadmeContent(vaultName: string): string {
   return renderTemplate("README.md", { vaultName });
 }

@@ -43,7 +43,7 @@ This scaffolds `~/lyt/vaults/alex/main/` with:
 - `.obsidian/` — Obsidian config (committed)
 - `.lyt/lyt-overview.md` — your identity page (transcludes mesh-context)
 - `.lyt/agents.md` — instructions for AI agents driving Lyt in this vault
-- `notes/index.md` — optional starter Figment (suppress with `--no-starter-figment`)
+- `notes/welcome.md` — optional starter Figment (suppress with `--no-starter-figment`)
 - `.gitignore`, `README.md`
 
 A `git init` runs by default; `--no-git` skips it. `--commit-initial` makes a

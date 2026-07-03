@@ -75,6 +75,9 @@ function extractManagedInner(rendered: string): string | null {
  */
 export function regenReadme(vaultPath: string, vaultName: string): RegenReadmeResult {
   const path = join(vaultPath, "README.md");
+  // README frontmatter-exempt — GitHub landing renders raw YAML; single
+  // documented exception, handler decision 2026-07-02. README ships with NO
+  // frontmatter (unlike every other scaffolded file).
   const rendered = getReadmeContent(vaultName);
 
   if (!existsSync(path)) {

@@ -20,6 +20,8 @@ import { homedir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { FRONTMATTER_CONTRACT } from "../templates/contract.js";
+
 // v1.G.5 — `lyt agent-manual --runtime {claude|codex|agents|generic}
 // [--install] [--dry-run]`.
 //
@@ -338,29 +340,60 @@ function buildGetOutSection(): string {
   ].join("\n");
 }
 
+// The field-rule table is DERIVED from FRONTMATTER_CONTRACT (the templates/
+// contract.ts SoT) — NOT hand-maintained here. A field added to the contract
+// appears in the manual on the next `lyt agent-manual --install` with ZERO edit
+// to this file; that is the whole point (kill the drift). Each row renders the
+// contract field's `name` + a concise rule folded from its `source` /
+// `defaultValue` and the contract's own one-line `description`. Kept token-tight
+// — this ships in every agent's context.
+//
+// The rule states its source/default at most ONCE (release review Minor 1): the
+// contract's `author` descriptions already open with "AUTHOR-SUPPLIED" and its
+// `default` descriptions already close with "Defaults to X", so we prepend a tag
+// ONLY for the sources the description doesn't already convey (auto | structural).
+//
+// escapeCell (release review Major A): the SoT `description`/`defaultValue` may
+// contain a raw `|` (e.g. mesh-visibility's "(local | parent | public)"), which
+// would break the GFM table cell and render phantom columns in every user's
+// managed block. Every cell is escaped `|` → `\|` at this emit boundary, so any
+// future SoT text with a pipe renders safe without editing the SoT.
+function escapeCell(text: string): string {
+  return text.replace(/\|/g, "\\|");
+}
+
+function contractFieldRule(field: (typeof FRONTMATTER_CONTRACT)[number]): string {
+  const prefix =
+    field.source === "structural" ? "optional container. " : field.source === "auto" ? "auto. " : "";
+  return escapeCell(`${prefix}${field.description}`);
+}
+
 function buildPutInSection(): string {
+  const rows = FRONTMATTER_CONTRACT.map(
+    (f) => `| ${f.name} | ${contractFieldRule(f)} |`,
+  );
   return [
     "## `[lyt.in]` Put data IN — ceremony is mandatory (the backbone)",
     "",
-    "`/lyt-capture` writes ONE Obsidian-markdown Figment to `<vault>/notes/YYYY-MM-DD-<slug>.md`.",
-    "EVERY Figment carries the v1 8-field frontmatter contract + `meta`:",
+    "`/lyt-capture` writes ONE Obsidian-markdown Figment. EVERY Figment carries the v1 8-field",
+    "frontmatter contract + `meta` (this table is generated from the contract SoT — do not drift it):",
     "",
     "| Field | Rule |",
     "|---|---|",
-    "| title | inferred 5-8 word noun phrase, or explicit |",
-    "| created / modified | auto ISO-8601, equal at capture |",
-    "| tags | inferred list, optional |",
-    '| purpose | AUTHOR-SUPPLIED ("why keep this?") — PROMPT if not inferrable |',
-    "| topic | AUTHOR-SUPPLIED (semantic category) — PROMPT if not inferrable |",
-    "| mesh-visibility | local (default) \\| parent \\| public |",
-    "| weight | 1-5, default 3 |",
-    "| meta | `{}`; fill only for fields the 8 don't cover |",
+    ...rows,
     "",
     "- Never fabricate purpose/topic — ask. Never author-fill `links-out-of-vault` (scanner-filled).",
     "- Never write YON in a user Figment (YON is for `.lyt/*` system files only).",
     "- Capture writes the file only — it does NOT git. Sync is separate (`[lyt.sync]`).",
     "- Same ceremony, different home: `/lyt-plan` `/lyt-progress` `/lyt-result` `/lyt-retro`",
     "  `/lyt-insight` `/lyt-decision` `/lyt-handoff` -> work-management Figments.",
+    "",
+    "**WHERE it lands:** default `<vault>/notes/YYYY-MM-DD-<slug>.md`. `lyt capture --dir",
+    "<vault-relative>` relocates it (fail-closed: rejects empty / absolute / `..`-escape / vault-root",
+    "/ the reserved `.lyt`,`.obsidian`,`.git` trees). `--topic-folder` is OPT-IN and routes into a",
+    "contained `topics/<topic-slug>/` instead; an explicit `--dir` wins over it. On a TTY the",
+    "topic picker enumerates the vault's existing topics (recommended-first) and always sets",
+    "`topic:`; a non-TTY run requires an explicit topic (no picker — it refuses rather than hang).",
   ].join("\n");
 }
 
@@ -511,7 +544,7 @@ function buildModelNudgeSection(): string {
 // channel is this directive, not telemetry. Feedback is user-initiated, the
 // payload is an inspectable markdown Figment in the user's own pod, and
 // nothing leaves the machine until the user explicitly syncs. Zero passive
-// telemetry in alpha; any future metrics feature must pass through 's
+// telemetry in alpha; any future metrics feature must pass through this same
 // shape (a local figment the user reads and chooses to share), not around it.
 function buildFeedbackSection(): string {
   return [

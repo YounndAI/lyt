@@ -14,7 +14,11 @@
  * limitations under the License.
  */
 
-import { buildFrontmatter } from "./contract.js";
+import { execFileSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { dirname } from "node:path";
+
+import { buildFrontmatter, readFrontmatterDates } from "./contract.js";
 import { renderTemplate } from "./render.js";
 
 // v1.D.5 — bumped 2 → 3 with the addition of the LYT_PRIMER section
@@ -50,29 +54,84 @@ export const AGENTS_MD_PATTERNS_END = "<!-- LYT_PATTERNS_END -->";
 export const AGENTS_MD_PRIMER_BEGIN = "<!-- LYT_PRIMER_BEGIN -->";
 export const AGENTS_MD_PRIMER_END = "<!-- LYT_PRIMER_END -->";
 
-// Phase B (UNIT 1 — C2 sentinel-wiring) — fixed scaffold timestamp.
+// Phase A (UNIT 1 — C2 real-init-date) — the scaffold timestamp is now the
+// REAL vault init time, threaded from scaffold/init.ts (`createdAt`) into the
+// priming builders. Rationale for the change from the old epoch sentinel:
 //
-// The priming builders (getLytOverviewContent / getAgentsMdContent) now emit a
-// real frontmatter block via the contract SoT (buildFrontmatter) carrying
-// `lyt-scaffold: true`, so the g6 gate (util/indexable.ts SCAFFOLD_RE) FTS-
-// excludes these Lyt-authored seed files. Because these are SCAFFOLD seeds (not
-// user Figments) and the regen chokepoint (flows/agents-md-regen.ts) rewrites
-// the whole file when markers are absent, the frontmatter MUST be deterministic
-// — a wall-clock `created`/`modified` would (a) churn the file on every regen
-// and (b) break the regen-idempotency contract (priming.test.ts). A fixed epoch
-// sentinel timestamp keeps the emitted bytes stable + honest: scaffold seeds are
-// not authored at a meaningful instant, so `created == modified == epoch` is the
-// truthful value, not a fabricated "now".
-const SCAFFOLD_FRONTMATTER_TIMESTAMP = "1970-01-01T00:00:00.000Z";
+//   - The priming builders (getLytOverviewContent / getAgentsMdContent) emit a
+//     real frontmatter block via the contract SoT (buildFrontmatter) carrying
+//     `lyt-scaffold: true`, so the g6 gate (util/indexable.ts SCAFFOLD_RE) FTS-
+//     excludes these Lyt-authored seed files — the dates never pollute search.
+//   - These seeds are committed + pushed to GitHub; an epoch sentinel shipped a
+//     visible `1970-01-01` lie in every seed's frontmatter (C2). A vault WAS
+//     authored at a meaningful instant — its init time — so `created ==
+//     modified == <init>` is the truthful value.
+//
+// REGEN IDEMPOTENCY (C3) is preserved WITHOUT a frozen constant: the regen
+// chokepoint (flows/agents-md-regen.ts) now READS BACK the existing
+// `created`/`modified` and passes them as `preservedDates`, so a 2nd regen of an
+// already-scaffolded seed is byte-identical (a real date preserved, not a fresh
+// `now`). The sentinel below is retained ONLY as the last-ditch fallback for a
+// direct-builder caller that threads no timestamp AND provides no read-back
+// (defensive default — the scaffold + regen production paths always supply a
+// real/preserved/derived value).
+const SCAFFOLD_FRONTMATTER_TIMESTAMP_FALLBACK = "1970-01-01T00:00:00.000Z";
 
-// Build the deterministic `lyt-scaffold: true` frontmatter block prepended to
-// the priming seed files. Frontmatter ALWAYS flows through buildFrontmatter
-// (the single SoT) — never hand-rolled here.
-function scaffoldFrontmatter(title: string, purpose: string): string {
+// MJ-2 — the full-rewrite regen path must NEVER re-emit the 1970 sentinel for a
+// legacy seed that has no preservable `created`. Instead we DERIVE a real date
+// for the on-disk file, in priority order (mirrors the migration script):
+//   1. the file's git first-commit (author) date  (git %aI, ISO-8601), else
+//   2. the file's fs-mtime, else
+//   3. real wall-clock `now` (last resort — never 1970).
+// `git log --format=%aI` already emits ISO-8601, so the ×1000 epoch-SECONDS→MS
+// trap (see contract.ts gitCommitterDateToIso) does not apply on this path.
+function gitFirstCommitIso(filePath: string): string | null {
+  try {
+    const out = execFileSync(
+      "git",
+      ["log", "--follow", "--diff-filter=A", "--format=%aI", "--", filePath],
+      { cwd: dirname(filePath), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    const lines = out.split(/\r?\n/).filter(Boolean);
+    // The last line is the earliest (addition) commit.
+    const earliest = lines[lines.length - 1];
+    if (!earliest) return null;
+    const ms = Date.parse(earliest);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function deriveRealDateForFile(filePath: string): string {
+  if (existsSync(filePath)) {
+    const git = gitFirstCommitIso(filePath);
+    if (git) return git;
+    try {
+      return new Date(statSync(filePath).mtimeMs).toISOString();
+    } catch {
+      // fall through to now
+    }
+  }
+  return new Date().toISOString();
+}
+
+// Build the `lyt-scaffold: true` frontmatter block prepended to the priming
+// seed files. Frontmatter ALWAYS flows through buildFrontmatter (the single
+// SoT) — never hand-rolled here. `createdAt` / `modifiedAt` are the real init
+// time (scaffold path) or the preserved on-disk dates (regen path); both
+// default to the sentinel when a caller supplies neither.
+export function scaffoldFrontmatter(
+  title: string,
+  purpose: string,
+  dates?: ScaffoldDates | undefined,
+): string {
+  const created = dates?.created ?? SCAFFOLD_FRONTMATTER_TIMESTAMP_FALLBACK;
+  const modified = dates?.modified ?? created;
   return buildFrontmatter({
     title,
-    created: SCAFFOLD_FRONTMATTER_TIMESTAMP,
-    modified: SCAFFOLD_FRONTMATTER_TIMESTAMP,
+    created,
+    modified,
     tags: [],
     purpose,
     topic: "scaffold",
@@ -80,10 +139,35 @@ function scaffoldFrontmatter(title: string, purpose: string): string {
   });
 }
 
+// Phase A (UNIT 1/2) — the real (init) or preserved (regen read-back) frontmatter
+// dates threaded into the scaffold builders. `created` is the vault init time on
+// first scaffold, or the existing on-disk `created` on regen (never overwritten).
+// `modified` defaults to `created` when omitted.
+export interface ScaffoldDates {
+  created: string;
+  modified?: string | undefined;
+}
+
+// Phase A (UNIT 2 / C3) — read back the on-disk `created`/`modified` so the
+// full-rewrite regen branch re-emits the PRESERVED dates (never a fresh `now`).
+// Returns `{ dates }` only when a `created` value is present on disk; a file
+// with no frontmatter (legacy v1) returns undefined → the caller lets
+// scaffoldFrontmatter fall back to the sentinel. `modified` is preserved when
+// present, else defaults to the preserved `created` (matches first-scaffold
+// semantics where created == modified).
+function preservedDatesFrom(existingContent: string): { dates: ScaffoldDates } | undefined {
+  const { created, modified } = readFrontmatterDates(existingContent);
+  if (created === null) return undefined;
+  return { dates: { created, modified: modified ?? created } };
+}
+
 export interface LytOverviewInput {
   vaultName: string;
   desc: string | null | undefined;
   owner: string;
+  // Phase A (UNIT 1) — the real vault init time (scaffold path) or the preserved
+  // on-disk dates (conformance/regen read-back). Omit → sentinel fallback.
+  dates?: ScaffoldDates | undefined;
 }
 
 // UNIT 2 — lyt-overview body is externalized to `templates/lyt-overview.md`.
@@ -103,7 +187,11 @@ export function getLytOverviewContent(input: LytOverviewInput): string {
   // buildFrontmatter) so this Lyt-authored seed file is FTS/primer-excluded by
   // the g6 gate (util/indexable.ts SCAFFOLD_RE). Frontmatter NEVER goes through
   // render() — it flows through the single contract.ts SoT.
-  const frontmatter = scaffoldFrontmatter(input.vaultName, "Lyt vault overview (scaffold seed)");
+  const frontmatter = scaffoldFrontmatter(
+    input.vaultName,
+    "Lyt vault overview (scaffold seed)",
+    input.dates,
+  );
   const body = renderTemplate("lyt-overview.md", {
     vaultName: input.vaultName,
     descBlock,
@@ -128,6 +216,11 @@ export interface AgentsMdInput {
   // between the LYT_PATTERNS delimiters. When omitted/empty, the section shows the
   // empty-state placeholder.
   installedPatterns?: readonly InstalledPatternSummary[] | undefined;
+  // Phase A (UNIT 1/2) — the real vault init time (scaffold path) or the
+  // preserved on-disk dates (regen read-back / conformance). The full-rewrite
+  // regen branch (markers absent) MUST pass the preserved dates so a 2nd regen
+  // stays byte-identical (C3). Omit → sentinel fallback.
+  dates?: ScaffoldDates | undefined;
 }
 
 export function getAgentsMdContent(input: AgentsMdInput): string {
@@ -141,6 +234,7 @@ export function getAgentsMdContent(input: AgentsMdInput): string {
   const frontmatter = scaffoldFrontmatter(
     "Working with Lyt in this vault (for AI agents)",
     "Lyt agent onboarding (scaffold seed)",
+    input.dates,
   );
   // UNIT 2 — agents.md body is externalized to `templates/agents.md`.
   // Per-template variable manifest: { version, vaultName, primerBlock,
@@ -189,11 +283,28 @@ export function regenInstalledPatternsSection(
   existingContent: string,
   vaultName: string,
   installed: readonly InstalledPatternSummary[],
+  // MJ-2 — the on-disk path of the file being regenerated. When present and the
+  // legacy file has NO preservable `created`, the full-rewrite branch DERIVES a
+  // real date (git-first-commit → fs-mtime → now) instead of re-emitting 1970.
+  filePath?: string | undefined,
 ): string {
   const beginIdx = existingContent.indexOf(AGENTS_MD_PATTERNS_BEGIN);
   const endIdx = existingContent.indexOf(AGENTS_MD_PATTERNS_END);
   if (beginIdx < 0 || endIdx < 0 || endIdx <= beginIdx) {
-    return getAgentsMdContent({ vaultName, installedPatterns: installed });
+    // Full-rewrite branch (markers absent). Phase A (UNIT 2 / C3) — PRESERVE the
+    // existing `created`/`modified` from the on-disk file so a 2nd regen of an
+    // already-scaffolded seed is byte-identical (the never-overwrite date posture).
+    // MJ-2 — when readFrontmatterDates finds NO `created` (a legacy v1 file with
+    // no/partial frontmatter), we no longer fall back to the 1970 sentinel: we
+    // DERIVE a real date for the file (git-first-commit → mtime → now). Never 1970.
+    const preserved = preservedDatesFrom(existingContent);
+    const dates: ScaffoldDates =
+      preserved?.dates ?? { created: deriveRealDateForFile(filePath ?? "") };
+    return getAgentsMdContent({
+      vaultName,
+      installedPatterns: installed,
+      dates,
+    });
   }
   const before = existingContent.slice(0, beginIdx + AGENTS_MD_PATTERNS_BEGIN.length);
   const after = existingContent.slice(endIdx);
@@ -243,10 +354,3 @@ export function regenInstalledPrimerSection(existingContent: string, vaultName: 
   return before + middle + after;
 }
 
-// UNIT 2 — notes/index.md body externalized to `templates/notes-index.md`.
-// Per-template variable manifest: { vaultName }. This seed is excluded from FTS
-// by the isScaffoldNote BASENAME gate (index.md), so it intentionally carries
-// NO lyt-scaffold frontmatter — its body has no frontmatter at all.
-export function getNotesIndexContent(vaultName: string): string {
-  return renderTemplate("notes-index.md", { vaultName });
-}

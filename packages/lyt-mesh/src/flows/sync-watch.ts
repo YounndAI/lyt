@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 import chokidar, { type FSWatcher } from "chokidar";
 
@@ -23,6 +24,7 @@ import {
   closeRegistry,
   isIndexablePath,
   listVaults,
+  maintainModifiedFromMtime,
   openRegistry,
   reconcileFigmentWrite,
   toVaultRelPosix,
@@ -93,6 +95,13 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
         // out-of-vault target indexed (info-disclosure). Paired with the
         // lstat guard in reconcile-figment-write.ts:readFigmentBody.
         followSymlinks: false,
+        // MJ-3 (Phase A UNIT 3 / C4) — coalesce a burst of writes into a single
+        // settled `change` event. This dampens the maintainer's self-write echo
+        // (the `modified` stamp writes the file) so we do not thrash on every
+        // partial write; the deterministic loop guard is the per-path
+        // last-stamped-mtime map below (awaitWriteFinish is defense-in-depth,
+        // and is not exercised by the injected test watcher).
+        awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
       }));
 
   const db = await openRegistry();
@@ -193,6 +202,20 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
     track(p);
   };
 
+  // MJ-3 (Phase A UNIT 3 / C4) — per-path last-stamped floored-mtime (ms). When
+  // the maintainer advances a figment's `modified`, its own write bumps the
+  // file's mtime (within the same floored second) and fires an immediate
+  // `change` event. We record the floored-second mtime we just stamped; on the
+  // NEXT change for that path, if the file's current floored mtime EQUALS the
+  // recorded stamp, that event is our own write-back echo → skip the maintainer
+  // (no re-stamp). This is robust against MULTIPLE change events for the same
+  // path (a single-shot `selfStamped` Set was race-prone: it is consumed by the
+  // first echo, so a rapid second echo — or a real edit landing in the same
+  // second — could slip through or be wrongly dropped). A subsequent REAL edit
+  // lands at a later floored second, so its mtime differs from the recorded
+  // stamp and the maintainer runs normally.
+  const lastStampedFlooredMs = new Map<string, number>();
+
   watcher.on("all", (evt: string, changedPath: string) => {
     const v = resolveVaultForPath(changedPath);
     if (!v) return;
@@ -216,8 +239,35 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
     // therefore an unlink of the old path + an add of the new path, each of
     // which reconciles correctly on its own.
     if (evt === "add" || evt === "change") {
+      // Phase A (UNIT 3 / C4) — on a CONTENT EDIT (change, not the initial add),
+      // advance the figment's `modified` frontmatter to its fs-mtime BEFORE the
+      // FTS reconcile so the index reads the fresh date. `created` is preserved,
+      // and the stamp is clamped `>= created` (MJ-1). No stamp on `add`: a fresh
+      // figment keeps created == modified (no spurious bump).
+      if (evt === "change") {
+        const absPath = join(v.path, relPath);
+        // MJ-3 — skip our own write-back echo: if the current floored mtime
+        // matches the last value we stamped for this path, this change IS the
+        // maintainer's own write. Drop it (the reconcile still runs below).
+        let flooredNowMs: number | null = null;
+        try {
+          flooredNowMs = Math.floor(statSync(absPath).mtimeMs / 1000) * 1000;
+        } catch {
+          flooredNowMs = null;
+        }
+        const echoed =
+          flooredNowMs !== null && lastStampedFlooredMs.get(absPath) === flooredNowMs;
+        if (!echoed) {
+          const res = maintainModifiedFromMtime(absPath);
+          if (res.changed && res.stampedMtimeMs !== null) {
+            lastStampedFlooredMs.set(absPath, res.stampedMtimeMs);
+          }
+        }
+      }
       reconcileNotesEvent(v, "upsert", relPath);
     } else if (evt === "unlink") {
+      // Drop any stale self-stamp watermark for a removed path.
+      lastStampedFlooredMs.delete(join(v.path, relPath));
       reconcileNotesEvent(v, "delete", relPath);
     }
   });

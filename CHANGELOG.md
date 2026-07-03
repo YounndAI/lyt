@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.10.0] — 2026-07-03
+
+Frontmatter-contract release — every note's metadata is now correct at rest, enforced at write, and healable for legacy files, with optional tag/topic enrichment. No change to how search or federation behave.
+
+### Added
+- **Capture resolves where a note lands.** `lyt capture` now takes an explicit `--dir <vault-subdir>` (or an opt-in topic folder, else the default `notes/`), guarded fail-closed against escapes (`..`, `.lyt/`, `.git/`, the vault root). On an interactive terminal it offers your existing topics (recommended first, with an "other" escape) and always sets `topic:`.
+- **`lyt vault backfill`** — fills missing frontmatter on existing notes (title, real dates, model-free tags, topic, defaults) in place, without moving files. `purpose` is left blank and flagged rather than guessed, and every machine-filled field is provenance-stamped so it stays distinguishable from what you authored.
+- **`lyt vault reconcile [--apply]`** — scans every note against the index, flags files that are present-but-unindexed or missing frontmatter, and with `--apply` backfills then reindexes them. Drop a raw `.md` into a vault and it gets healed. Both verbs commit locally by default (`--push` to opt in).
+- **`lyt doctor`** now detects and counts notes with missing or invalid frontmatter.
+- **Optional tag & topic enrichment.** Notes get keyword tags with no model required, on any vault including a freshly imported one. When a local embedding model is present, capture and backfill additionally suggest a `topic:` (recommended, never auto-selected) ranked against your vault's *current* on-disk topic labels. With no model, tags still fill and topic stays blank — nothing is ever sent off your machine, and an authored value is never overwritten.
+
+### Changed
+- **Real dates, not 1970.** Fresh vault seeds and backfilled notes now carry genuine created/modified dates (git history, falling back to file mtime) instead of the `1970-01-01` epoch placeholder that previously shipped to GitHub.
+- **The frontmatter contract is taught from one source.** The agent manual and the capture skill render the 8-field contract from a single definition, so the guidance can't drift out of sync with what the tools enforce.
+
+### Fixed
+- **`lyt vault share` / `unshare` / `access` / `invites` now work.** The entire vault access/sharing verb family was non-functional in 0.9.9 — every invocation failed with `AccessProvider.grant/revoke requires a gh executor`, even with `gh` installed and authenticated. The CLI never wired a GitHub executor into the access provider, so it fell back to a guard that refused every call; it now defaults to the real `gh` executor (matching every other gh-backed command). Sharing a vault with a colleague, revoking access, and listing collaborators all work end-to-end, and the read-only `access` verb no longer fails through the grant/revoke path. The probe-free capture/sync write gate and the handler-confirmation (`--yes`) / MCP fail-closed guards are unchanged. Surfaced by a two-handler federation dogfood.
+
+---
+
 ## [0.9.9] — 2026-07-01
 
 Hardening release — reliability + agent-UX improvements to the local semantic-search pipeline. No new user-facing capability claim.

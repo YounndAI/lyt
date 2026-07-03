@@ -59,9 +59,9 @@ Per yai.lyt v1 frontmatter contract, every captured Figment carries 8 mandatory 
 
 1. **Determine a title.** Use the user's explicit title if given. Otherwise infer a short noun-phrase (5–8 words) from the content. If unsure, ask.
 2. **Compute the slug** — lowercase, kebab-case the title, strip non-`[a-z0-9-]` characters, max 60 chars.
-3. **Compute the filename** — `notes/YYYY-MM-DD-<slug>.md` using today's date.
+3. **Compute the filename** — `<dir>/YYYY-MM-DD-<slug>.md` using today's date. `<dir>` defaults to `notes/`; the user may relocate it with `lyt capture --dir <vault-relative>` (fail-closed: rejects empty / absolute / `..`-escape / vault-root / the reserved `.lyt`,`.obsidian`,`.git` trees), or opt into a topic-named folder with `--topic-folder` (routes into `topics/<topic-slug>/`; explicit `--dir` wins).
 4. **If a file already exists at that path**, append `-2`, `-3`, etc. to the slug until the path is free. Never overwrite.
-5. **Fill the 8 mandatory frontmatter fields:**
+5. **Fill the 8 mandatory frontmatter fields** per the contract SoT — run `lyt contract --json` for the canonical order, sources, and defaults (source: `FRONTMATTER_CONTRACT` in `packages/lyt-vault/src/templates/contract.ts`). Do NOT hand-maintain a divergent field list. Summary (verify against `lyt contract --json`; not auto-generated):
 
 | Field             | Source                                | Notes                                                                                    |
 | ----------------- | ------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -122,7 +122,7 @@ e.g. `lyt capture --index-only notes/2026-06-10-my-note.md --vault personal/main
 - **`mesh-visibility` default = `local`; `weight` default = `3`.** Override only when the user signals a non-default.
 - **User Figments are plain Obsidian-flavored markdown.** Wikilinks (`[[other-note]]`), tags (`#tag`), callouts, embeds — all fine. **Do NOT write YON inside user Figments.** YON is reserved for system files (`.lyt/vault.yon`, `.lyt/memscope.yon`, pattern.yon).
 - **Never overwrite an existing Figment.** Always pick a fresh slug suffix.
-- **Never touch files outside `<vault>/notes/`** unless the user explicitly says so.
+- **Capture lands in `<vault>/notes/` by default;** `--dir <vault-relative>` and `--topic-folder` (opt-in → `topics/<slug>/`) may relocate it. Both are fail-closed (no `..`-escape, no absolute path, no reserved `.lyt`/`.obsidian`/`.git` tree). Do not write outside the resolved capture dir, and do not touch unrelated vault files unless the user explicitly says so.
 - **Never run `git add`/`git commit`** — sync is a separate step (`/lyt-sync` or `lyt sync --watch`).
 - If the user's content references other Figments by name, use `[[wikilinks]]` so Obsidian resolves them; don't expand them yourself.
 

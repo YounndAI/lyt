@@ -90,7 +90,8 @@ export async function upsertFtsCache(
   const startedAt = Date.now();
   // B-4: root the FTS walk at the VAULT ROOT (not notes/) via the shared
   // isIndexable predicate — content under any semantic folder is now indexed,
-  // while the immutable floor (.lyt/.obsidian/.git), scaffold index.md, and
+  // while the immutable floor (.lyt/.obsidian/.git), index.md/README.md
+  // (isScaffoldNote basename gate), and
   // size/binary skips are enforced uniformly. Skipped markdown files surface a
   // reason on a real (non-dry-run) reindex via console.warn (skip = warned).
   const noteFiles = walkVaultMarkdownFiles(vaultPath, isIndexable, {
@@ -265,10 +266,14 @@ export function stripFrontmatter(raw: string): string {
 // ---------------------------------------------------------------------------
 
 // True for LYT-authored scaffold files by basename:
-//   - `index.md`   — the auto-generated starter Figment written by scaffold/init.ts
-//                    into notes/index.md (any directory level). Not a user Figment.
-//                    (V-F12; a user-authored index.md is rare — revisit with a
-//                    generated-by marker check if that case ever matters.)
+//   - `index.md`   — HISTORICAL: scaffold/init.ts used to write a notes/index.md
+//                    starter Figment; that starter was dropped (welcome.md is now
+//                    the sole starter). The basename exclusion is RETAINED as
+//                    harmless protection: an auto-generated / MOC-style index.md
+//                    (e.g. a user- or tool-maintained notes/index.md) stays out of
+//                    FTS, which is the intended treatment for an index/MOC page.
+//                    (V-F12; revisit with a generated-by marker check if a
+//                    hand-authored index.md ever needs to be searchable.)
 //   - `README.md`  — the GitHub landing file written by scaffold/init.ts at the vault
 //                    root. MUST NOT carry frontmatter (GitHub renders it badly); the
 //                    Phase A `lyt-scaffold: true` frontmatter gate cannot apply to
@@ -463,13 +468,55 @@ function frontmatterBlock(raw: string): string | null {
   return null;
 }
 
-// First top-level `key: value` scalar match (surrounding quotes trimmed).
+// First top-level `key: value` scalar match, quote-aware.
+//
+// A well-formed YAML DOUBLE-quoted scalar (`"..."`) is UNESCAPED here — `\"` →
+// `"` and `\\` → `\` — so it round-trips byte-identically with the writer that
+// emits those escapes (metadata-filler renderTopicValue / renderTagsValue).
+// Phase E fix-pass (release review FIX 1): without this decode a topic containing a
+// `"` or `\` was read back lossy AND its backslashes re-doubled on every backfill
+// (`a\b` → `a\\b` → `a\\\\b`), fragmenting one topic into many labels across
+// reindexes. The decode is scoped to a properly-closed double-quoted scalar; any
+// other form (single-quoted, unquoted ISO dates, bare scalars) keeps the prior
+// surrounding-quote-strip so title/created/modified/purpose read exactly as
+// before (they carry no escapes → decode would be a no-op anyway, but the scope
+// keeps the behavior provably unchanged for the non-enriched fields).
 function frontmatterField(block: string, key: string): string | null {
   const re = new RegExp(`^\\s*${key}\\s*:\\s*(.+?)\\s*$`, "im");
   const m = block.match(re);
   if (!m) return null;
-  const v = m[1]!.replace(/^["']|["']$/g, "").trim();
+  const raw = m[1]!.trim();
+  const v = decodeFrontmatterScalar(raw);
   return v.length > 0 ? v : null;
+}
+
+// Decode a single frontmatter scalar value (already trimmed of outer whitespace).
+// - A well-formed double-quoted scalar (`"..."`, closing quote not itself
+//   escaped) → the quoted content with `\"`→`"` and `\\`→`\` unescaped. This is
+//   the exact inverse of the writer's `.replace(/\\/g,"\\\\").replace(/"/g,'\\"')`
+//   so a topic/tag with a quote or backslash round-trips losslessly + idempotently.
+// - Any other form → the prior behavior: strip a single pair of surrounding
+//   quotes (either kind) and return the inner text verbatim (no unescaping).
+function decodeFrontmatterScalar(raw: string): string {
+  if (isDoubleQuotedScalar(raw)) {
+    const inner = raw.slice(1, -1);
+    // Unescape: process `\\` and `\"` (writer emits only these two). A lone
+    // backslash before any other char is left verbatim (writer never emits one).
+    return inner.replace(/\\(["\\])/g, "$1");
+  }
+  return raw.replace(/^["']|["']$/g, "").trim();
+}
+
+// True iff `raw` is a well-formed double-quoted scalar: starts and ends with `"`,
+// has at least the two delimiters, and the closing quote is NOT escaped (an even
+// number of consecutive backslashes precedes it). `"a\\"` closes (2 backslashes →
+// escaped-backslash then real close); `"a\"` does not (1 backslash → escaped quote,
+// unterminated → treated as a bare scalar, prior strip behavior).
+function isDoubleQuotedScalar(raw: string): boolean {
+  if (raw.length < 2 || raw[0] !== '"' || raw[raw.length - 1] !== '"') return false;
+  let backslashes = 0;
+  for (let i = raw.length - 2; i >= 1 && raw[i] === "\\"; i--) backslashes++;
+  return backslashes % 2 === 0;
 }
 
 function normalizeIso(value: string | null): string | null {

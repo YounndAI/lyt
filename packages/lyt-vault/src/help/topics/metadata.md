@@ -32,7 +32,7 @@ both humans and AI agents on what the vault is:
 | `.lyt/lyt-overview.md` | user         | never                                        |
 | `.lyt/mesh-context.md` | Lyt          | on edge mutation + `lyt vault regen-context` |
 | `.lyt/agents.md`       | Lyt template | on template version bump                     |
-| `notes/index.md`       | user         | never; suppressed by `--no-starter-figment`  |
+| `notes/welcome.md`     | user         | never; suppressed by `--no-starter-figment`  |
 
 `lyt-overview.md` ends with `![[.lyt/mesh-context]]` — an Obsidian
 transclusion. Edits to `lyt-overview.md` are yours forever; the auto-content

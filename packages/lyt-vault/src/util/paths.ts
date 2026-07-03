@@ -49,6 +49,64 @@ export function canonicalizeVaultPath(p: string): string {
   return resolve(p);
 }
 
+// Reserved system trees under a vault root — never a capture destination. A
+// figment written into `.lyt/` (system state / caches), `.git/` (VCS internals),
+// or `.obsidian/` (editor config) would corrupt managed data AND land where the
+// index floor can never see it — an invisible, unsearchable figment. So `lyt
+// capture --dir` fail-closed rejects any target that lands in one of them.
+//
+// SEE ALSO — COUPLED CONSTANT: this set MUST cover every entry of
+// `INDEX_FLOOR` (util/indexable.ts) — those are exactly the never-indexed
+// trees, so capturing into any of them strands an unsearchable figment.
+// Kept as a local literal (not an import) to preserve paths.ts's node-builtins-
+// only layering; the `RESERVED_CAPTURE_DIRS ⊇ INDEX_FLOOR` invariant is enforced
+// by a coupled-constant test in tests/paths.test.ts. If INDEX_FLOOR gains an
+// entry, add it here too (and the test will fail until you do).
+export const RESERVED_CAPTURE_DIRS = new Set([".lyt", ".obsidian", ".git"]);
+
+// Fail-closed guard for a user-supplied capture destination (`lyt capture
+// --dir <vault-relative>`, Phase B / C9). Returns the validated vault-relative
+// directory (POSIX-separated, normalized) or throws. The untrusted CLI/agent
+// input is rejected BEFORE any write when it: is empty, is an absolute path,
+// escapes the vault root via `..` (the same `rel`-floor idiom resolveVaultPath
+// uses), resolves to the vault root itself, or names a reserved system tree
+// (.lyt/.obsidian/.git) at any depth. The trusted default (`notes/`) never
+// routes through here — only explicit `--dir` input does.
+export function resolveCaptureDir(vaultPath: string, dir: string): string {
+  const cleaned = dir.replace(/\\/g, "/").trim();
+  if (cleaned.length === 0) {
+    throw new Error(`capture --dir: empty directory (got '${dir}').`);
+  }
+  if (isAbsolute(cleaned)) {
+    throw new Error(`capture --dir: must be vault-relative, not an absolute path ('${dir}').`);
+  }
+  const root = resolve(vaultPath);
+  const target = resolve(root, cleaned);
+  const rel = relative(root, target);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(
+      `capture --dir: '${dir}' escapes the vault root — the destination must stay inside the vault ` +
+        `(no '..', absolute paths, or the vault root itself).`,
+    );
+  }
+  const segments = rel.split(/[\\/]/).filter((s) => s.length > 0);
+  for (const seg of segments) {
+    // Windows silently strips trailing dots and spaces from path components, so
+    // `.lyt.` / `.git ` alias onto the real reserved tree on that filesystem.
+    // Normalize the trailing dots/spaces away BEFORE the reserved-name match so a
+    // trailing-dot/space variant can't smuggle a capture toward a reserved tree
+    // (release review S-1). The comparison is case-insensitive to match Windows'
+    // case-fold too.
+    const normalizedSeg = seg.replace(/[. ]+$/, "").toLowerCase();
+    if (RESERVED_CAPTURE_DIRS.has(normalizedSeg)) {
+      throw new Error(
+        `capture --dir: '${dir}' targets a reserved directory ('${seg}') — .lyt/, .obsidian/, and .git/ are off-limits.`,
+      );
+    }
+  }
+  return segments.join("/");
+}
+
 // Heuristic floor against catastrophic accidents (typo, env-var leak), NOT a
 // security boundary against hostile input. A user who deliberately sets
 // LYT_HOME=/some/path/lyt-bombs-away passes the basename regex and accepts the

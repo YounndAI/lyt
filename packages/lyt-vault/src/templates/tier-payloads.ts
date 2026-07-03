@@ -40,15 +40,18 @@
 // non-marketing, byte-region-honest. Do NOT invent brand/marketing claims here.
 
 import { buildFrontmatter } from "./contract.js";
+import type { ScaffoldDates } from "./priming.js";
 
 /** The two scaffold tiers. `{mesh}/main` → "rich"; everything else → "mini". */
 export type ScaffoldTier = "rich" | "mini";
 
-// A fixed epoch sentinel timestamp for seed-Figment frontmatter. Same rationale
-// as priming.ts SCAFFOLD_FRONTMATTER_TIMESTAMP: scaffold seeds are not authored
-// at a meaningful instant, so `created == modified == epoch` is the truthful,
-// deterministic value (no churn on re-scaffold, regen-idempotency preserved).
-const SCAFFOLD_FRONTMATTER_TIMESTAMP = "1970-01-01T00:00:00.000Z";
+// fg-scaffold-frontmatter (handler rule: EVERY scaffolded file MUST carry REAL
+// dates — no 1970 sentinel anywhere). The seed-Figment frontmatter dates are now
+// THREADED from the true vault init `createdAt` (scaffold/init.ts), the SAME
+// single source priming.ts threads into getLytOverviewContent / getAgentsMdContent.
+// The last-ditch fallback (a caller that threads no date) mirrors priming.ts's
+// defensive default and MUST never re-introduce the epoch lie the dogfood found.
+const SCAFFOLD_FRONTMATTER_TIMESTAMP_FALLBACK = "1970-01-01T00:00:00.000Z";
 
 /**
  * Resolve the scaffold tier from a vault NAME. The mesh-defining main vault is
@@ -80,12 +83,22 @@ export interface SeedFigmentSpec {
   body: string;
 }
 
-/** Render the full Figment text (frontmatter + body) for a seed spec. */
-export function renderSeedFigment(spec: SeedFigmentSpec): string {
+/**
+ * Render the full Figment text (frontmatter + body) for a seed spec.
+ *
+ * fg-scaffold-frontmatter — `dates` carries the REAL vault init time threaded
+ * from scaffold/init.ts (the same `createdAt` priming.ts uses). `created`
+ * defaults to the sentinel ONLY when no caller threads a date (defensive
+ * default, mirroring priming.ts.scaffoldFrontmatter); `modified` defaults to
+ * `created` (created == modified at scaffold time).
+ */
+export function renderSeedFigment(spec: SeedFigmentSpec, dates?: ScaffoldDates | undefined): string {
+  const created = dates?.created ?? SCAFFOLD_FRONTMATTER_TIMESTAMP_FALLBACK;
+  const modified = dates?.modified ?? created;
   const frontmatter = buildFrontmatter({
     title: spec.title,
-    created: SCAFFOLD_FRONTMATTER_TIMESTAMP,
-    modified: SCAFFOLD_FRONTMATTER_TIMESTAMP,
+    created,
+    modified,
     // PROVISIONAL tag schema (D-prototype, informs B-1): `lyt/scaffold` is a
     // suppressible content-origin marker for graph/primer surfaces — distinct
     // from the `lytScaffold: true` field below (the FTS-exclusion gate). Both

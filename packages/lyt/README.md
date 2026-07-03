@@ -71,6 +71,19 @@ leaves (unique-leaf, errors on collision), aliases, and `lyt:vault:` origin
 coordinates all resolve to it. `lyt vault init <mesh>/<vault>` is
 create-if-missing.
 
+## Metadata that stays correct
+
+Every note carries an 8-field frontmatter contract — title, real dates, tags, a `topic`, and a `purpose` you write. Lyt keeps it correct at rest, sets it at capture, and heals legacy files — without ever touching your prose:
+
+```bash
+lyt capture "an idea" --dir projects/notes   # choose where it lands; sets a topic interactively
+lyt vault backfill <name>                     # fill missing frontmatter on an existing vault, in place
+lyt vault reconcile <name> --apply            # heal notes that are unindexed or missing metadata
+lyt doctor                                    # count notes with missing or invalid frontmatter
+```
+
+Backfill fills titles, genuine created/modified dates (from git history), and keyword tags **with no model required** — on any vault, including one you just imported. `purpose` is left blank and flagged, never guessed; anything you authored is never overwritten. When a local embedding model is present, `topic:` is enriched too — capture *suggests* one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure. Topics are ranked against your vault's current on-disk labels and computed on-device — nothing is sent anywhere. Every machine-filled field is provenance-stamped, so it stays distinguishable from your own writing.
+
 ## The Lyt toolchain
 
 Lyt is an open toolchain — `@younndai/lyt` composes these packages, and you can also depend on any of them directly:

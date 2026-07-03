@@ -74,6 +74,8 @@ Each skill autodetects the active vault + project via `lyt vault info --by-path`
 
 A `meta:` escape-hatch blob accepts free-form fields without schema churn. The result: every note an agent saves is structured, searchable, and legible to the next agent that reads it.
 
+On an interactive terminal, `/lyt-capture` also resolves **where** the note lands — `--dir <vault-subdir>`, an opt-in `topics/<slug>/` folder, or the default `notes/` (fail-closed against escapes) — and offers your vault's existing topics (recommended first) so `topic:` stays consistent. `tags` fill with no model required; with a local embedding model present, a `topic:` is additionally suggested (recommended, never auto-selected) — computed on-device, never sent anywhere.
+
 ## Patterns vs skills
 
 - A **pattern** is data: a `pattern.yon` descriptor + a `templates/` folder of markdown templates with frontmatter. Patterns live at `~/lyt/patterns/`.

@@ -76,7 +76,6 @@ async function main() {
       ["README.md", { vaultName: "smoke" }],
       ["lyt-overview.md", { vaultName: "smoke", descBlock: "_demo_", owner: "smoke-owner" }],
       ["agents.md", { vaultName: "smoke", version: "3", primerBlock: "p", patternsBlock: "q" }],
-      ["notes-index.md", { vaultName: "smoke" }],
     ];
     for (const [file, vars] of SCAFFOLD_TEMPLATES) {
       let out;

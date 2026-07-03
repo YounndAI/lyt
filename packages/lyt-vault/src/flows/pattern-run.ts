@@ -15,12 +15,13 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, posix, relative, sep } from "node:path";
+import { basename, dirname, join, posix, relative, sep } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName } from "../registry/repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { getIdentity } from "../util/identity.js";
+import { resolveCaptureDir } from "../util/paths.js";
 import { getUserPatternsDir } from "../util/pattern-paths.js";
 import { isIndexablePath } from "../util/indexable.js";
 import { parsePatternYon, type VerbRecord } from "../yon/pattern.js";
@@ -69,6 +70,14 @@ export interface PatternRunArgs {
   vaultName: string;
   project?: string | undefined;
   slug?: string | undefined;
+  // Phase B / C9 — `lyt capture --dir <vault-relative>`. When set, overrides the
+  // template path-glob's default destination directory (e.g. `notes/`) with a
+  // user-chosen vault subdirectory, keeping the template's dated filename. The
+  // value is fail-closed-guarded (resolveCaptureDir) BEFORE any write: `..`
+  // escapes, absolute paths, and the reserved .lyt/.obsidian/.git trees are
+  // rejected, so a crafted --dir can never land a figment outside the vault. Only capture
+  // supplies it; other verbs leave it undefined and keep their path-glob home.
+  dir?: string | undefined;
   vars?: Record<string, string> | undefined;
   // 0.9.3 — injectable gh executor for the writability probe at the
   // write-gate (deriveWriteGate). Defaults to the real `gh` CLI; tests inject a
@@ -172,7 +181,15 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
     slug: args.slug,
     vars: args.vars,
   });
-  const filePath = resolveFilePath(verb.pathGlob, tokens);
+  let filePath = resolveFilePath(verb.pathGlob, tokens);
+  // `--dir` relocation (C9): keep the template's resolved filename but swap its
+  // parent directory for the guarded, user-chosen vault subdirectory. The guard
+  // throws on any escape/reserved-tree target, so this runs fail-closed before
+  // the existed-check, mkdir, or write below.
+  if (args.dir !== undefined) {
+    const safeDir = resolveCaptureDir(vaultPath, args.dir);
+    filePath = join(vaultPath, safeDir, basename(filePath));
+  }
   if (existsSync(filePath)) {
     return {
       patternName: args.patternName,

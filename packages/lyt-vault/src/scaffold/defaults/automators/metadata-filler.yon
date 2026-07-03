@@ -2,18 +2,24 @@
 
 @SEC name="Housekeeping"
 
-@AUTOMATOR rid=automator:metadata-filler | name=metadata-filler | version=0.1.0
+# idempotent:bool=true is HONORED post Phase E.1 FIX C: the topic-enrich label set
+# is read from CURRENT on-disk topics (not the mutable search index), so an unchanged
+# disk yields the same fill every run (same input -> same output). Fill-missing-only
+# already never overwrote an authored value. field_ownership lists ONLY fields this
+# body actually writes: [created,modified,tags,topic]; links-out-of-vault is scanner-
+# filled (extractWikilinks), never by this filler, so it is NOT declared here.
+@AUTOMATOR rid=automator:metadata-filler | name=metadata-filler | version=0.3.0
   | archetype=filler | cluster=housekeeping
-  | keywords=[frontmatter,contract,missing-data]
-  | description="Fills missing frontmatter fields for notes not following v1 contract"
+  | keywords=[frontmatter,contract,missing-data,backfill,date-fidelity,git-committer-date,tag-enrichment,topic-classify]
+  | description="Backfills missing frontmatter fields vault-wide (keep-flat, in place), sourcing created/modified from each note's real historical date (git committer date, fs-mtime fallback); Phase E enriches tags (deterministic keyphrase) + optionally ranks topic against existing labels via local embeddings (degrades to blank when the model is absent)"
   | source=system | signed_by=system:lyt
   | runtime=deterministic | transaction_mode=none | idempotent:bool=true | timeout_ms:int=30000
   | subscribes_to=[vault.note.created,vault.note.modified]
   | schedule=on-sync | priority:int=3
   | machine_lease=none | concurrency=parallel | requires_role=[automator-runner]
   | scope=vault | reads_scope=[vault] | writes_scope=[vault]
-  | field_ownership=[created,modified,links-out-of-vault]
+  | field_ownership=[created,modified,tags,topic]
   | as_roles=[automator:system]
-  | llm_capability=none
+  | llm_capability=embed
   | retention.hot=7d | retention.warm=90d | retention.cold=1y | retention.shred_at=1y
   | log_level=info

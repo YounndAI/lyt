@@ -37,10 +37,16 @@
 // scaffold `index.md` — an intended behavior change matching FTS); the extension
 // gate is case-insensitive uniformly.
 //
-// WRITER carve-out: this governs READ/index scope ONLY. The metadata-filler
-// AUTOMATOR (packages/lyt) is a frontmatter WRITER and stays `notes/`-scoped —
-// it is NOT routed through this predicate. Re-rooting a writer to whole-vault
-// scope would widen its mutation blast radius.
+// WRITER note (updated Phase C /, 2026-07 — supersedes the prior
+// "writer stays notes/-scoped" carve-out): this predicate governs READ/index
+// scope AND, as of Phase C, the metadata-filler AUTOMATOR (packages/lyt), which
+// now walks the WHOLE vault through THIS SAME funnel instead of a `notes/`-only
+// walk. The re-root widened the writer's mutation blast radius DELIBERATELY, and
+// it is gated here: the immutable floor (.lyt/.obsidian/.git) + the g6
+// `lyt-scaffold` sentinel exclude system/scaffold files, and the writer only
+// fills MISSING fields (idempotent, never overwrites). FOLLOW-UP: the filler has
+// no writable/subscriber gate; before it is wired to live on-sync events, add one
+// so a whole-vault walk cannot rewrite a shared/subscribed vault's files.
 
 import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";

@@ -37,11 +37,14 @@ import {
 } from "@younndai/lyt-vault";
 
 import { buildAutomatorRunSubcommand } from "./cli-automator-run.js";
+import { buildBackfillCommand } from "./commands/backfill.js";
 import { buildBenchCommand } from "./commands/bench.js";
 import { buildCaptureCommand } from "./commands/capture.js";
+import { buildContractCommand } from "./commands/contract.js";
 import { buildLytInitCommand } from "./commands/init.js";
 import { buildModelCommand } from "./commands/model.js";
 import { buildPrimerCommand } from "./commands/primer.js";
+import { buildReconcileCommand } from "./commands/reconcile.js";
 import { buildReindexCommand } from "./commands/reindex.js";
 import { buildSearchCommand } from "./commands/search.js";
 
@@ -105,6 +108,20 @@ if (automatorCmd === undefined) {
 }
 automatorCmd.addCommand(buildAutomatorRunSubcommand());
 
+// Phase D (0.10.0 frontmatter-contract lane) — attach the frontmatter heal verbs
+// to the lyt-vault-registered `vault` parent HERE (not in lyt-vault's
+// buildVaultSubcommand) because both run the metadata-filler automator body /
+// reindex, which pull in lyt-runner — registering them inside lyt-vault would
+// cycle. Same attach-to-a-registered-parent pattern as `automator run` above.
+const vaultCmd = program.commands.find((c) => c.name() === "vault");
+if (vaultCmd === undefined) {
+  throw new Error(
+    "@younndai/lyt meta CLI: expected registerVaultVerbs to register a 'vault' command but none was found.",
+  );
+}
+vaultCmd.addCommand(buildBackfillCommand());
+vaultCmd.addCommand(buildReconcileCommand());
+
 program.addCommand(buildSyncCommand());
 // Brief B (B.4) — `lyt status`: top-level publish-drift trust surface (per-vault
 // + pod unpushed/no-remote/clean). Distinct from `lyt mesh status` (the
@@ -127,6 +144,13 @@ program.addCommand(buildSearchCommand());
 // index-on-write so a capture is searchable immediately. Top-level like
 // search/primer/reindex; the flow lives in @younndai/lyt-vault.
 program.addCommand(buildCaptureCommand());
+
+// Phase B (frontmatter-contract lane, slice 1) — `lyt contract [--json|--explain]`
+// surfaces the machine-readable frontmatter Source-of-Truth (FRONTMATTER_CONTRACT).
+// Top-level (like search / primer / reindex) because the contract is ONE pod-global
+// artifact, not a single-vault concept. Read-only. The descriptor lives in
+// @younndai/lyt-vault (data-layer ownership); this is the CLI-surface adapter.
+program.addCommand(buildContractCommand());
 
 // v1.D.4 — `lyt primer` mirrors the meta-CLI posture of `lyt search`.
 // Same rationale: the verb operates at vault | mesh | federation scope

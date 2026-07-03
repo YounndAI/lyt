@@ -50,7 +50,8 @@ lyt vault info <name> [--json]     # status, mesh, writability, origin coordinat
 lyt alias <name> <target>          # pod-local name → vault rid (survives rename + move)
 
 # Capture and find knowledge
-lyt capture "<text>"               # save a Figment (markdown note) with frontmatter
+lyt capture "<text>" [--dir <subdir>]   # save a Figment (markdown note) with frontmatter;
+                                   #   --dir chooses where it lands, topic picked interactively
 lyt search "<query>" [--vault <name>] [--mesh <m>] [--no-semantic] [--json]
                                    # tiered search (arcs → lanes → FTS5 → edges)
                                    #   + optional on-device semantic fusion
@@ -82,6 +83,16 @@ The full v1 verb set also includes `vault clone|forget|disconnect|delete|add-edg
 - The one-time local model download is **handler-gated**: `lyt reindex` on an interactive terminal prompts before fetching; non-interactive / scripted / MCP runs never auto-download. The model caches under `~/lyt/.embeddings-cache/`, never inside a vault.
 - Embeddings run **locally on CPU** — there is no remote inference and `fastembed` is an `optionalDependency`, so install succeeds even where its native runtime can't build.
 - Turn fusion off with `lyt search --no-semantic`, or disable it globally via `LYT_EMBEDDINGS=0`.
+
+## Metadata & frontmatter
+
+Every note carries an 8-field frontmatter contract — `title`, `created`, `modified`, `tags`, `topic`, `purpose`, `mesh-visibility`, `weight`. Lyt keeps it correct at rest, sets it at capture, and heals legacy files without touching your prose. The `backfill` and `reconcile` verbs below ship in the unified [`@younndai/lyt`](https://www.npmjs.com/package/@younndai/lyt) binary (they compose the automation runner, which this package deliberately does not depend on).
+
+- **`lyt vault backfill <name>`** fills missing fields in place — title, genuine `created`/`modified` dates (from git history, falling back to file mtime), keyword `tags`, `topic`, and defaults. It never moves files.
+- **`lyt vault reconcile <name> [--apply]`** scans every note against the index, flags files that are present-but-unindexed or missing frontmatter, and with `--apply` backfills then reindexes them — drop a raw `.md` into a vault and it gets healed. Both verbs commit locally by default (`--push` to opt in).
+- **Tags need no model** — keyword extraction runs on any vault, including a freshly imported one. When a local embedding model is present, `topic:` is enriched too: capture *suggests* one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure — ranked against your current on-disk labels and computed on-device. With no model, tags still fill and topic stays blank.
+- **Your writing is never overwritten** — `purpose` is left blank and flagged rather than guessed, authored values are preserved, and every machine-filled field is provenance-stamped so it stays distinguishable from what you wrote. Nothing is ever sent off your machine.
+- **`lyt doctor`** counts notes with missing or invalid frontmatter (`--full` scans every vault; the default samples).
 
 ## Key features
 

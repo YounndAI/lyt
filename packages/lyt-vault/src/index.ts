@@ -352,6 +352,7 @@ export {
   extractWikilinks,
   extractFtsBody,
   parseFigmentDates,
+  parseFigmentTopicTags,
   isScaffoldNote,
   toVaultRelPosix,
 } from "./flows/upsert-fts-cache.js";
@@ -360,6 +361,7 @@ export type {
   UpsertFtsCacheOpts,
   ExtractedFtsBody,
   FigmentDates,
+  FigmentTopicTags,
 } from "./flows/upsert-fts-cache.js";
 export {
   insertFtsDoc,
@@ -390,8 +392,25 @@ export {
   listRecentFigments,
   // V-C-1 SC3 option-b — primer keyword fallback source (topic/tags aggregate).
   loadKeywordSignals,
+  // C10 — distinct-topics source for the capture topic picker.
+  listDistinctTopics,
 } from "./registry/figment-meta-repo.js";
-export type { FigmentMeta, RecentFigmentRow, KeywordSignal } from "./registry/figment-meta-repo.js";
+export type {
+  FigmentMeta,
+  RecentFigmentRow,
+  KeywordSignal,
+  TopicCount,
+} from "./registry/figment-meta-repo.js";
+// C10 — the topic-picker read flow ( vault name -> distinct topics ).
+export { listVaultTopicsFlow } from "./flows/list-vault-topics.js";
+// Phase E (Unit 2 wiring) — the C10 picker's SEMANTIC upgrade: re-rank existing
+// topics by similarity to the figment when the model is present; degrade to the
+// frequency order otherwise (read-never-fetches).
+export { rankVaultTopicsFlow } from "./flows/rank-vault-topics.js";
+export type {
+  RankVaultTopicsArgs,
+  RankVaultTopicsResult,
+} from "./flows/rank-vault-topics.js";
 // Lane V Phase 0 (0.5 / C1-C3) — all-tiers rebuild umbrella + pod/mesh/vault reindex.
 export { rebuildVaultFlow } from "./flows/rebuild-vault.js";
 export type {
@@ -401,6 +420,46 @@ export type {
 } from "./flows/rebuild-vault.js";
 export { reindexFlow } from "./flows/reindex.js";
 export type { ReindexArgs, ReindexResult, ReindexScope } from "./flows/reindex.js";
+// Phase D (0.10.0 frontmatter-contract lane) — disk↔index + frontmatter-contract
+// DETECT primitives (pure, read-only; the meta CLI's backfill/reconcile verbs +
+// the doctor check consume these). The HEAL side lives in @younndai/lyt.
+export {
+  scanFrontmatterContract,
+  scanUnindexedFigments,
+  reconcileVaultScan,
+} from "./flows/reconcile-frontmatter.js";
+export type {
+  FrontmatterContractIssue,
+  FrontmatterContractScan,
+  UnindexedScan,
+  ReconcileScan,
+} from "./flows/reconcile-frontmatter.js";
+// Phase E (0.10.0 frontmatter-contract lane) — tag/topic enrichment +
+// in-vault suggested-links. Pure primitives (Unit 1 model-free tags, Unit 3
+// model-free links) + the model-boundary Unit 2 (topic-classify degrades to
+// blank when the embedder is absent). HEAL/write side is the meta @younndai/lyt
+// CLI + capture surface, mirroring reconcile-frontmatter's detect/heal split.
+export {
+  suggestFigmentTags,
+  DEFAULT_MAX_FIGMENT_TAGS,
+  MIN_TAG_LEN,
+} from "./enrich/figment-tags.js";
+export type { SuggestFigmentTagsOptions } from "./enrich/figment-tags.js";
+export {
+  classifyTopic,
+  precomputeTopicLabelVectors,
+  TOPIC_MIN_CONFIDENCE,
+} from "./enrich/topic-classify.js";
+export type {
+  RankedTopic,
+  ClassifyTopicResult,
+  ClassifyTopicOptions,
+} from "./enrich/topic-classify.js";
+// Phase E.1 — suggested-links (Unit 3) is DESCOPED from the public barrel: the
+// module is built + unit-tested but has ZERO production callers (a dead public
+// API). It is intentionally NOT re-exported here until a fast-follow wires the
+// ACCEPT→edge write into the capture surface. The module + its tests stay in-tree
+// (tests import it by relative path). See enrich/suggested-links.ts header.
 // Phase E Unit 3 — the VERSIONED `lyt reindex --json` schema (zod), shared
 // by the command emit-path AND the agent skill consumer (single source). Carries
 // model + index + nudge-trace; the schema is itself the Unit-3 test target.
@@ -431,6 +490,15 @@ export type {
 } from "./flows/reconcile-figment-write.js";
 export { backfillFigmentCaches } from "./flows/backfill-figment-caches.js";
 export type { BackfillFigmentCachesResult } from "./flows/backfill-figment-caches.js";
+// Phase A (UNIT 3 / C4) — maintain the figment `modified` frontmatter on a
+// content change (fs-mtime keyed, floored-second, clamped `>= created`;
+// `created` preserved). The write / sync-watch path invokes this before
+// reconciling so the index picks up the advanced date.
+export {
+  maintainModifiedFromMtime,
+  mtimeToFlooredIso,
+} from "./flows/maintain-modified.js";
+export type { MaintainModifiedResult } from "./flows/maintain-modified.js";
 // V-C-1 (Lane V Track C) — index-on-write (L1): the single seam every capture
 // path calls after writing a figment so search/recall/primer hit with NO manual
 // reindex (FTS reconcile + per-vault lanes/arcs; cross-vault rollup deferred).
@@ -504,9 +572,14 @@ export {
   blobToVector,
   embeddingsCacheDir,
   modelCachePresent,
+  // Phase E — the automator enrich path (metadata-filler) gates its embedder
+  // load on modelCachePresent() || embedderMemoized() (mirrors rankVaultTopicsFlow),
+  // so the barrel must surface embedderMemoized too.
+  embedderMemoized,
   semanticEvicted,
   isEmbeddingsInteractive,
   __resetEmbedderCache,
+  __setTestEmbedder,
   EMBEDDING_DIM,
   EMBEDDING_MODEL_ID,
 } from "./util/embeddings.js";
@@ -612,7 +685,7 @@ export type {
   SyncMetadataScope,
   SyncMetadataVaultReport,
 } from "./flows/sync-metadata.js";
-export { doctorFlow, renderHumanReport } from "./flows/doctor.js";
+export { doctorFlow, renderHumanReport, checkFrontmatterContract } from "./flows/doctor.js";
 export type {
   BinaryRunner,
   CheckResult,
@@ -648,7 +721,6 @@ export {
   AGENTS_MD_PRIMER_END,
   getAgentsMdContent,
   getLytOverviewContent,
-  getNotesIndexContent,
   regenInstalledPatternsSection,
   regenInstalledPrimerSection,
 } from "./templates/priming.js";
@@ -1187,7 +1259,7 @@ export type {
 // cross-package READ gate in lyt-mesh (the sync-watch event pre-filter) routes
 // through the SAME funnel as every in-package index tier. Public-export
 // addition only: no behavior change to lyt-vault.
-export { isIndexablePath } from "./util/indexable.js";
+export { isIndexablePath, isIndexable, walkVaultMarkdownFiles } from "./util/indexable.js";
 
 export { renderVaultYon } from "./yon/vault.js";
 export type { VaultDoc, VaultRecord, VaultHomeMeshRecord } from "./yon/vault.js";
@@ -1460,6 +1532,29 @@ export { buildMachineCommand } from "./commands/machine.js";
 
 export { DEFAULT_TEMPLATE } from "./templates/index.js";
 export type { TemplateName } from "./templates/index.js";
+// Phase B (frontmatter-contract lane, slice 1) — the machine-readable
+// frontmatter Source-of-Truth. The `lyt contract` verb + downstream slices
+// (capture --dir, topic picker, MCP schema, agent-manual generation) consume
+// FRONTMATTER_CONTRACT so there is one bump point and no parallel field lists.
+export {
+  FRONTMATTER_CONTRACT,
+  FRONTMATTER_CONTRACT_VERSION,
+  FRONTMATTER_FIELDS,
+  MANDATORY_FRONTMATTER_TOKENS,
+  DEFAULT_MESH_VISIBILITY,
+  DEFAULT_WEIGHT,
+  buildFrontmatter,
+  validateFrontmatterBlock,
+  gitCommitterDateToIso,
+} from "./templates/contract.js";
+export type {
+  FrontmatterContractField,
+  FrontmatterFieldSource,
+  FrontmatterField,
+  MandatoryFrontmatterToken,
+  FrontmatterInput,
+  FrontmatterValidationError,
+} from "./templates/contract.js";
 export {
   getLytHome,
   getDefaultVaultsRoot,

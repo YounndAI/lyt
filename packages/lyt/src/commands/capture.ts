@@ -40,8 +40,10 @@ import {
   closeRegistry,
   getVaultByName,
   listVaults,
+  rankVaultTopicsFlow,
   openRegistry,
   patternRunFlow,
+  type TopicCount,
   type VaultRow,
 } from "@younndai/lyt-vault";
 
@@ -60,6 +62,8 @@ interface CaptureCliOpts {
   weight?: string;
   meshVisibility?: string;
   slug?: string;
+  dir?: string;
+  topicFolder?: boolean;
   vars: Record<string, string>;
   json?: boolean;
   indexOnly?: string;
@@ -82,6 +86,14 @@ export function buildCaptureCommand(): Command {
     .option("--weight <n>", "Importance 1-5 (default 3)")
     .option("--mesh-visibility <v>", "local | parent | public (default local)")
     .option("--slug <slug>", "Filename slug (default: derived from the title)")
+    .option(
+      "--dir <vault-relative>",
+      "Destination directory inside the vault (default: notes/). Fail-closed: rejects '..', absolute paths, and the reserved .lyt/.obsidian/.git trees.",
+    )
+    .option(
+      "--topic-folder",
+      "Route the capture into a topic-named folder (topics/<topic-slug>/) instead of notes/. Opt-in; ignored when --dir is given (explicit wins). The topic still sets the `topic:` field either way.",
+    )
     .option(
       "--vars <kv>",
       "Repeatable key=value override (advanced)",
@@ -173,8 +185,12 @@ async function runCapture(text: string | undefined, opts: CaptureCliOpts): Promi
   // refusal `pattern run` would (ceremony preserved — never silently bypassed).
   const purpose =
     opts.purpose ?? opts.vars["purpose"] ?? (await promptIfTty("Why keep this? (purpose): "));
+  // C10 topic picker: on a TTY with no explicit --topic, surface the vault's
+  // existing topics for reuse (recommended-first) with an "other" free-text
+  // escape; on a non-TTY leave it empty so patternRunFlow surfaces the same
+  // mandatory-topic refusal `pattern run` would (never hang a script on stdin).
   const topic =
-    opts.topic ?? opts.vars["topic"] ?? (await promptIfTty("Topic (semantic category): "));
+    opts.topic ?? opts.vars["topic"] ?? (await resolveTopicInteractive(vaultName, `${title}\n${text ?? ""}`));
 
   // V-C-1 SC3 option-b — `--tags a,b` restored (the knowledge-capture template
   // regained its `tags: [<tags>]` token). Parsed to the inline-array INNER form
@@ -194,11 +210,17 @@ async function runCapture(text: string | undefined, opts: CaptureCliOpts): Promi
     ...opts.vars,
   };
 
+  // C10 destination resolution (explicit --dir → topic-folder → notes/ default):
+  // an explicit --dir always wins; else --topic-folder opts the figment into
+  // topics/<topic-slug>/; else the template's notes/ default stands. The
+  // resulting dir is fail-closed-guarded inside patternRunFlow (resolveCaptureDir).
+  const dir = resolveTopicFolderDir(opts.dir, opts.topicFolder, topic);
   const r = await patternRunFlow({
     patternName: CAPTURE_PATTERN,
     verbId: CAPTURE_VERB,
     vaultName,
     slug,
+    ...(dir !== undefined ? { dir } : {}),
     vars,
   });
 
@@ -269,6 +291,159 @@ async function promptIfTty(question: string): Promise<string | undefined> {
   } finally {
     rl.close();
   }
+}
+
+// C10 topic resolution when no explicit --topic was given. On a non-TTY: return
+// undefined (the flow then surfaces the mandatory-topic refusal — never hang a
+// script). On a TTY: surface the vault's existing topics as a numbered picker
+// (recommended-first) so the author REUSES an established topic instead of
+// coining a near-duplicate; if the vault has no topics yet (or the lookup
+// fails), fall back to the plain free-text prompt.
+async function resolveTopicInteractive(
+  vaultName: string,
+  figmentText?: string,
+): Promise<string | undefined> {
+  if (process.stdin.isTTY !== true) return undefined;
+  let topics: TopicCount[] = [];
+  let recommendedTopic: string | null = null;
+  try {
+    // Phase E (Unit 2) — semantic upgrade of the C10 picker: rankVaultTopicsFlow
+    // re-ranks the vault's existing topics by similarity to the figment when the
+    // local embedding model is present, and returns the plain frequency order
+    // (byte-identical to C10 today) when it is absent / no text / embed fails. It
+    // NEVER fetches the model on this read path (read-never-fetches gate inside
+    // the flow), so a base pod / Codex / non-TTY capture is unaffected.
+    const ranked = await rankVaultTopicsFlow({
+      vaultName,
+      ...(figmentText !== undefined ? { figmentText } : {}),
+    });
+    topics = ranked.topics;
+    // Phase E release review fold — surface (not auto-select) the confidence-gated
+    // recommendation. Previously discarded; now it HIGHLIGHTS the matching row in
+    // the picker. It never auto-commits: the author still types the number (empty
+    // Enter re-prompts, per the no-reflexive-Enter posture below).
+    recommendedTopic = ranked.recommendedTopic;
+  } catch {
+    // A missing/corrupt index (or any enrichment failure) must not block capture
+    // — degrade to free text.
+    topics = [];
+    recommendedTopic = null;
+  }
+  if (topics.length === 0) {
+    return promptIfTty("Topic (semantic category): ");
+  }
+  return pickTopicTty(topics, recommendedTopic);
+}
+
+// Pure branch-mapping for the topic picker's answer — extracted from the
+// readline glue so the pick logic is unit-testable without stdin (release review
+// T-BLOCK). `count` = the number of listed topics; the menu shows rows 1..count
+// plus an "other" row at count+1. Discriminated result:
+//   - reprompt : empty input OR an out-of-range number → ask again. Empty is
+//     NOT a silent default to the modal topic — that reflexive-Enter mis-tag was
+// the release review foot-gun; `topic:` is the queryable dimension, so a wrong
+//     one is a real (quiet) data cost.
+//   - existing : a valid 1..count pick → reuse that topic (0-based index).
+//   - new      : the "other" row (count+1) → prompt for a free-text topic.
+//   - typed    : a non-numeric, non-empty answer → take it verbatim (the
+//     "just type it" affordance).
+export type TopicPick =
+  | { kind: "reprompt" }
+  | { kind: "existing"; index: number }
+  | { kind: "new" }
+  | { kind: "typed"; value: string };
+
+export function interpretTopicPick(answer: string, count: number): TopicPick {
+  const ans = answer.trim();
+  if (ans.length === 0) return { kind: "reprompt" };
+  const n = Number(ans);
+  if (Number.isInteger(n)) {
+    if (n >= 1 && n <= count) return { kind: "existing", index: n - 1 };
+    if (n === count + 1) return { kind: "new" };
+    return { kind: "reprompt" }; // out-of-range number
+  }
+  return { kind: "typed", value: ans };
+}
+
+// The numbered topic picker (TTY glue over interpretTopicPick). Shows up to 9
+// existing topics + an "other" escape, then maps the answer. A bounded re-prompt
+// loop replaces the old silent Enter→modal-topic default; giving up after a few
+// tries returns undefined → the mandatory-topic refusal (never spin forever).
+async function pickTopicTty(
+  topics: TopicCount[],
+  recommendedTopic: string | null = null,
+): Promise<string | undefined> {
+  const top = topics.slice(0, 9);
+  const otherIdx = top.length + 1;
+  // Only mark the recommendation if it is actually one of the shown rows (it is,
+  // by construction — it's an existing label — but guard against a >9 truncation).
+  const recommendedShown =
+    recommendedTopic !== null && top.some((t) => t.topic === recommendedTopic);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    // eslint-disable-next-line no-console
+    console.log("Topic (semantic category) — existing topics in this vault:");
+    top.forEach((t, i) => {
+      // Phase E — HIGHLIGHT the semantic recommendation (★ recommended) without
+      // auto-selecting it: the author still types the number to choose it.
+      const mark = recommendedShown && t.topic === recommendedTopic ? "  ★ recommended" : "";
+      // eslint-disable-next-line no-console
+      console.log(`  ${i + 1}. ${t.topic} (${t.figmentCount})${mark}`);
+    });
+    // eslint-disable-next-line no-console
+    console.log(`  ${otherIdx}. (other — type a new topic)`);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const pick = interpretTopicPick(await rl.question("Pick a number, or type a new topic: "), top.length);
+      if (pick.kind === "existing") return top[pick.index]!.topic;
+      if (pick.kind === "typed") return pick.value;
+      if (pick.kind === "new") {
+        const free = (await rl.question("New topic: ")).trim();
+        if (free.length > 0) return free;
+      }
+      // reprompt (or an empty "other" entry) → loop
+    }
+    return undefined;
+  } finally {
+    rl.close();
+  }
+}
+
+// C10 destination resolution: explicit --dir → topic-folder → notes/ (default).
+// Pure + exported for unit tests. An explicit --dir always wins (the user named
+// it). Else, when --topic-folder is opted in AND a non-blank topic resolved,
+// route into topics/<topic-slug>/. Else undefined → the template's notes/
+// default stands. The returned dir is fail-closed-guarded downstream by
+// resolveCaptureDir (topics/<slug> is a plain safe subpath).
+export function resolveTopicFolderDir(
+  explicitDir: string | undefined,
+  topicFolder: boolean | undefined,
+  topic: string | undefined,
+): string | undefined {
+  if (explicitDir !== undefined) return explicitDir;
+  if (topicFolder === true && topic !== undefined && topic.trim().length > 0) {
+    return `topics/${topicToFolderName(topic)}`;
+  }
+  return undefined;
+}
+
+// Turn a human topic string into a stable, safe folder-name segment for
+// --topic-folder routing. Same slug family as slugify() (lowercase, non-alnum →
+// '-', trim dashes) but without the title-length cap — a topic is short. A
+// value that slugifies to empty (e.g. punctuation-only) falls back to
+// "untitled-topic" (defensive; topic is mandatory so this is unreachable on the
+// happy path). Exported for unit tests.
+export function topicToFolderName(topic: string): string {
+  return (
+    topic
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      // Cap the segment length (symmetry with slugify) so a pathological topic
+      // can't produce an ENAMETOOLONG directory name (release review R2-a); re-trim
+      // a trailing dash the slice may have exposed.
+      .slice(0, 60)
+      .replace(/-+$/g, "") || "untitled-topic"
+  );
 }
 
 function slugify(title: string): string {

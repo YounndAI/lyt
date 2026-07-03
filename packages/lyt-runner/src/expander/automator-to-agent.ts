@@ -146,9 +146,15 @@ function collectCaps(automator: AutomatorRecord): string[] {
   for (const c of automator.external_calls ?? []) {
     caps.add(c);
   }
-  // LLM capability — if the automator declares any, advertise std:llm.* caps.
+  // LLM capability — if the automator declares any, advertise the MATCHING
+  // std:llm.* cap. `embed` maps to std:llm.embed (a dense-embedding capability,
+  // e.g. the Phase-E metadata-filler topic-classify, which ranks by cosine
+  // similarity and NEVER generates text) so a deterministic, embed-only automator
+  // is not falsely granted a text-generation capability. Any OTHER non-`none`
+  // value keeps the prior std:llm.generate default (unchanged for existing
+  // generate/grunt/hybrid automators).
   if (automator.llm_capability !== undefined && automator.llm_capability !== "none") {
-    caps.add("std:llm.generate");
+    caps.add(automator.llm_capability === "embed" ? "std:llm.embed" : "std:llm.generate");
   }
   return Array.from(caps).sort();
 }

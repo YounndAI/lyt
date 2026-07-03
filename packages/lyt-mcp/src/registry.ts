@@ -285,8 +285,16 @@ export function buildOpRegistry(): OpRow[] {
       description:
         "Capture a Figment (Obsidian-flavored markdown note) into a Lyt vault under the v1 8-field frontmatter contract. Writes <vault>/notes/<date>-<slug>.md via the knowledge-capture pattern.",
       inputSchema: {
-        purpose: z.string().describe("Author-supplied: why keep this Figment? (mandatory)"),
-        topic: z.string().describe("Author-supplied: semantic category for this Figment (mandatory)"),
+        purpose: z
+          .string()
+          .min(1, "purpose must be non-empty")
+          .refine((s) => s.trim().length > 0, "purpose must be non-empty")
+          .describe("Author-supplied: why keep this Figment? (mandatory)"),
+        topic: z
+          .string()
+          .min(1, "topic must be non-empty")
+          .refine((s) => s.trim().length > 0, "topic must be non-empty")
+          .describe("Author-supplied: semantic category for this Figment (mandatory)"),
         vault: z.string().describe("Registered vault name to capture into"),
         content: z
           .string()

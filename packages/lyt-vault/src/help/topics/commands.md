@@ -79,6 +79,16 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   current edge state. Idempotent.
 - `lyt vault rebuild-index <name>` — regenerate the libSQL caches for one vault
   from the markdown source of truth (`--ledger <name>` scopes to one ledger cache).
+- `lyt vault backfill <name> [--dry-run] [--push] [--json]` — fill missing
+  frontmatter across a vault's figments with deterministic defaults (real git/fs
+  dates; `purpose`/`topic` left blank + flagged; provenance-stamped). Never
+  overwrites existing values; idempotent. `--dry-run` previews (read-only, writes
+  nothing); writes locally by default, `--push` also commits + pushes. Not `lyt
+  repair` (repair stays registry/mesh-only).
+- `lyt vault reconcile <name> [--apply] [--push] [--json]` — detect drift between a
+  vault's markdown on disk and its search index: figments with missing frontmatter
+  and figments not yet indexed. Detect-only by default; `--apply` backfills then
+  reindexes (local only; `--push` also commits + pushes).
 - `lyt vault sync-metadata --vault|--vaults [--apply] [--no-confirm] [--audit-log <file>]`
   — push vault.yon metadata (description + topics) to GitHub. Dry-run is the
   default; `--apply` is required to write. See `lyt help metadata`.

@@ -19,7 +19,7 @@ import type { Client } from "@libsql/client";
 import { deriveWriteGate, HANDLE_OK, type WriteGate } from "../flows/writability.js";
 import { resolveVault } from "../registry/vault-addressing.js";
 import { getIdentity } from "../util/identity.js";
-import { checkPushPermission, type GhExecutor } from "../util/gh-discover.js";
+import { checkPushPermission, getDefaultGhExecutor, type GhExecutor } from "../util/gh-discover.js";
 import { parseOwnerRepoFromUrl } from "../util/gh.js";
 import type { VaultRow } from "../registry/repo.js";
 
@@ -73,7 +73,7 @@ export class GhAccessProvider implements AccessProvider {
   // else "read". A non-zero gh exit (403/404) rejects — we never swallow it.
   async listAccess(vault: VaultRow, _caller?: Caller): Promise<AccessEntry[]> {
     const { owner, repo } = this.requireOwnerRepo(vault);
-    const raw = await this.requireGh()([
+    const raw = await this.resolveGh()([
       "api",
       "--paginate",
       `/repos/${owner}/${repo}/collaborators`,
@@ -100,7 +100,7 @@ export class GhAccessProvider implements AccessProvider {
   // unused in v1 (gh reads as the ambient session identity). Each invitation's
   // owner/repo is HANDLE_OK-validated before we echo "owner/name" back.
   async listInvitations(_caller?: Caller): Promise<Invitation[]> {
-    const raw = await this.requireGh()(["api", "--paginate", "/user/repository_invitations"]);
+    const raw = await this.resolveGh()(["api", "--paginate", "/user/repository_invitations"]);
     return parseInvitations(raw);
   }
 
@@ -113,7 +113,7 @@ export class GhAccessProvider implements AccessProvider {
     if (!Number.isInteger(id) || id <= 0) {
       throw new Error(`invalid invitation id "${id}" — expected a positive integer`);
     }
-    await this.requireGh()(["api", "-X", "PATCH", `/user/repository_invitations/${id}`]);
+    await this.resolveGh()(["api", "-X", "PATCH", `/user/repository_invitations/${id}`]);
   }
 
   // Phase C C8 (option A′): gh-repo-collaborator is the v1 ACL. `grant`
@@ -137,7 +137,7 @@ export class GhAccessProvider implements AccessProvider {
     const { owner, repo } = this.requireOwnerRepo(vault);
     const username = requireGithubUsername(grantee);
     const permission = level === "write" ? "push" : "pull";
-    await this.requireGh()([
+    await this.resolveGh()([
       "api",
       `/repos/${owner}/${repo}/collaborators/${username}`,
       "-X",
@@ -160,7 +160,7 @@ export class GhAccessProvider implements AccessProvider {
   async revoke(vault: VaultRow, grantee: Caller): Promise<void> {
     const { owner, repo } = this.requireOwnerRepo(vault);
     const username = requireGithubUsername(grantee);
-    await this.requireGh()([
+    await this.resolveGh()([
       "api",
       `/repos/${owner}/${repo}/collaborators/${username}`,
       "-X",
@@ -168,13 +168,26 @@ export class GhAccessProvider implements AccessProvider {
     ]);
   }
 
-  // Mutate REQUIRES a gh executor — unlike `canWrite`, there is no probe-free
-  // fallback for a write.
-  private requireGh(): GhExecutor {
-    if (this.gh === undefined) {
-      throw new Error("AccessProvider.grant/revoke requires a gh executor");
-    }
-    return this.gh;
+  // Resolve the gh executor for the gh-MANDATORY methods (listAccess /
+  // listInvitations / acceptInvitation / grant / revoke). Unlike the probe-free
+  // `canWrite` hot path (which deliberately runs gh-free when no executor was
+  // injected, so the capture/sync gate stays probe-free), these methods MUST hit
+  // gh — so when the caller injected none, default to the real spawn-based
+  // executor (`getDefaultGhExecutor()`), mirroring the `opts.gh ?? defaultGh`
+  // idiom every OTHER gh helper in gh-discover.ts uses (`checkPushPermission`,
+  // `deriveVaultWritable`, `walkUserRepos`, `fetchVaultYonContent`).
+  //
+  // This is the 0.9.9 wiring fix: the CLI commands (`vault share`/`unshare`/
+  // `access`, `vault invites`) pass NO gh, so a default-constructed provider had
+  // `this.gh === undefined` and previously threw
+  // "AccessProvider.grant/revoke requires a gh executor" on EVERY access verb —
+  // including the read-only `access`/`invites` paths, which share this resolver.
+  // Defaulting here means the read path no longer routes through a grant/revoke
+  // guard. If `gh` is genuinely not on PATH, the default executor throws a clear
+  // "`gh` CLI not found on PATH" error at call time — a strictly better signal
+  // than the old constructor-shaped guard.
+  private resolveGh(): GhExecutor {
+    return this.gh ?? getDefaultGhExecutor();
   }
 
   // Derive {owner, repo} from `vault.gitUrl` via the shared parser. Throws a

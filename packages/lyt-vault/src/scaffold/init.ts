@@ -32,7 +32,6 @@ import {
   AGENTS_MD_TEMPLATE_VERSION,
   getAgentsMdContent,
   getLytOverviewContent,
-  getNotesIndexContent,
 } from "../templates/priming.js";
 import { FRONTMATTER_CONTRACT_VERSION } from "../templates/contract.js";
 import {
@@ -157,6 +156,10 @@ export function initVault(opts: InitOptions): InitResult {
     parentVaultDisplay: opts.parent ?? null,
     starterFigment: opts.starterFigment !== false,
     tier,
+    // Phase A (UNIT 1 / C2) — thread the REAL vault init time into the priming
+    // seeds so their frontmatter shows the actual creation instant, not the
+    // 1970 epoch sentinel. Same `createdAt` already stamped into vault.yon.
+    createdAt,
   });
 
   const gitInit = opts.gitInit ?? true;
@@ -353,6 +356,9 @@ interface WritePrimingFilesArgs {
   starterFigment: boolean;
   // Phase C (UNIT 1) — the resolved tier; selects the payload definition.
   tier: ScaffoldTier;
+  // Phase A (UNIT 1) — real vault init time (ISO-8601) stamped into the seed
+  // frontmatter `created`/`modified` (== createdAt on first scaffold).
+  createdAt: string;
 }
 
 function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
@@ -363,7 +369,12 @@ function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
   const overviewPath = lytOverviewWritePath(args.vaultPath);
   writeFile(
     overviewPath,
-    getLytOverviewContent({ vaultName: args.name, desc: args.desc, owner: args.owner }),
+    getLytOverviewContent({
+      vaultName: args.name,
+      desc: args.desc,
+      owner: args.owner,
+      dates: { created: args.createdAt },
+    }),
   );
   written.push(LYT_OVERVIEW_REL_WRITE_PATH);
 
@@ -385,24 +396,38 @@ function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
     acceptsFrom: [],
     desc: meshDesc,
     isMeshDefiner: isMeshDefiner(args.vaultPath),
+    // fg-scaffold-frontmatter — thread the REAL vault init time into the
+    // mesh-context.md scaffold frontmatter (same createdAt as vault.yon / the
+    // priming seeds). writeMeshContextFile preserves this on later regens.
+    dates: { created: args.createdAt },
   });
   written.push(".lyt/mesh-context.md");
 
   const agentsPath = agentsMdWritePath(args.vaultPath);
-  writeFile(agentsPath, getAgentsMdContent({ vaultName: args.name }));
+  writeFile(
+    agentsPath,
+    getAgentsMdContent({ vaultName: args.name, dates: { created: args.createdAt } }),
+  );
   written.push(AGENTS_MD_REL_WRITE_PATH);
 
   // Phase C (UNIT 2) — tier seed Figments. Both tiers write a conformant
   // welcome Figment (sentinel-bearing, FTS-excluded); the rich tier's copy
   // orients to the whole mesh, the mini tier's to the single vault. The CONTENTS
   // come from the payload-definition object (tier-payloads.ts), not inlined here.
+  //
+  // welcome.md is now the SOLE starter Figment (the redundant notes/index.md
+  // starter — with its prescriptive [[notes/inbox]]/[[notes/decisions]] taxonomy
+  // prompts — was dropped). `starterFigment` (the `--no-starter-figment` flag)
+  // now gates welcome.md: default init writes it; `--no-starter-figment` writes
+  // no starter Figment at all.
   if (args.starterFigment) {
-    const starterPath = join(args.vaultPath, "notes", "index.md");
-    writeFile(starterPath, getNotesIndexContent(args.name));
-    written.push("notes/index.md");
-
     for (const seed of payload.seedFigments) {
-      writeFile(join(args.vaultPath, seed.relativePath), renderSeedFigment(seed));
+      // fg-scaffold-frontmatter — thread the real init date into the seed
+      // Figment frontmatter (welcome.md), replacing the 1970 sentinel.
+      writeFile(
+        join(args.vaultPath, seed.relativePath),
+        renderSeedFigment(seed, { created: args.createdAt }),
+      );
       written.push(seed.relativePath);
     }
   }
@@ -463,9 +488,17 @@ export function writeScaffoldConformance(
   const overviewReadPath = resolveLytOverviewReadPath(args.vaultPath);
   if (!existsSync(overviewReadPath)) {
     const overviewPath = lytOverviewWritePath(args.vaultPath);
+    // Phase A (UNIT 1) — conformance writes a FRESH overview only when none
+    // exists (adopt/clone with no prior seed), so there is no prior date to
+    // preserve; stamp the real conformance instant, not the 1970 sentinel.
     writeFile(
       overviewPath,
-      getLytOverviewContent({ vaultName: args.name, desc: args.desc, owner }),
+      getLytOverviewContent({
+        vaultName: args.name,
+        desc: args.desc,
+        owner,
+        dates: { created: new Date().toISOString() },
+      }),
     );
     written.push(LYT_OVERVIEW_REL_WRITE_PATH);
   }

@@ -57,7 +57,7 @@ export function buildInitCommand(): Command {
       collectTopic,
       [] as string[],
     )
-    .option("--no-starter-figment", "Skip writing the optional notes/index.md starter Figment")
+    .option("--no-starter-figment", "Skip writing the optional notes/welcome.md starter Figment")
     .option("--no-git", "Skip 'git init' inside the new vault")
     .option(
       "--commit-initial",
