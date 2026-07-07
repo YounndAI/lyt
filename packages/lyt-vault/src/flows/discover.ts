@@ -61,7 +61,7 @@ import { subscribeFlow, type SubscribeCloneFn } from "./subscribe.js";
 // - Within a cluster, members sorted by `vaultName` ASC.
 // - The same GH state + same `gh` fixture → identical JSON bytes.
 //
-// Open-once seam (v1.A.5 CR-B1 vindicated 16×): callers may pass `registryDb`;
+// Open-once seam (v1.A.5 vindicated 16×): callers may pass `registryDb`;
 // the flow opens its own client only when omitted.
 //
 // Push-permission gating (federation-design §11:512): per cluster we probe

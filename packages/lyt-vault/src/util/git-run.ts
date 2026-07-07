@@ -16,6 +16,8 @@
 
 import { spawn } from "node:child_process";
 
+import { firewall } from "./git-error-firewall.js";
+
 export interface GitRunResult {
   code: number;
   stdout: string;
@@ -49,16 +51,31 @@ export function runGit(args: readonly string[], opts: GitRunOptions): Promise<Gi
     child.on("error", (err) => {
       const e = err as NodeJS.ErrnoException;
       if (e.code === "ENOENT") {
-        reject(new Error("`git` not found on PATH. Install Git: https://git-scm.com/."));
+        // Preserve ENOENT on the error so the firewall classifies tool-missing.
+        reject(
+          firewall(
+            Object.assign(new Error("`git` not found on PATH. Install Git: https://git-scm.com/."), {
+              code: "ENOENT",
+            }),
+          ),
+        );
         return;
       }
-      reject(err);
+      reject(firewall(err));
     });
     child.on("close", (code) => {
       const result: GitRunResult = { code: code ?? -1, stdout, stderr };
       if ((code ?? -1) !== 0 && opts.allowFailure !== true) {
+        // Narrate at the failure boundary; `.message` stays raw (stderr kept on
+        // the error for any internal classifier). `allowFailure` never reaches
+        // here — it resolves with the raw result below (raw-passthrough intact).
         reject(
-          new Error(`git ${args.join(" ")} exited ${code}: ${stderr.trim() || stdout.trim()}`),
+          firewall(
+            Object.assign(
+              new Error(`git ${args.join(" ")} exited ${code}: ${stderr.trim() || stdout.trim()}`),
+              { stderr },
+            ),
+          ),
         );
         return;
       }

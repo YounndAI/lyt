@@ -70,7 +70,7 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // one mesh's parse error doesn't roll back successful rebuilds for the
 // others.
 //
-// Open-once seam from the start (v1.A.5 CR-B1 + v1.D.1-5 vindication):
+// Open-once seam from the start (v1.A.5 + v1.D.1-5 vindication):
 // accept optional `registryDb?: Client`; only `openRegistry()` when
 // omitted; caller owns lifecycle when supplied. Mirrors rebuild-lanes,
 // rebuild-arcs, rebuild-fts.

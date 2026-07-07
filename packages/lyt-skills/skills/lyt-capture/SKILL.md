@@ -6,7 +6,7 @@ visibility: public
 lyt-version: 0.2.0
 capabilities: [write]
 runtimes: [claude, codex, agents]
-requires_writable_vault: true
+requires_writable_vault: false
 ---
 
 # /lyt-capture
@@ -27,15 +27,9 @@ When the user runs `/lyt-capture`, or says something like:
 
 If the user pastes content and only says "save it," interpret as `/lyt-capture` on the pasted content.
 
-## When NOT to invoke
+## Scope — the single capture skill
 
-`/lyt-capture` writes a **plain Figment note** — not a work-management artifact. When the durable thing is a structured type, defer to the dedicated skill (each writes the same 8-field ceremony to its own home, with type-specific framing):
-
-- A distilled, durable **project lesson** ("this is an insight", "lesson learned about Lyt") → `/lyt-insight`.
-- A locked **decision** ("lock this decision", "record the decision") → `/lyt-decision`.
-- A **plan / progress / result / retro / handoff** → the matching `/lyt-plan` · `/lyt-progress` · `/lyt-result` · `/lyt-retro` · `/lyt-handoff`.
-
-Use `/lyt-capture` only for a free-form note that doesn't fit one of those work-management types. When in doubt between a plain note and a typed artifact, prefer the typed skill — it carries the right frontmatter and lands in the right folder.
+`/lyt-capture` writes a **Figment note** into the vault under the 8-field frontmatter ceremony. It is the one capture skill: durable notes of every kind — a free-form thought, a distilled project lesson, a locked decision, a plan, a result — all land through `/lyt-capture`. Use the `topic:` field to categorize (e.g. `insight`, `decision`, `planning`, `result`) so the note stays legible and searchable; there are no separate per-type skills.
 
 ## Phase 1 — Resolve the target vault
 

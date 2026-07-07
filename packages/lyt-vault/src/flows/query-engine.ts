@@ -31,7 +31,7 @@
 // registry handle across queries.
 // - createQueryEngine(registryDb) factory returning a QueryEngine
 // object whose methods all reuse the supplied registry handle
-// (open-once seam — v1.A.5 CR-B1 vindication, see
+// (open-once seam — v1.A.5 vindication, see
 // search-cascade.ts:160-161 callerSuppliedRegistry).
 //
 // Return shape: SearchCascadeResult (preserves trace + durationMs

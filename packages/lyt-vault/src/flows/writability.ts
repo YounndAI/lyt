@@ -228,6 +228,54 @@ export async function deriveWriteGate(
   return { blocked: true, verdict };
 }
 
+// 0.11.0 write/publish-gate split — the LOCAL-write axis, distinct from the
+// publish/push axis (deriveVaultWritable). Answers "can I write a figment to disk
+// here and have it be a legitimate write?" — NOT "can I push/share this outward?".
+//
+// For the user's OWN vault (home / orphan) this is ALWAYS true with NO gh probe
+// (the hot-path / offline-safe contract, mirrored from deriveWriteGate's no-
+// subscription-signal short-circuit). That is the whole point of the split: a
+// no-remote OR gh-offline OWN vault must never gate a LOCAL write on push
+// permission (dogfood F10 — the `writable:"unknown"` verdict was stalling the
+// agent before every local write). For a SUBSCRIPTION the answer genuinely
+// depends on push access — a granted-write shared-RW sub (e.g. alpha-feedback,
+// S6 cross-identity write) IS locally writable, a read-only sub is not — so we
+// DEFER to deriveWriteGate, the SAME battle-tested decision the capture/sync
+// flow already gates on, which gh-probes ONLY subscriptions (never own vaults).
+//
+// This is the field the AGENT should read for a LOCAL write. `publishable`
+// (= deriveVaultWritable, the honest gh push verdict) is the SEPARATE axis for
+// the push/share decision. The legacy `writable` field stays as a deprecated
+// alias of `publishable` (back-compat) — see flows/info.ts.
+export type LocalWritability = {
+  localWritable: boolean;
+  reason:
+    | "own-vault"
+    | "subscribed-writable"
+    | "subscribed-readonly"
+    | "subscribed-unverifiable";
+};
+
+export async function deriveLocalWritable(
+  vault: VaultRow,
+  db: Client,
+  opts: DeriveVaultWritableOpts = {},
+): Promise<LocalWritability> {
+  const gate = await deriveWriteGate(vault, db, opts);
+  if (!gate.blocked) {
+    // verdict === null → own vault (no subscription signal, no gh probe paid).
+    // verdict !== null → a subscription we DO have write access to (gh-verified).
+    const reason = gate.verdict === null ? "own-vault" : "subscribed-writable";
+    return { localWritable: true, reason };
+  }
+  // blocked: a subscription we cannot usefully write to. Distinguish a definite
+  // read-only verdict from an unverifiable one (gh offline) so the flow can phrase
+  // the redirect correctly.
+  const reason =
+    gate.verdict.writable === "unknown" ? "subscribed-unverifiable" : "subscribed-readonly";
+  return { localWritable: false, reason };
+}
+
 // True when the vault is `home` in a LOCALLY-OWNED mesh — a mesh carrying a main
 // vault (`mainVaultRid !== null`). External meshes auto-registered for a foreign
 // subscription have `mainVaultRid` NULL, so this is false for them. This

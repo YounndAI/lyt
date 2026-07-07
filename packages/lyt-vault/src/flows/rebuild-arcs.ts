@@ -33,7 +33,7 @@
 // Writes the deterministic YON SoT at `<vault>/.lyt/indexes/arcs.yon`
 // via `writeArcsDoc`.
 //
-// Open-once seam from the start (v1.A.5 CR-B1 + v1.D.1 vindication):
+// Open-once seam from the start (v1.A.5 + v1.D.1 vindication):
 // accept optional `registryDb?: Client`; only `openRegistry()` when
 // omitted; caller owns lifecycle when supplied. Mirrors
 // rebuild-lanes.ts. Applies to BOTH the manual `lyt vault
@@ -102,7 +102,7 @@ export interface RebuildArcsArgs {
   // the given vault path directly. Used by `runArcBuilderBody` (v1.D.2c)
   // to avoid resolving the same vault through the registry twice.
   vaultPathOverride?: string;
-  // Open-once seam (v1.A.5 CR-B1 pattern). When supplied, the flow uses
+  // Open-once seam (v1.A.5 pattern). When supplied, the flow uses
   // the caller's registry client and does NOT close it. When omitted,
   // the flow opens + closes its own registry client.
   registryDb?: Client;

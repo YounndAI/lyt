@@ -25,7 +25,7 @@
 //
 // Thin orchestration wrapper around `upsertKeyphrasesCache`, mirroring
 // rebuild-fts.ts: resolve the registered vault, delegate the walk + insert, and
-// return a shaped result. Open-once seam (v1.A.5 CR-B1): optional
+// return a shaped result. Open-once seam (v1.A.5 ): optional
 // `registryDb?` / `lytDb?`; caller owns lifecycle when supplied.
 
 import type { Client } from "@libsql/client";
@@ -42,7 +42,7 @@ export interface RebuildKeyphrasesArgs {
   vault?: string;
   // Test / automator seam — operate on the given vault path directly.
   vaultPathOverride?: string;
-  // Open-once seam (v1.A.5 CR-B1 pattern) for the registry.
+  // Open-once seam (v1.A.5 pattern) for the registry.
   registryDb?: Client;
   // Open-once seam for the per-vault lyt.db — threaded through to the upsert.
   lytDb?: Client;

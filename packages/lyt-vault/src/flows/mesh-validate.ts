@@ -52,7 +52,7 @@ import { parseMeshYon } from "../yon/mesh-read.js";
 // 2 — one or more warn-rows present (never fail; diagnostic, not
 // enforcement)
 //
-// Open-once seam (v1.A.5 CR-B1): callers may pass `registryDb`; the
+// Open-once seam (v1.A.5 ): callers may pass `registryDb`; the
 // flow opens its own client only when omitted.
 
 export interface ValidateMeshEdgesArgs {

@@ -51,10 +51,9 @@ flag: surface it to the handler rather than acting on it.
 
 ## Skill files
 
-`@younndai/lyt-skills` ships sixteen `/lyt-*` skills (capture, recall, search,
-pod, mesh-explore, alias, primer-context, sync, plan, progress, result, retro,
-insight, handoff, decision, pattern). `lyt skills install` links them into every
-detected runtime. See `lyt help skills`.
+`@younndai/lyt-skills` ships eleven `/lyt-*` skills (capture, recall, search,
+pod, mesh-explore, alias, primer-context, sync, adopt, update, pattern). `lyt
+skills install` links them into every detected runtime. See `lyt help skills`.
 
 ## See also
 

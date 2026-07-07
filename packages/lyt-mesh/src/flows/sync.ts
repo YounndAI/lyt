@@ -22,6 +22,7 @@ import {
   classifyPorcelainLine,
   closeRegistry,
   deriveWriteGate,
+  GitRemoteProvider,
   getHandleFromIdentity,
   isConfigPath,
   isFigmentPath,
@@ -30,6 +31,7 @@ import {
   listMeshes,
   listSubscriptionsForMesh,
   listVaults,
+  narrate,
   openRegistry,
   readFigmentTitle,
   readFrozenLock,
@@ -45,8 +47,15 @@ import {
   type GhExecutor,
   type GitRunOptions,
   type GitRunResult,
+  type Inverse,
+  type RemoteProvider,
+  type SyncHorizon,
   type VaultRow,
 } from "@younndai/lyt-vault";
+
+// Increment 1 · Phase A.4 — the sync flow emits a SyncOperation per pushing
+// vault so its reversibility horizon is read back from the ACTUAL push result.
+import { SyncOperation } from "../op/operations/sync-op.js";
 
 export type VaultSyncStatus =
   | "clean"
@@ -102,6 +111,19 @@ export interface VaultSyncReport {
   // reset-to-origin remedy so the user can un-jam it. Additive; absent when the
   // read-only vault is clean (the common case).
   readonlyDiverged?: boolean;
+  // Increment 1 · Phase A.4 — the safe-write spine's honest horizon, emitted by
+  // the SyncOperation and READ BACK from the actual push result (never asserted
+  // from the verb). `horizon` = where the effects reached (`pushed` = on the
+  // online copy; `committed-not-pushed` = local commit that didn't land the
+  // push); `reversible` = the inverse class (`none` once pushed; `clean-undo`
+  // while still local). Additive + optional: present only when a push was
+  // attempted (ahead > 0) — absent for pull-only / up-to-date / skipped syncs,
+  // preserving backward-compat.
+  horizon?: SyncHorizon;
+  // Derived from the Operation's Inverse union (NOT a hand-copied literal) so a
+  // future inverse class can't silently drift this field out of sync (a review finding,
+  // coupled-constant discipline).
+  reversible?: Inverse["class"];
 }
 
 export interface SyncFrictionHint {
@@ -134,12 +156,20 @@ export interface SyncFlowArgs {
   // exercise the foreign-mesh subscription skip deterministically. Only
   // consulted for SUBSCRIPTION vaults — own vaults never probe in the loop.
   gh?: GhExecutor;
+  // Increment 1 · Phase A.4 — injectable git-remote port. Defaults to the
+  // firewalled GitRemoteProvider wrapping the same `runGit` (byte-identical to
+  // the pre-A.4 inline push/pull). Tests inject a fake to drive the honest
+  // horizon (pushed vs committed-not-pushed) deterministically.
+  remote?: RemoteProvider;
 }
 
 const MESH_CONTEXT_PATH = ".lyt/mesh-context.md";
 
 export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult> {
   const runGit = args.runGit ?? defaultRunGit;
+  // Increment 1 · Phase A.4 — the git-remote port. Default wraps the SAME runGit
+  // seam, so behavior is unchanged when no fake is injected.
+  const remote = args.remote ?? new GitRemoteProvider(runGit);
   const now = args.now ?? new Date();
   const db = await openRegistry();
   let candidates: VaultRow[];
@@ -195,6 +225,7 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     const report = await syncOneVault(
       v,
       runGit,
+      remote,
       now,
       args.resolveMeshContext === true,
       args.message,
@@ -216,8 +247,8 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         if (await isLytDbCorrupt(v.path)) {
           report.indexCorrupt = true;
           report.message =
-            `${report.message}; WARNING: search index (.lyt/indexes/lyt.db) is corrupt — ` +
-            `git layer synced fine, but search/recall/primer are degraded. Run 'lyt reindex --vault '${v.name}'' to rebuild it.`;
+            `${report.message} Heads up: this vault's search index is damaged, so search and recall may ` +
+            `miss things — everything else synced fine. Run \`lyt reindex --vault ${v.name}\` to rebuild it.`;
         }
       } catch {
         // probe failure (e.g. transient lock) — never fail the sync over it
@@ -322,6 +353,7 @@ function deriveFrictionHints(reports: readonly VaultSyncReport[]): SyncFrictionH
 async function syncOneVault(
   vault: VaultRow,
   runGit: GitRunner,
+  remote: RemoteProvider,
   now: Date,
   resolveMeshContext: boolean,
   messageOverride?: string,
@@ -356,7 +388,7 @@ async function syncOneVault(
 
   const gitDir = await runGit(["rev-parse", "--git-dir"], { cwd: vault.path, allowFailure: true });
   if (gitDir.code !== 0) {
-    return { ...base, status: "not-git-repo", message: "not a Git repo (no .git/)" };
+    return { ...base, status: "not-git-repo", message: "This vault isn't set up for syncing yet." };
   }
 
   // Fetch first so ahead/behind reflects truth (if upstream is configured).
@@ -368,10 +400,17 @@ async function syncOneVault(
   if (hasUpstreamFlag) {
     const fetched = await runGit(["fetch", "--quiet"], { cwd: vault.path, allowFailure: true });
     if (fetched.code !== 0) {
+      // firewall-C1 fix-pass — this is an allowFailure path (no throw), so the raw
+      // stderr never passed through the spawn-wrapper's narration. This is a READ
+      // failure (couldn't reach the online copy to check for updates); narrate()'s
+      // category strings are save/push-framed, so a read-framed plain message is
+      // authored directly here. Raw stderr stays on `errorOutput` (debug/--json
+      // only, never the human renderer).
       return {
         ...base,
         status: "error",
-        message: "git fetch failed",
+        message:
+          "Lyt couldn't reach your online copy to check for updates right now. Try `lyt sync` again in a moment, or run `lyt doctor` if it keeps happening.",
         errorOutput: fetched.stderr,
       };
     }
@@ -409,92 +448,86 @@ async function syncOneVault(
   // to never create the local commit that would later feed an unpushable
   // publish op. A divergent/unpushable local commit (ahead>0) OR an uncommitted
   // local change (dirtyCount>0) is the recovery case: surface `readonlyDiverged`
-  // + the reset-to-origin remedy so the user can un-jam a vault the pre-fix bug
-  // already wedged. We do NOT auto-reset (it discards local edits — handler's
-  // call), but we name the exact command.
+  // + a plain-language recovery remedy so the user can un-jam a vault the pre-fix
+  // bug already wedged. We never auto-reset (discarding local edits is the
+  // handler's call), and — firewall-C1 fix-pass — the remedy is now plain Lyt
+  // vocabulary, never a raw git command (see the reframed block below).
   if (readOnly) {
     let pulledMsg = "";
     if (hasUpstreamFlag && behind > 0 && ahead === 0) {
       // Clean fast-forwardable subscriber → pull to stay fresh, then reconcile.
+      // A.4 note (release review R2-O2): this read-only pull is intentionally NOT
+      // routed through the RemoteProvider port — a read-only sync never pushes
+      // and emits no SyncOperation/horizon, so porting it would be pure churn
+      // with no honest-horizon benefit. Same git args either way.
       const pulled = await runGit(["pull", "--rebase", "--quiet"], {
         cwd: vault.path,
         allowFailure: true,
       });
       if (pulled.code === 0) {
         await reconcileVaultCaches(vault.path, vault.name);
-        pulledMsg = `pulled ${behind} commit(s) from upstream; `;
+        pulledMsg = `Brought in ${behind} update(s) from the shared original; `;
         behind = 0;
       }
       // A pull failure on a read-only vault is non-fatal here — we still report
       // skipped-readonly (no push is attempted regardless); the user's read-only
       // copy just stays a few commits behind until the divergence is resolved.
     }
-    // Cohort-1 fix-pass release review (Major) — the recovery remedy must branch on
-    // the ACTUAL state, and must NEVER lead with a destructive `reset --hard`:
+    // The recovery remedy branches on the ACTUAL state so the plain guidance is
+    // both correct and safe (Cohort-1 fix-pass semantics, now firewall-C1 plain):
     //
-    // (a) UNTRACKED stray (dirty, NOT ahead) — the canonical hardening pass case: a
-    // stray Figment was written into the read-only vault but never
-    // committed. `git status --porcelain` (no `-uno`) counts these as
-    // untracked (`??`), and `reset --hard @{u}` does NOT remove untracked
-    // files — so the prior remedy did NOTHING for the very case it exists
-    // for. Mirror the hardening pass refusal: tell the user to MOVE/REMOVE the stray
-    // (relocate it to a home vault), not reset.
+    // (a) UNTRACKED stray (dirty, NOT ahead) — a new file was written into the
+    // read-only vault but never saved into history. A discard-to-original would
+    // NOT remove such new files, so the remedy tells the user to MOVE them into a
+    // vault they own (and warns they're lost on the next refresh) — never a reset.
     //
-    // (b) COMMITTED local work (ahead>0) — the user committed real edits into a
-    // subscribed vault. The prior `reset --hard @{u}` would DESTROY them.
-    // Lead non-destructive: preserve the commits onto a branch first (or
-    // relocate the content to a home vault); only mention the destructive
-    // discard last, explicitly flagged. Guard the `@{u}` ref on an upstream
-    // actually existing — fall back to `origin/<branch>` (or `git fetch`)
-    // when `@{u}` isn't configured, so the command can't error on a
-    // no-upstream read-only vault.
+    // (b) SAVED local work (ahead>0) — real edits were saved only on this machine.
+    // Lead non-destructive: re-save the work into a vault the handler owns FIRST;
+    // only then describe discarding the local-only changes (no raw command — there
+    // is no single clean Lyt discard verb yet; the load-bearing step is preserving).
     //
     // Both are `readonlyDiverged: true` (the recovery rider fires); the WORDING
-    // differs so the user runs the right (and safe) command.
+    // differs so the user takes the right (and safe) action.
     const untrackedCount = statusLines.filter((l) => l.startsWith("??")).length;
     const trackedDirtyCount = dirtyCount - untrackedCount;
     const diverged = ahead > 0 || dirtyCount > 0;
     if (diverged) {
-      // Resolve the upstream ref for a guarded reset (committed-work case only).
-      const upstreamRef = hasUpstreamFlag
-        ? `'git -C "${vault.path}" reset --hard @{u}'`
-        : `'git -C "${vault.path}" fetch origin && git -C "${vault.path}" reset --hard origin/<branch>'`;
-
+      // firewall-C1 fix-pass — the remedy is reframed in plain, Lyt-verb language
+      // (no raw git command, no git noun). Semantics preserved from the prior
+      // git-recipe version: keep-the-work-FIRST (re-save into a vault the handler
+      // owns) and only then discard the local-only divergence. The destructive
+      // discard has no single clean Lyt verb today, so it is DESCRIBED (never a
+      // raw command) — the load-bearing step is preserving the work.
       let remedy: string;
       if (ahead > 0) {
-        // (b) Committed unpushable work — non-destructive FIRST.
-        const strayBits: string[] = [`${ahead} unpushable local commit(s)`];
-        if (trackedDirtyCount > 0) strayBits.push(`${trackedDirtyCount} modified tracked file(s)`);
-        if (untrackedCount > 0) strayBits.push(`${untrackedCount} untracked file(s)`);
+        // (b) Work already saved on THIS machine that can't reach the original.
+        const changeBits: string[] = [`${ahead} change-set(s) saved only on this machine`];
+        if (trackedDirtyCount > 0) changeBits.push(`${trackedDirtyCount} edited note(s)`);
+        if (untrackedCount > 0) changeBits.push(`${untrackedCount} new file(s)`);
         remedy =
-          `This vault has ${strayBits.join(" + ")} that can never be pushed (no push rights). ` +
-          `PRESERVE the work first — either move the content into one of your home vaults and ` +
-          `re-capture it there, or stash/branch it: ` +
-          `'git -C "${vault.path}" branch lyt-rescue-${vault.name.replace(/[^A-Za-z0-9._-]/g, "-")}' ` +
-          `(keeps your commits on a side branch). ONLY after the work is safe, discard the ` +
-          `divergence with ${upstreamRef} (this DISCARDS the local commits).`;
+          `This is a read-only shared vault, so the ${changeBits.join(" + ")} here can't be saved ` +
+          `back to the shared original. Keep that work safe FIRST: open those notes and re-save them ` +
+          `into one of your own vaults with \`lyt capture\`. Only once your work is safe somewhere you ` +
+          `own should you discard the local-only changes here, so this vault matches the shared original again.`;
       } else {
-        // (a) Uncommitted stray — untracked and/or tracked-modified, no commit.
+        // (a) Uncommitted stray — new (untracked) and/or edited (tracked) files.
         const strayBits: string[] = [];
-        if (untrackedCount > 0) strayBits.push(`${untrackedCount} stray untracked file(s)`);
-        if (trackedDirtyCount > 0) strayBits.push(`${trackedDirtyCount} modified tracked file(s)`);
+        if (untrackedCount > 0) strayBits.push(`${untrackedCount} new file(s)`);
+        if (trackedDirtyCount > 0) strayBits.push(`${trackedDirtyCount} edited note(s)`);
         remedy =
-          `This vault has ${strayBits.join(" + ")} that can't be pushed (read-only). ` +
+          `This is a read-only shared vault, so the ${strayBits.join(" + ")} here can't be saved ` +
+          `back to the shared original. ` +
           (untrackedCount > 0
-            ? `MOVE or REMOVE the stray file(s) — relocate them into one of your home vaults and ` +
-              `re-capture there ('git -C "${vault.path}" status' lists them; a hard reset would ` +
-              `NOT remove untracked files, so do not reach for one here). `
-            : `Discard the local edits to tracked files with ` +
-              `'git -C "${vault.path}" checkout -- .', or relocate them to a home vault first. `);
+            ? `Move the new file(s) into one of your own vaults and re-save them there with ` +
+              `\`lyt capture\` — anything left here will be lost the next time Lyt refreshes this shared copy.`
+            : `Copy those changes into one of your own vaults (save them as a note with ` +
+              `\`lyt capture\`), or discard them here to match the shared original.`);
       }
       return {
         ...base,
         status: "skipped-readonly",
         readonlyDiverged: true,
-        message:
-          `${pulledMsg}read-only subscribed vault — skipped push (you can't push to its upstream). ` +
-          remedy +
-          ` Capture into a home vault instead.`,
+        message: `${pulledMsg}${remedy}`,
         ahead,
         behind,
         dirtyCount,
@@ -505,8 +538,8 @@ async function syncOneVault(
       status: "skipped-readonly",
       message:
         pulledMsg.length > 0
-          ? `${pulledMsg.trimEnd()} read-only subscribed vault — pull-only (skipped push).`
-          : "read-only subscribed vault — pull-only (skipped push).",
+          ? `${pulledMsg.trimEnd()} This is a read-only shared vault — Lyt keeps it up to date but doesn't save your changes back to it.`
+          : "This is a read-only shared vault — Lyt keeps it up to date but doesn't save your changes back to it.",
       ahead,
       behind,
       dirtyCount,
@@ -571,18 +604,19 @@ async function syncOneVault(
       ...base,
       status: "no-upstream",
       message: committed
-        ? `committed ${dirtyCount} file(s); no upstream configured for push`
-        : "no upstream configured",
+        ? `Saved ${dirtyCount} change(s) on this machine. This vault has no online copy set up, so nothing was sent online.`
+        : "This vault has no online copy set up.",
       dirtyCount,
     };
   }
 
   let meshContextResolved = false;
   if (behind > 0) {
-    const pulled = await runGit(["pull", "--rebase", "--quiet"], {
-      cwd: vault.path,
-      allowFailure: true,
-    });
+    // Increment 1 · Phase A.4 — pull routed through the RemoteProvider port. The
+    // default GitRemoteProvider wraps the SAME `git pull --rebase --quiet` with
+    // allowFailure, so `pulled.code`/`pulled.stderr` below are unchanged and the
+    // conflict-recovery path is byte-identical.
+    const pulled = await remote.pull(vault.path);
     // v1.A.2 Lock 0.2 / v1.D.1b / v1.D.2b / v1.D.3a — after a successful
     // pull, reconcile the .db caches (ledger → lanes → arcs → fts) so
     // audit-export / provenance-trace / lanes / arcs / FTS search see
@@ -618,7 +652,7 @@ async function syncOneVault(
             ...base,
             status: "conflict",
             message:
-              "rebase conflict beyond .lyt/mesh-context.md; --resolve-mesh-context could not heal alone",
+              "Your vault's shared settings changed here and online at the same time, and the differences went further than Lyt could safely sort out on its own. Your notes are safe and unchanged.",
             ahead,
             behind,
             dirtyCount,
@@ -636,9 +670,14 @@ async function syncOneVault(
         }
       } else {
         await runGit(["rebase", "--abort"], { cwd: vault.path, allowFailure: true });
+        // firewall-C1 fix-pass — plain conflict language (no git recipe). The
+        // mesh-context-only case points at the ONE Lyt verb that heals it; the
+        // general case names the affected notes (plain paths, not git nouns) and
+        // reassures the work is safe. Full plain keep-yours/theirs/both conflict
+        // UX is a later increment (charter BS5/MM1) — this narrates honestly today.
         const recipe = isMeshContextOnly
-          ? `Conflict on .lyt/mesh-context.md only. Re-run with --resolve-mesh-context, or manually: 'git pull --rebase' → 'git checkout --theirs .lyt/mesh-context.md' → 'lyt vault regen-context ${vault.name}' → 'git add .lyt/mesh-context.md' → 'git rebase --continue'.`
-          : `Rebase conflict on: ${conflictPaths.join(", ") || "(unknown paths)"}. Resolve with normal git tooling.`;
+          ? `Your vault's shared settings changed here and online at the same time. Re-run \`lyt sync --resolve-mesh-context\` and Lyt will sort it out for you.`
+          : `You and your online copy changed the same note(s) in different ways, so Lyt couldn't combine them automatically: ${conflictPaths.join(", ") || "(unknown)"}. Your notes are safe and unchanged — nothing was overwritten. Re-run \`lyt sync\` to try again, or copy your version into another vault to keep it.`;
         return {
           ...base,
           status: "conflict",
@@ -652,9 +691,28 @@ async function syncOneVault(
     }
   }
 
+  // Increment 1 · Phase A.4 — the SyncOperation emitted for the push leg (when
+  // there are outgoing commits). Hoisted so the final return can attach its
+  // honest horizon + reversibility class to the report.
+  let syncOp: SyncOperation | null = null;
   if (ahead > 0) {
-    const pushed = await runGit(["push"], { cwd: vault.path, allowFailure: true });
-    if (pushed.code !== 0) {
+    // Emit a SyncOperation that OWNS the push through the RemoteProvider port.
+    // Its horizon is READ BACK from the actual push result (pushed vs
+    // committed-not-pushed) — never asserted from the verb. `lastPushResult`
+    // carries the raw code+stderr, so the terminal-vs-retryable classification
+    // below is byte-identical to the pre-A.4 inline `runGit(["push"])` path.
+    // NOTE (A.4 scope, release review a review finding): unlike CaptureOperation, this op is
+    // NOT persisted to the op-log — a `pushed` sync is un-undoable (`none`) and
+    // the `committed-not-pushed` reset-commit executor is deferred (class-only),
+    // so there is nothing for `lyt undo` to replay yet. It is emitted for the
+    // report's honest horizon only; op-log persistence lands with the executor.
+    syncOp = new SyncOperation(
+      { vaultName: vault.name, vaultPath: vault.path, hasOutgoing: true },
+      { remote },
+    );
+    await syncOp.apply();
+    const pushed = syncOp.lastPushResult ?? { pushed: false, code: -1, stderr: "" };
+    if (!pushed.pushed) {
       // hardening pass (Cohort-1 fix-pass) — a permission-denied push is a TERMINAL
       // failure (a re-run can never succeed). Surface ONE actionable line and
       // SUPPRESS the raw `fatal: unable to access …` stderr (it leaked
@@ -664,47 +722,70 @@ async function syncOneVault(
       // they return `skipped-readonly` above — so this is the OWNED-repo
       // unexpected-403 path (e.g. a transient auth state).
       if (isPermissionDeniedPush(pushed.stderr)) {
+        // firewall-C1 fix-pass — narrate the raw denial stderr into plain sense
+        // (the firewall's `auth` narration). The prior hand-authored message named
+        // `gh auth status` + "remote"; the raw stderr now stays on `errorOutput`
+        // (debug/--json only, never the human renderer).
+        const narrated = narrate(pushed.stderr, { op: "save your notes online" });
         return {
           ...base,
           status: "error",
-          message:
-            `push denied — you don't have push access to this vault's remote right now. ` +
-            `Check 'gh auth status' and the remote URL; if this is a vault you only subscribe to, ` +
-            `it is read-only (capture into a home vault instead).`,
+          message: `${narrated.plain} ${narrated.nextAction}`,
           ahead,
           behind,
           dirtyCount,
+          errorOutput: pushed.stderr,
+          // Increment 1 · Phase A.4 (release review a review finding/a review finding) — a failed push
+          // after a local commit is the honest `committed-not-pushed → clean-undo`
+          // case; the horizon MUST reach the report on THIS error path, not only
+          // on success. Dropping it here made the whole point of A.4 invisible.
+          ...(syncOp !== null
+            ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class }
+            : {}),
         };
       }
+      // firewall-C1 fix-pass — a generic (non-permission) push failure is also an
+      // allowFailure path; narrate its stderr into plain sense (unknown → the safe
+      // `lyt doctor` fallback), keeping the raw stderr on `errorOutput` only.
+      const narrated = narrate(pushed.stderr, { op: "save your notes online" });
       return {
         ...base,
         status: "error",
-        message: "git push failed",
+        message: `${narrated.plain} ${narrated.nextAction}`,
         ahead,
         behind,
         dirtyCount,
         errorOutput: pushed.stderr,
+        // Increment 1 · Phase A.4 (release review a review finding/a review finding) — carry the honest
+        // horizon onto the generic push-failure report too (see note above).
+        ...(syncOp !== null
+          ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class }
+          : {}),
       };
     }
   }
 
+  // firewall-C1 fix-pass — plain success wording (no git noun): "Brought in" for
+  // incoming updates, "saved … online" for outgoing changes. The machine `status`
+  // enum (pushed/pulled/diverged-synced) is unchanged (a stable machine label);
+  // only the human `message` is narrated.
   let finalStatus: VaultSyncStatus = "clean";
-  let message = "up to date";
+  let message = "Up to date.";
   if (committed && behind > 0) {
     finalStatus = "diverged-synced";
-    message = `rebased ${behind} commit(s) + pushed ${ahead} local commit(s)`;
+    message = `Brought in ${behind} update(s) and saved ${ahead} of your change(s) online.`;
   } else if (committed) {
     finalStatus = "pushed";
-    message = `committed ${dirtyCount} file(s) + pushed`;
+    message = `Saved ${dirtyCount} change(s) online.`;
   } else if (ahead > 0 && behind > 0) {
     finalStatus = "diverged-synced";
-    message = `rebased ${behind} + pushed ${ahead}`;
+    message = `Brought in ${behind} update(s) and saved ${ahead} of your change(s) online.`;
   } else if (ahead > 0) {
     finalStatus = "pushed";
-    message = `pushed ${ahead} commit(s)`;
+    message = `Saved ${ahead} of your change(s) online.`;
   } else if (behind > 0) {
     finalStatus = "pulled";
-    message = `pulled ${behind} commit(s) from upstream`;
+    message = `Brought in ${behind} update(s) from your online copy.`;
   }
   return {
     ...base,
@@ -714,6 +795,12 @@ async function syncOneVault(
     behind,
     dirtyCount,
     meshContextResolved,
+    // Increment 1 · Phase A.4 — attach the honest horizon + reversibility class
+    // when a push was attempted (ahead > 0). Read back from the SyncOperation's
+    // actual push result; absent on pull-only / up-to-date / no-push syncs.
+    ...(syncOp !== null
+      ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class }
+      : {}),
   };
 }
 

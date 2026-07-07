@@ -51,7 +51,7 @@ export interface ReindexInboundArgs {
   vault: string;
   // Vault path — used to stamp the index watermark (L3 input).
   vaultPath: string;
-  // Open-once seam (v1.A.5 CR-B1). Threaded to rebuildVaultFlow when supplied.
+  // Open-once seam (v1.A.5 ). Threaded to rebuildVaultFlow when supplied.
   registryDb?: Client | undefined;
 }
 

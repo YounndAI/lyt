@@ -58,7 +58,7 @@
 // surfaced); at mesh scope, tier 3 reaches OUT-OF-MESH related
 // vaults; at vault scope, tier 3 is skipped per spec.
 //
-// Open-once seam (v1.A.5 CR-B1 + v1.D.1 + v1.D.2a vindication):
+// Open-once seam (v1.A.5 + v1.D.1 + v1.D.2a vindication):
 // optional `registryDb?: Client` — caller threads the registry
 // client through, the engine opens + closes per-vault lyt.db handles
 // inside the flow (default = per-vault open+close; connection
@@ -304,7 +304,7 @@ export interface SearchCascadeArgs {
   // test that doesn't pass expansionTerms is unaffected). Purely lexical — no
   // embeddings, no new index.
   expansionTerms?: readonly string[];
-  // Open-once seam (v1.A.5 CR-B1).
+  // Open-once seam (v1.A.5 ).
   registryDb?: Client;
   // Lane V fix-pass — soft-tier blend coefficient (tuning seam). Defaults to
   // SOFT_TIER_ALPHA; threaded so the bench / α-sweep can probe alternative

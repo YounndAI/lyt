@@ -319,7 +319,7 @@ const VERB_GROUPS: VerbGroup[] = [
       },
       {
         verb: "lyt pattern link <name> --vault <v>",
-        summary: "Symlink the pattern into a vault's Patterns/ directory",
+        summary: "Symlink the pattern into a vault's .lyt/patterns/ directory",
       },
       {
         verb: "lyt pattern run <pattern> <verb>",

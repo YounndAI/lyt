@@ -35,6 +35,11 @@ export type {
 } from "./registry/vault-home-mesh-helpers.js";
 export { adoptVaultFlow } from "./flows/adopt.js";
 export type { AdoptFlowResult } from "./flows/adopt.js";
+export { ensurePersonalMesh } from "./flows/ensure-personal-mesh.js";
+export type {
+  EnsurePersonalMeshArgs,
+  EnsurePersonalMeshResult,
+} from "./flows/ensure-personal-mesh.js";
 export { joinVaultFlow } from "./flows/join.js";
 export type { JoinResult } from "./flows/join.js";
 export { cloneVaultFlow, CloneTargetMeshNotFoundError } from "./flows/clone.js";
@@ -215,6 +220,24 @@ export type {
   AgentManualRuntime,
 } from "./flows/agent-manual.js";
 export { buildAgentManualCommand } from "./commands/agent-manual.js";
+// stay-current slice — version-currency core shared by `outdated`/`update`
+// (lyt meta CLI) + doctor + init.
+export {
+  checkCurrency,
+  CURRENCY_CACHE_TTL_MS,
+  CURRENCY_DIST_TAG,
+  CURRENCY_PACKAGE,
+  formatCurrencyLine,
+  isNewerVersion,
+  resolveUpdateAction,
+  updateCommandString,
+} from "./flows/currency.js";
+export type {
+  CommandRunner,
+  CurrencyOptions,
+  CurrencyResult,
+  UpdateAction,
+} from "./flows/currency.js";
 // v1.G.4 — setup wizard surface (runWizard + IPromptHandler default impl).
 // Consumed by packages/lyt/src/commands/init.ts via `lyt init --wizard`.
 // Release review Arch-M1 fix-pass: the 10 individual phase functions are NOT
@@ -427,12 +450,18 @@ export {
   scanFrontmatterContract,
   scanUnindexedFigments,
   reconcileVaultScan,
+  migrateFrontmatterTo,
+  migrateFrontmatterToCurrent,
+  FRONTMATTER_MIGRATORS,
 } from "./flows/reconcile-frontmatter.js";
 export type {
   FrontmatterContractIssue,
   FrontmatterContractScan,
   UnindexedScan,
   ReconcileScan,
+  FrontmatterMigrationCandidate,
+  FrontmatterMigrator,
+  FrontmatterMigrationResult,
 } from "./flows/reconcile-frontmatter.js";
 // Phase E (0.10.0 frontmatter-contract lane) — tag/topic enrichment +
 // in-vault suggested-links. Pure primitives (Unit 1 model-free tags, Unit 3
@@ -504,6 +533,57 @@ export type { MaintainModifiedResult } from "./flows/maintain-modified.js";
 // reindex (FTS reconcile + per-vault lanes/arcs; cross-vault rollup deferred).
 export { captureIndexFlow } from "./flows/capture-index.js";
 export type { CaptureIndexArgs, CaptureIndexResult } from "./flows/capture-index.js";
+// Increment 1 · Phase A — the safe-write spine (op/): the Operation contract, the
+// append-only op-log, per-verb Receipt verification, the capture Operation, and
+// the undo engine behind `lyt undo`. Consumed by the lyt CLI package.
+export { defaultInverseForHorizon } from "./op/operation.js";
+export type { Operation, SyncHorizon, Inverse, UndoAction, Preview, Receipt } from "./op/operation.js";
+export {
+  openOpLog,
+  closeOpLog,
+  getOpLogPath,
+  appendPendingOp,
+  markOpApplied,
+  markOpAborted,
+  readLastAppliedOp,
+  readPendingOps,
+  listOps,
+  countOps,
+} from "./op/operation-log.js";
+export type { OpLogInput, OpLogRow, OpStatus } from "./op/operation-log.js";
+export { CaptureOperation } from "./op/operations/capture-op.js";
+export type { CaptureInput, CaptureOperationDeps } from "./op/operations/capture-op.js";
+export { undoLast, previewUndo } from "./op/undo.js";
+export type { UndoDeps, UndoOutcome } from "./op/undo.js";
+// makeReceipt is the canonical Receipt constructor for Operation implementers —
+// exported so an Operation living in ANOTHER package (A.4 SyncOperation, home =
+// lyt-mesh) can build a Receipt without reaching into op/receipt.ts internals.
+export { makeReceipt } from "./op/receipt.js";
+// Increment 1 · Phase A firewall-C1 fix-pass — the git-error FIREWALL narrator,
+// barrel-exported so a cross-package boundary renderer (the lyt-mesh sync flow's
+// allowFailure push/pull/fetch paths) can narrate a raw git/gh failure into
+// plain sense at the render boundary — not only on the THROW path the spawn
+// wrappers already decorate (A.G release review C1). `firewall`/`isFirewalled` ride
+// along for callers that decorate a thrown error rather than a resolved stderr.
+export { narrate, firewall, isFirewalled } from "./util/git-error-firewall.js";
+export type {
+  NarratedError,
+  FirewalledError,
+  BoundaryCategory,
+} from "./util/git-error-firewall.js";
+// Increment 1 · Phase A a review finding fix-pass — the op-level audit adapter: maps an
+// Operation + its verified Receipt onto recordAudit's fixed schema. Exported so
+// a CLI caller (capture's `captureThroughOp`) can wire the audit sink that was
+// previously dark (the seam existed but no caller passed it).
+export { recordOperationAudit } from "./op/op-audit.js";
+export type { OpAuditTarget } from "./op/op-audit.js";
+// Increment 1 · Phase A.4 — the RemoteProvider port (git-remote seam): the
+// gh-agnostic push/pull primitive returning STRUCTURED results, so the
+// SyncOperation's honest-none horizon is read back from the actual push result,
+// never asserted from the verb. GitRemoteProvider = the v1 github-backed default
+// wrapping the firewalled runGit; non-GitHub slot reserved.
+export { GitRemoteProvider } from "./remote/remote-provider.js";
+export type { RemoteProvider, PushResult, PullResult, GitRunnerFn } from "./remote/remote-provider.js";
 // v1.G.2 writability derivation + the 0.9.3 write-gate. `deriveWriteGate`
 // is the shared capture/sync/publish refusal decision, keyed on the LIVE
 // writability verdict (it replaced the too-narrow `isPureSubscriberVault`, which
@@ -685,7 +765,7 @@ export type {
   SyncMetadataScope,
   SyncMetadataVaultReport,
 } from "./flows/sync-metadata.js";
-export { doctorFlow, renderHumanReport, checkFrontmatterContract } from "./flows/doctor.js";
+export { doctorFlow, renderHumanReport, checkFrontmatterContract, checkFrontmatterVersion } from "./flows/doctor.js";
 export type {
   BinaryRunner,
   CheckResult,
@@ -1380,6 +1460,7 @@ export type {
 export { relinkAllPatternsForVault } from "./flows/pattern-relink-vault.js";
 export {
   getUserPatternsDir,
+  getVaultPatternsLinkDir,
   getBundledPatternsDir,
   listPatternNames,
   copyBundledPatterns,

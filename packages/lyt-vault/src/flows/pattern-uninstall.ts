@@ -19,7 +19,7 @@ import { join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { listVaults } from "../registry/repo.js";
-import { getUserPatternsDir } from "../util/pattern-paths.js";
+import { getUserPatternsDir, getVaultPatternsLinkDir } from "../util/pattern-paths.js";
 
 export interface PatternUninstallArgs {
   name: string;
@@ -50,7 +50,7 @@ export async function patternUninstallFlow(
     const vaults = await listVaults(db);
     for (const v of vaults) {
       if (v.status !== "active") continue;
-      const linkPath = join(v.path, "Patterns", args.name);
+      const linkPath = join(getVaultPatternsLinkDir(v.path), args.name);
       if (!existsSync(linkPath)) continue;
       affectedVaults.push(v.name);
     }
@@ -74,7 +74,7 @@ export async function patternUninstallFlow(
       const vaults = await listVaults(db2);
       for (const v of vaults) {
         if (v.status !== "active") continue;
-        const linkPath = join(v.path, "Patterns", args.name);
+        const linkPath = join(getVaultPatternsLinkDir(v.path), args.name);
         if (!existsSync(linkPath)) continue;
         try {
           const stat = lstatSync(linkPath);

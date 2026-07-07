@@ -20,6 +20,7 @@ import { adoptVault, type AdoptOptions, type AdoptResult } from "../scaffold/ado
 import { parseVaultYon } from "../yon/parse.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ensurePersonalMesh } from "./ensure-personal-mesh.js";
 import { relinkAllPatternsForVault } from "./pattern-relink-vault.js";
 import { reindexInboundVault } from "./reindex-inbound.js";
 import { registerVaultFromYon } from "./register.js";
@@ -30,6 +31,12 @@ export interface AdoptFlowResult extends AdoptResult {
   // V-C-1 Phase B (L2) — true when the adopted vault's content caches (all
   // tiers) were rebuilt so search/recall/primer hit with no manual reindex.
   indexed: boolean;
+  // G1 guided-adopt — the mesh the vault was homed into (find-or-created), plus
+  // whether the mesh was created this call and whether assignment succeeded. A
+  // bare adopt now defaults the vault into `personal/<leaf>` instead of orphan.
+  homeMesh: string | null;
+  homeMeshCreated: boolean;
+  homeMeshAssigned: boolean;
 }
 
 export async function adoptVaultFlow(opts: AdoptOptions): Promise<AdoptFlowResult> {
@@ -40,9 +47,33 @@ export async function adoptVaultFlow(opts: AdoptOptions): Promise<AdoptFlowResul
   // Obsidian); initVaultDbs creates all three so downstream verbs land on
   // ready schemas without per-call open guards.
   await initVaultDbs(result.vaultPath);
+  let homeMesh: string | null = null;
+  let homeMeshCreated = false;
+  let homeMeshAssigned = false;
   const db = await openRegistry();
   try {
     await registerVaultFromYon(db, { vaultPath: result.vaultPath });
+    // G1 guided-adopt — give the vault a home instead of leaving it orphan:
+    // find-or-create the target mesh (`personal` by default) and assign this
+    // vault into it. Best-effort (never-fail posture, matching adopt-and-prime):
+    // an assignment failure leaves the vault registered-but-orphan and surfaces a
+    // note — it never aborts the adopt.
+    try {
+      const mesh = await ensurePersonalMesh({
+        db,
+        vaultRid: result.vaultRid,
+        ...(opts.mesh !== undefined ? { meshName: opts.mesh } : {}),
+      });
+      homeMesh = mesh.assigned ? mesh.meshName : null;
+      homeMeshCreated = mesh.created;
+      homeMeshAssigned = mesh.assigned;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `lyt vault adopt: mesh assignment deferred (${err instanceof Error ? err.message : String(err)}); ` +
+          `vault registered as orphan — run \`lyt vault move\` or \`lyt repair\` to home it.`,
+      );
+    }
   } finally {
     await closeRegistry(db);
   }
@@ -67,5 +98,13 @@ export async function adoptVaultFlow(opts: AdoptOptions): Promise<AdoptFlowResul
         "`.",
     );
   }
-  return { ...result, registered: true, patternsLinked: links.length, indexed: idx.reindexed };
+  return {
+    ...result,
+    registered: true,
+    patternsLinked: links.length,
+    indexed: idx.reindexed,
+    homeMesh,
+    homeMeshCreated,
+    homeMeshAssigned,
+  };
 }

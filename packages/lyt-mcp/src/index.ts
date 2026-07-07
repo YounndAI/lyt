@@ -16,3 +16,7 @@
 
 export { buildMcpSubcommand } from "./mcp-command.js";
 export { buildLytMcpServer, startStdioServer, SERVER_NAME, SERVER_VERSION } from "./server.js";
+// The declarative MCP op-registry — exported so the surface-parity conformance
+// test (Inc1 Phase 0 gate 2) can assert the MCP surface against the capability
+// manifest without launching a server.
+export { buildOpRegistry, type OpRow } from "./registry.js";

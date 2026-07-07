@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-runner",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Lyt automation runner — a thin layer on @younndai/yon-runner that expands declarative @AUTOMATOR + @DIRECTIVE records into core YON before execution and registers the vault-aware std:vault.* + std:mesh.* + std:lease.* ops.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -43,15 +43,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "clean": "rimraf --glob dist .turbo *.tsbuildinfo",
-    "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
+    "clean": "rimraf --glob dist .turbo *.tsbuildinfo"
   },
   "dependencies": {
     "@younndai/yon-runner": "^2.0.0",
     "@younndai/yon-parser": "^2.0.0",
-    "@younndai/lyt-vault": "^0.10.0",
-    "@younndai/lyt-llm": "^0.10.0",
+    "@younndai/lyt-vault": "^0.11.0",
+    "@younndai/lyt-llm": "^0.11.0",
     "@libsql/client": "^0.15.15"
   },
   "devDependencies": {

@@ -21,6 +21,7 @@ import type { Client } from "@libsql/client";
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
 import { getFederationRepoDir } from "../../util/federation-paths.js";
+import { narrate } from "../../util/git-error-firewall.js";
 import { runGit as defaultRunGit } from "../../util/git-run.js";
 import { rebuildFederationCacheFlow } from "./rebuildFederationCacheFlow.js";
 import type { GitRunner } from "./vault-publish.js";
@@ -221,13 +222,12 @@ export async function syncPodLedgerFlow(
             // local cache below from the (pre-pull) working tree anyway.
             await git(["rebase", "--abort"], { cwd: podDir, allowFailure: true });
             conflicted = true;
+            // firewall-C1 fix-pass — plain conflict warning (no `git pull --rebase`
+            // recipe / git noun); renders on `lyt sync` via printPodLedgerHuman.
             warnings.push(
-              "pod ledger pull-rebase conflict — run `git pull --rebase` in " +
-                `${podDir}, resolve, then re-run \`lyt sync\` (no data overwritten). ` +
-                "Append-only shards do not collide; a conflict here is a non-shard " +
-                "file (e.g. a hand-edited pod.yon). Until you resolve it, the local " +
-                "cache reflects LOCAL-ONLY state — the peer shards from the aborted " +
-                "pull are not yet merged.",
+              "Lyt couldn't automatically combine your pod's shared records with your online " +
+                "copy this time (something other than the shared lists changed in both places). " +
+                "Your notes are safe and unchanged. Re-run `lyt sync`, or run `lyt doctor` if it keeps happening.",
             );
           }
         }
@@ -253,7 +253,11 @@ export async function syncPodLedgerFlow(
         if (committed.code === 0) {
           result.committed = true;
         } else {
-          warnings.push(`pod ledger commit failed: ${committed.stderr.trim().slice(0, 200)}`);
+          // firewall-C1 fix-pass — plain warning (no raw stderr, no git noun);
+          // renders on `lyt sync` via printPodLedgerHuman.
+          warnings.push(
+            `Lyt couldn't finish updating your pod's shared records this time. ${narrate(committed.stderr).nextAction}`,
+          );
         }
       }
 
@@ -270,7 +274,10 @@ export async function syncPodLedgerFlow(
         if (pushed.code === 0) {
           result.pushed = true;
         } else {
-          warnings.push(`pod ledger push failed: ${pushed.stderr.trim().slice(0, 200)}`);
+          // firewall-C1 fix-pass — plain warning (no raw stderr, no git noun).
+          warnings.push(
+            `Lyt couldn't send your pod's shared records to your online copy this time — it'll try again next sync. ${narrate(pushed.stderr).nextAction}`,
+          );
         }
       }
     }
@@ -290,7 +297,10 @@ export async function syncPodLedgerFlow(
       result.reconstituted = true;
       result.subscriptionsReconstituted = rebuilt.subscriptionsReconstituted;
     } catch (err) {
-      warnings.push(`pod ledger reconstitution failed: ${errMsg(err)}`);
+      // firewall-C1 fix-pass — plain warning; raw error text stays out of it.
+      warnings.push(
+        "Lyt couldn't rebuild your pod's shared records from the latest data this time. Run `lyt doctor` if it keeps happening.",
+      );
     }
 
     if (conflicted) {

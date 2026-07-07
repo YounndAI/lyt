@@ -72,7 +72,7 @@ export interface AutomatorStatusArgs {
   vault?: string;
   limit?: number;
   vaultPathOverride?: string;
-  // v1.A.5 CR-B1 open-once seam: caller-supplied registry client. When
+  // v1.A.5 open-once seam: caller-supplied registry client. When
   // omitted, the flow opens + closes its own. Caller owns lifecycle.
   registryDb?: Client;
 }

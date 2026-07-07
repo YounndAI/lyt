@@ -372,6 +372,48 @@ export function validateFrontmatterBlock(raw: string): FrontmatterValidationErro
 }
 
 // ---------------------------------------------------------------------------
+// Increment 1 · Phase 0 (gate 1) — frontmatter-version back-compat reader.
+//
+// The one-way door: a Figment MAY carry a `frontmatter_version: N` key naming
+// the contract revision it was written against. A Figment with NO such key is,
+// by definition, a **v1** Figment (the pre-stamp baseline — every Figment ever
+// written before this door existed). readFrontmatterVersion is the SINGLE
+// chokepoint the migration engine keys on: it never throws, and an absent /
+// malformed / non-positive value reads as the v1 baseline so a raw hand-dropped
+// or foreign-imported note is always assigned a concrete, migratable version
+// rather than crashing the batch migrator. FORWARD path (stamping the key on
+// write + the vN→vN+1 migrators) builds on this reader; freezing the read
+// semantics now is what makes a later bump non-breaking.
+// ---------------------------------------------------------------------------
+
+/** The version a Figment with no explicit `frontmatter_version` key is treated as. */
+export const FRONTMATTER_BASELINE_VERSION = 1;
+
+/**
+ * Read the contract revision a Figment's LEADING frontmatter block was written
+ * against. Returns the integer value of a `frontmatter_version` key when present
+ * and a positive integer; otherwise returns FRONTMATTER_BASELINE_VERSION (1) —
+ * the back-compat baseline for every pre-stamp / foreign / block-less Figment.
+ * Never throws (a detect/migration pass must not crash on one odd Figment).
+ */
+export function readFrontmatterVersion(raw: string): number {
+  const block = extractFrontmatterBlock(raw);
+  if (block === null) return FRONTMATTER_BASELINE_VERSION;
+  const value = fieldValue(block, "frontmatter_version");
+  if (value === null) return FRONTMATTER_BASELINE_VERSION;
+  // Strict decimal digits ONLY. `Number()` would otherwise silently accept
+  // hex/binary/octal (`0x10`→16), exponent (`1e2`→100), and float (`3.0`→3)
+  // forms as versions — nonsense for a contract revision. This is a frozen
+  // one-way door: tightening now is free; after a v2 stamp exists it becomes a
+  // behavior change. `Number.isSafeInteger` then rejects 16+ digit all-digit
+  // strings (`1e22`-scale floats) that pass the digit test but aren't real ints.
+  if (!/^[0-9]+$/.test(value)) return FRONTMATTER_BASELINE_VERSION;
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 1) return FRONTMATTER_BASELINE_VERSION;
+  return n;
+}
+
+// ---------------------------------------------------------------------------
 // Phase A (UNIT 2) — date read-back.
 //
 // These are the FORWARD-path date utilities the scaffold regen (preserve-on-

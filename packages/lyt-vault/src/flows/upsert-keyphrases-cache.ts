@@ -31,7 +31,7 @@
 // the searchable prose the FTS indexes, no drift), same scaffold-note exclusion,
 // same open-once seam.
 //
-// Open-once seam (v1.A.5 CR-B1): optional `lytDb?: Client`; when supplied the
+// Open-once seam (v1.A.5 ): optional `lytDb?: Client`; when supplied the
 // caller owns lifecycle; when omitted the flow opens + closes its own.
 
 import { readFileSync } from "node:fs";
@@ -60,7 +60,7 @@ export interface UpsertKeyphrasesCacheResult {
 }
 
 export interface UpsertKeyphrasesCacheOpts {
-  // Open-once seam (v1.A.5 CR-B1 pattern).
+  // Open-once seam (v1.A.5 pattern).
   lytDb?: Client;
   // Top-K override (test seam); defaults to DEFAULT_KEYPHRASE_TOP_K (10), the
   // proven prototype value.

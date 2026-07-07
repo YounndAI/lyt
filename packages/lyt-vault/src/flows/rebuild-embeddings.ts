@@ -17,7 +17,7 @@
 // feat/microrag-semantic — `rebuild-embeddings` flow. Thin orchestration wrapper
 // around `upsertEmbeddingsCache`, mirroring rebuild-keyphrases.ts: resolve the
 // registered vault, delegate the walk + embed + insert, return a shaped result.
-// Open-once seam (v1.A.5 CR-B1): optional `registryDb?` / `lytDb?`.
+// Open-once seam (v1.A.5 ): optional `registryDb?` / `lytDb?`.
 //
 // ARC-D2: this NEVER fails the surrounding rebuild when embeddings are absent —
 // upsertEmbeddingsCache returns { ran:false, available:false } and we pass it

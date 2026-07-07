@@ -45,10 +45,126 @@ import { posix as posixPath, relative, sep } from "node:path";
 
 import { createClient } from "@libsql/client";
 
-import { validateFrontmatterBlock } from "../templates/contract.js";
+import {
+  FRONTMATTER_CONTRACT_VERSION,
+  readFrontmatterVersion,
+  validateFrontmatterBlock,
+} from "../templates/contract.js";
 import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
 import { closeVaultDb, getLytDbPath, isCorruptDatabaseError } from "../registry/vault-db.js";
 import { resolveSingleVault } from "../util/vault-resolve.js";
+
+// ---------------------------------------------------------------------------
+// Increment 1 · Phase 0 (gate 1) — the frontmatter migration ENGINE.
+//
+// This module IS the migration engine the plan calls for ("promote the existing
+// reconcile into a migration engine"): the read-only DETECT axes (below) + the
+// versioned, forward-only TRANSFORM (here), keyed on readFrontmatterVersion
+// (contract.ts). The registry is EMPTY at v1 (current) — every Figment is
+// already current, so migration is a no-op. Freezing the pathway now is the
+// one-way door: the first contract bump registers one migrator and every
+// pre-existing / foreign-imported Figment migrates forward through this ONE
+// chokepoint.
+//
+// STAMP-ON-WRITE is intentionally deferred to the v2 bump: at v1 every Figment
+// reads as the baseline, so stamping `frontmatter_version: 1` on every write
+// would be redundant noise on the 8-field contract. The key is written only once
+// a non-baseline version exists to record (the scaffold-writer wire-in lands with
+// v2). The READER (frozen now) makes that safe — an unstamped Figment reads as v1.
+//
+// The batch WRITE-apply (rewriting migrated Figments as an undoable Operation)
+// rides the Phase-A Operation primitive; this file is the pure transform + the
+// read-only candidate scan, folded into scanFrontmatterContract's single walk.
+// ---------------------------------------------------------------------------
+
+/** One Figment on disk whose stamped contract version is behind the target. */
+export interface FrontmatterMigrationCandidate {
+  /** Vault-relative POSIX path. */
+  relPath: string;
+  /** The contract version the Figment reads as (baseline 1 when unstamped). */
+  fromVersion: number;
+}
+
+/** Migrates one Figment's raw text exactly ONE contract version forward. */
+export type FrontmatterMigrator = (raw: string) => string;
+
+/**
+ * The migrator registry, keyed by FROM version: `get(n)` takes a vN Figment to
+ * v(N+1). EMPTY at v1 — the frozen pathway, populated only when
+ * FRONTMATTER_CONTRACT_VERSION bumps. Every registered migrator MUST preserve the
+ * body + all author fields byte-stable, NEVER fabricate purpose/topic (an absent
+ * author field is queued for the handler, not invented), and be idempotent.
+ */
+export const FRONTMATTER_MIGRATORS: ReadonlyMap<number, FrontmatterMigrator> = new Map();
+
+/** Outcome of migrating one Figment toward a target contract version. */
+export interface FrontmatterMigrationResult {
+  /** The (possibly) rewritten Figment text; the last good text on a fault. */
+  raw: string;
+  /** The version the Figment was read as (baseline 1 when unstamped). */
+  fromVersion: number;
+  /** The version actually reached (== target on success; the stall point otherwise). */
+  toVersion: number;
+  /** True when the text changed (a migrator produced different bytes). */
+  changed: boolean;
+  /** True when a needed migrator is missing — the Figment could not fully migrate. */
+  gap: boolean;
+  /** Set when a migrator THREW — the message; the chain stops, never propagates. */
+  error?: string;
+}
+
+/**
+ * Migrate a Figment forward to `target` by applying registered migrators in
+ * version order. Pure + never-throws (consistent with the detect axes): a
+ * migrator that throws STOPS the chain and is reported via `error`, not
+ * propagated — so a batch migration can skip one bad Figment and continue. A
+ * Figment already at/above `target` is returned unchanged; a missing migrator
+ * reports `gap: true` (fail-visible). Takes the registry explicitly so the
+ * algorithm is testable without waiting for a real v2 migrator.
+ */
+export function migrateFrontmatterTo(
+  raw: string,
+  target: number,
+  migrators: ReadonlyMap<number, FrontmatterMigrator>,
+): FrontmatterMigrationResult {
+  const from = readFrontmatterVersion(raw);
+  if (from >= target) {
+    return { raw, fromVersion: from, toVersion: from, changed: false, gap: false };
+  }
+  let cur = raw;
+  let v = from;
+  while (v < target) {
+    const migrator = migrators.get(v);
+    if (migrator === undefined) {
+      return { raw: cur, fromVersion: from, toVersion: v, changed: cur !== raw, gap: true };
+    }
+    try {
+      cur = migrator(cur);
+    } catch (err) {
+      return {
+        raw: cur,
+        fromVersion: from,
+        toVersion: v,
+        changed: cur !== raw,
+        gap: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+    v += 1;
+  }
+  return { raw: cur, fromVersion: from, toVersion: target, changed: cur !== raw, gap: false };
+}
+
+/**
+ * Migrate a Figment forward to the CURRENT contract version using the live
+ * registry. The INTENDED production entry point — the Phase-A batch write-apply
+ * and the Phase-D adopt/import backfill WILL call this. It has NO production
+ * caller today (the registry is empty → a verified no-op at v1); the transform
+ * is a frozen pathway until the first contract bump wires those callers.
+ */
+export function migrateFrontmatterToCurrent(raw: string): FrontmatterMigrationResult {
+  return migrateFrontmatterTo(raw, FRONTMATTER_CONTRACT_VERSION, FRONTMATTER_MIGRATORS);
+}
 
 /** One figment on disk whose frontmatter violates the 8-field contract. */
 export interface FrontmatterContractIssue {
@@ -58,12 +174,16 @@ export interface FrontmatterContractIssue {
   missing: string[];
 }
 
-/** Result of the pure disk-only frontmatter-contract scan. */
+/** Result of the pure disk-only frontmatter-contract scan (contract + migration axes). */
 export interface FrontmatterContractScan {
   /** Total indexable figments walked (README/scaffold/floor already excluded). */
   scanned: number;
   /** The figments that fail validateFrontmatterBlock. */
   invalid: FrontmatterContractIssue[];
+  /** The contract version the migration axis measures `behind` against. */
+  targetVersion: number;
+  /** Figments whose stamped version is behind `targetVersion` (migration candidates). */
+  behind: FrontmatterMigrationCandidate[];
 }
 
 // Vault-relative POSIX path from an absolute path (matches the key shape
@@ -79,9 +199,13 @@ function toVaultRel(absPath: string, vaultRoot: string): string {
  * unreadable file is skipped, not counted). README / scaffold seeds are excluded
  * by the shared isIndexable funnel (they are contract-exempt by design).
  */
-export function scanFrontmatterContract(vaultPath: string): FrontmatterContractScan {
+export function scanFrontmatterContract(
+  vaultPath: string,
+  targetVersion: number = FRONTMATTER_CONTRACT_VERSION,
+): FrontmatterContractScan {
   const absPaths = walkVaultMarkdownFiles(vaultPath, isIndexable);
   const invalid: FrontmatterContractIssue[] = [];
+  const behind: FrontmatterMigrationCandidate[] = [];
   for (const abs of absPaths) {
     let raw: string;
     try {
@@ -91,12 +215,19 @@ export function scanFrontmatterContract(vaultPath: string): FrontmatterContractS
       // files; a detect check must never crash on one odd figment).
       continue;
     }
+    const relPath = toVaultRel(abs, vaultPath);
     const errors = validateFrontmatterBlock(raw);
     if (errors.length > 0) {
-      invalid.push({ relPath: toVaultRel(abs, vaultPath), missing: errors.map((e) => e.field) });
+      invalid.push({ relPath, missing: errors.map((e) => e.field) });
+    }
+    // Same walk, migration axis: Figments behind the target contract version.
+    // Reuses this read — no separate vault walk (the plan's anti-duplication door).
+    const from = readFrontmatterVersion(raw);
+    if (from < targetVersion) {
+      behind.push({ relPath, fromVersion: from });
     }
   }
-  return { scanned: absPaths.length, invalid };
+  return { scanned: absPaths.length, invalid, targetVersion, behind };
 }
 
 /** Result of the disk↔index (present-but-unindexed) scan. */
@@ -160,6 +291,10 @@ export interface ReconcileScan {
   unindexed: string[];
   /** False when the vault has never been indexed (no lyt.db). */
   indexPresent: boolean;
+  /** Contract version the migration axis measures `behind` against. */
+  targetVersion: number;
+  /** Figments behind targetVersion (forward-migration candidates). */
+  behind: FrontmatterMigrationCandidate[];
 }
 
 /**
@@ -181,5 +316,7 @@ export async function reconcileVaultScan(vaultName: string | undefined): Promise
     missingFrontmatter: fm.invalid,
     unindexed: idx.unindexed,
     indexPresent: idx.indexPresent,
+    targetVersion: fm.targetVersion,
+    behind: fm.behind,
   };
 }

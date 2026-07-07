@@ -51,7 +51,7 @@ import { liveMeshEdges } from "../yon/mesh-edge-ledger-read.js";
 // 5. Append one `active` @MESH_EDGE record to THIS writer's own shard — the
 //    durable convergent side-effect.
 //
-// Open-once seam (v1.A.5 CR-B1 vindicated 12 times): callers may pass
+// Open-once seam (v1.A.5 vindicated 12 times): callers may pass
 // `registryDb`; the flow opens its own client only when omitted. (The registry
 // is still consulted for the resolution/refusal pre-flight; the edge write
 // itself targets the ledger.)

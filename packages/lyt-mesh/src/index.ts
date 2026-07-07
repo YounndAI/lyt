@@ -16,6 +16,13 @@
 
 export { buildMeshSubcommand } from "./mesh-command.js";
 
+// Increment 1 · Phase A.4 — the `sync` Operation (honest-none END of the
+// reversibility taxonomy). Home = lyt-mesh (the sync flow lives here); wraps the
+// push through the RemoteProvider port and reads its horizon back from the
+// actual push result.
+export { SyncOperation } from "./op/operations/sync-op.js";
+export type { SyncOperationInput, SyncOperationDeps } from "./op/operations/sync-op.js";
+
 export {
   addSource,
   listSources,

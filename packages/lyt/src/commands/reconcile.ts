@@ -138,12 +138,15 @@ function emit(
     vault: { name: before.vaultName, path: before.vaultPath },
     applied: healed !== undefined,
     index_present: before.indexPresent,
+    target_version: before.targetVersion,
     before: {
       scanned: before.scanned,
       missing_frontmatter: before.missingFrontmatter.length,
       unindexed: before.unindexed.length,
+      version_behind: before.behind.length,
       missing_frontmatter_samples: before.missingFrontmatter.slice(0, 20),
       unindexed_samples: before.unindexed.slice(0, 20),
+      version_behind_samples: before.behind.slice(0, 20),
     },
     ...(healed !== undefined
       ? {
@@ -181,6 +184,18 @@ function emit(
         ? ` — ${before.unindexed.slice(0, 10).join(", ")}${before.unindexed.length > 10 ? " …" : ""}`
         : ""),
   );
+  // Read-only migration axis: Figments behind the contract version. Empty at v1
+  // (nothing is behind the baseline); the write-apply heal rides Phase A, so this
+  // is surfaced but NOT counted in driftCount (which gates the backfill/reindex).
+  if (before.behind.length > 0) {
+    lines.push(
+      `  behind contract v${before.targetVersion}: ${before.behind.length}` +
+        ` — ${before.behind
+          .slice(0, 10)
+          .map((c) => c.relPath)
+          .join(", ")}${before.behind.length > 10 ? " …" : ""}`,
+    );
+  }
 
   if (healed !== undefined && after !== undefined) {
     lines.push(

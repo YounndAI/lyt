@@ -6,8 +6,9 @@ vaults. Run `lyt help <topic>` for any group below in depth.
 
 ## Top-level
 
-- `lyt init [--dry-run]` — interactive bootstrap wizard (environment setup,
-  first vault, Your Pod, skills, agent manual). See `lyt help getting-started`.
+- `lyt init` — interactive bootstrap wizard (environment setup, first vault,
+  Your Pod, skills, agent manual). Add `--wizard --dry-run` to preview every step
+  without writing (`--dry-run` is valid only with `--wizard`). See `lyt help getting-started`.
 - `lyt capture "<text>"` — save a Figment under the 8-field frontmatter contract
   and index it immediately. Mandatory `purpose` + `topic`.
 - `lyt search "<query>" [--vault <n>] [--mesh <m>] [--all] [--no-semantic] [--limit <n>] [--json]`

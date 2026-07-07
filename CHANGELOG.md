@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.11.0] — 2026-07-07
+
+Reliability-floor release — a safe-write spine plus a deliberately smaller, unopinionated surface. How search and federation behave is unchanged; this hardens the write path and trims Lyt down to focused primitives.
+
+### Added
+- **`lyt undo`** — reverses the last vault-writing operation (currently `lyt capture`) from an on-disk operation log. It validates the target against the registry and refuses to follow symlinks, so an undo can never write outside the vault it recorded.
+- **Plain-language git errors across `lyt sync`.** When a sync hits a git problem (no remote, auth, conflict, detached state), Lyt explains it in plain language and tells you what to do — no raw git output — and records it to an audit log. `lyt sync --check` reports the same way.
+- **Stay current — `lyt outdated` + `lyt update`.** Check whether a newer Lyt is published and install it (confirmation-gated). `lyt doctor` and `lyt init` surface a one-line currency check; an unreachable registry is reported, never an error.
+- **`lyt vault adopt`** — bring an existing Obsidian vault into your pod additively (creates `.lyt/`, never touches your markdown), then registers, homes, links patterns, and indexes it so search/recall hit immediately.
+
+### Changed
+- **A smaller, unopinionated surface — 11 skills, 1 bundled pattern.** Removed the seven opinionated workflow skills (`/lyt-plan`, `/lyt-handoff`, `/lyt-insight`, `/lyt-decision`, `/lyt-progress`, `/lyt-result`, `/lyt-retro`) and the workflow patterns behind them (`work-management`, `decision-log`, `project-lifecycle`). Lyt now ships 11 focused skills and one bundled pattern — `knowledge-capture` (behind `/lyt-capture` + `/lyt-recall`). Opinionated workflow patterns are now bring-your-own via `lyt pattern install --from <dir>`: Lyt federates your markdown; it no longer imposes a workflow vocabulary.
+- **Clearer writable vs publishable distinction.** `lyt vault info` separates whether a vault is locally writable from whether it is publishable (pushable), so an agent never blocks a local write on a remote/push condition.
+
+---
+
 ## [0.10.0] — 2026-07-03
 
 Frontmatter-contract release — every note's metadata is now correct at rest, enforced at write, and healable for legacy files, with optional tag/topic enrichment. No change to how search or federation behave.

@@ -33,7 +33,7 @@
 // failure per existing `upsertLedgerCache` / `upsertLanesCache`
 // precedent).
 //
-// Open-once seam (v1.A.5 CR-B1): optional `lytDb?: Client`; when
+// Open-once seam (v1.A.5 ): optional `lytDb?: Client`; when
 // supplied, the caller owns lifecycle; when omitted, the flow opens +
 // closes its own client.
 //
@@ -64,7 +64,7 @@ export interface UpsertArcsCacheResult {
 }
 
 export interface UpsertArcsCacheOpts {
-  // Open-once seam (v1.A.5 CR-B1 pattern). When supplied, the flow uses
+  // Open-once seam (v1.A.5 pattern). When supplied, the flow uses
   // the caller's lyt.db client and does NOT close it. When omitted, the
   // flow opens + closes its own.
   lytDb?: Client;

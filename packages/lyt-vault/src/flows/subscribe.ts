@@ -67,7 +67,7 @@ import { reindexInboundVault } from "./reindex-inbound.js";
 // tier-0 arcs + primer arcs populate too (the prior FTS+lanes-only build
 // left arcs empty until a manual reindex — V-B-6).
 //
-// Open-once seam (v1.A.5 CR-B1 vindicated 14 times): callers may pass
+// Open-once seam (v1.A.5 vindicated 14 times): callers may pass
 // `registryDb`; the flow opens its own client only when omitted.
 //
 // Atomicity contract (mirrors flows/add-mesh-edge.ts:39-54):

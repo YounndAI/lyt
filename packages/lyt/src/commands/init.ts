@@ -36,8 +36,10 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 
 import {
+  checkCurrency,
   closeRegistry,
   embeddingsOfferGate,
+  formatCurrencyLine,
   getHandleFromIdentity,
   markAsked,
   materializePodLocal,
@@ -350,6 +352,16 @@ export function buildLytInitCommand(): Command {
           if (mode === "custom") {
             await maybeOfferEmbeddings(false);
           }
+          // stay-current slice — after a successful init, nudge if this Lyt is
+          // behind. CACHE-ONLY: surfaces a fresh cached currency result (populated
+          // by a prior `outdated`/`doctor`) but NEVER probes the registry, so init
+          // stays strictly non-blocking + network-free. Silent when current /
+          // offline / no cache (a fresh install is current anyway).
+          const currency = await checkCurrency({ cacheOnly: true });
+          if (currency.stale) {
+            // eslint-disable-next-line no-console
+            console.log(`\nHeads up: ${formatCurrencyLine(currency)}`);
+          }
         }
         // Re-init with ALL-failed integrity → exit 1 (matches v1.B.2
         // skip-and-warn precedent + brief default).
@@ -511,7 +523,7 @@ export function emitJsonResult(res: InitBootstrapResult): void {
   if (res.adoptError !== undefined) {
     stable["adoptError"] = { reason: res.adoptError.reason };
   }
-  // W1.2 release review fix-pass (R1-Minor) — the heal runs its filesystem
+  // W1.2 release review fix-pass (a review finding) — the heal runs its filesystem
   // side-effects under `--json` too; surface its outcome so an automation
   // consumer (e.g. the deferred self-updater) can observe collision/divergent
   // notes the handler is meant to see.

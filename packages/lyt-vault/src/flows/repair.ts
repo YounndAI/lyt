@@ -79,7 +79,7 @@ import {
 // on top of it (validate stays scoped to mesh.yon row resolution; orphan
 // vaults are a registry-level concern per the ratified default).
 //
-// Open-once seam (v1.A.5 CR-B1 — 17th vindication): callers may pass
+// Open-once seam (v1.A.5 17th vindication): callers may pass
 // `registryDb`; the flow opens its own client only when omitted.
 
 export type RepairMode = "dry-run" | "apply";

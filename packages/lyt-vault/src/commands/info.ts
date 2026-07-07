@@ -30,6 +30,18 @@ export function formatWritable(writable: true | false | "unknown", reason: strin
   return "unknown";
 }
 
+// 0.11.0 write/publish-gate split — the LOCAL-write axis, human rendering. An own
+// vault is a plain "yes" (writing here always works, no remote needed); a subscription
+// reads as a redirect hint, not a hard "no".
+export function formatLocalWritable(localWritable: boolean, reason: string): string {
+  if (localWritable) {
+    return reason === "own-vault" ? "yes" : "yes (subscribed — you have write access)";
+  }
+  return reason === "subscribed-unverifiable"
+    ? "no (subscribed — can't verify; edits may not sync, capture to a home vault)"
+    : "no (subscribed — edits won't sync; capture to a home vault)";
+}
+
 export function buildInfoCommand(): Command {
   const cmd = new Command("info");
   cmd
@@ -81,7 +93,11 @@ export function buildInfoCommand(): Command {
       // eslint-disable-next-line no-console
       console.log(`  status:            ${v.status}`);
       // eslint-disable-next-line no-console
-      console.log(`  writable:          ${formatWritable(v.writable, v.writableDetermination)}`);
+      console.log(
+        `  local-writable:    ${formatLocalWritable(v.localWritable, v.localWritableReason)}`,
+      );
+      // eslint-disable-next-line no-console
+      console.log(`  publishable:       ${formatWritable(v.publishable, v.publishableReason)}`);
       // eslint-disable-next-line no-console
       console.log(`  memscope:          ${v.memscopeRid ?? "-"}`);
       // eslint-disable-next-line no-console

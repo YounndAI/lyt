@@ -77,7 +77,7 @@ export interface AutomatorRunPlanArgs {
   automator: string;
   vault?: string;
   vaultPathOverride?: string;
-  // v1.A.5 CR-B1 open-once seam: when the caller already holds an open
+  // v1.A.5 open-once seam: when the caller already holds an open
   // registry client (e.g. a long-running CLI session sharing one connection
   // across multiple automator dispatches), pass it here to skip the inline
   // openRegistry() open/close pair. The caller owns lifecycle — closeAutomatorRunPlan
@@ -174,7 +174,7 @@ export async function closeAutomatorRunPlan(plan: AutomatorRunPlan): Promise<voi
   await closeVaultDb(plan.provenanceDb);
   await closeVaultDb(plan.auditDb);
   await closeVaultDb(plan.vaultDb);
-  // v1.A.5 CR-B1: skip closing registryDb when caller-supplied (caller owns
+  // v1.A.5 skip closing registryDb when caller-supplied (caller owns
   // lifecycle of pre-opened clients).
   if (!plan._registryDbCallerSupplied) {
     await closeRegistry(plan.registryDb);
@@ -187,7 +187,7 @@ export async function closeAutomatorRunPlan(plan: AutomatorRunPlan): Promise<voi
 // CLI calls this BEFORE handing the plan + runId to runFiveStep so the
 // event reflects "started from CLI" rather than "started in protocol".
 //
-// v1.A.5 CR-B13: payload now carries `automator_version` alongside
+// v1.A.5 payload now carries `automator_version` alongside
 // `automator_name` so downstream observers (lyt automator log, audit
 // review) can pin the exact bundled body version that ran. Caller-supplied
 // (extracted from the .yon file by the meta CLI's extractAutomatorVersion).

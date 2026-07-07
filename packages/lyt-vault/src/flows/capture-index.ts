@@ -71,7 +71,7 @@ export interface CaptureIndexArgs {
   // Vault-relative POSIX path of the figment just written (e.g.
   // "notes/2026-06-10-foo.md"). Same key shape as the FTS figment_rid.
   relPath: string;
-  // Open-once seam (v1.A.5 CR-B1). Threaded to the registry resolution +
+  // Open-once seam (v1.A.5 ). Threaded to the registry resolution +
   // the lane/arc rebuilds when supplied; caller owns lifecycle.
   registryDb?: Client | undefined;
   // FTS-only mode: skip the per-vault lanes/arcs rebuild (search stays fresh,

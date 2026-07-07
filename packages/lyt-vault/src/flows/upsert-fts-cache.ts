@@ -38,7 +38,7 @@
 // upsert (ledger → lanes → arcs → fts). Best-effort + non-fatal
 // per existing 3-call precedent.
 //
-// Open-once seam (v1.A.5 CR-B1): optional `lytDb?: Client`; when
+// Open-once seam (v1.A.5 ): optional `lytDb?: Client`; when
 // supplied, the caller owns lifecycle; when omitted, the flow opens +
 // closes its own client.
 
@@ -68,7 +68,7 @@ export interface UpsertFtsCacheResult {
 }
 
 export interface UpsertFtsCacheOpts {
-  // Open-once seam (v1.A.5 CR-B1 pattern). When supplied, the flow
+  // Open-once seam (v1.A.5 pattern). When supplied, the flow
   // uses the caller's lyt.db client and does NOT close it. When
   // omitted, the flow opens + closes its own.
   lytDb?: Client;

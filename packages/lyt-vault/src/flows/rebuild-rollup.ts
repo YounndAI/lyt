@@ -40,7 +40,7 @@
 // grandchild C via B: "vault:<C-hex>>vault:<B-hex>>vault:<A-hex>"
 // `>` reads as "rolls up into" + doesn't collide with the rid format.
 //
-// Open-once seam (v1.A.5 CR-B1): optional `registryDb?: Client`; when
+// Open-once seam (v1.A.5 ): optional `registryDb?: Client`; when
 // supplied the caller owns lifecycle; when omitted the flow opens +
 // closes its own.
 
@@ -83,7 +83,7 @@ export interface RebuildRollupArgs {
   // side (rebuild UPSERTs all current rows; aging happens at list time);
   // surfaced in result for caller telemetry.
   thresholdDays?: number;
-  // Open-once seam (v1.A.5 CR-B1).
+  // Open-once seam (v1.A.5 ).
   registryDb?: Client;
   // Deterministic timestamp override for `last_seen`. When omitted,
   // defaults to `new Date().toISOString()` at flow entry.

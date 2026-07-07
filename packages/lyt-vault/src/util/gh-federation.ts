@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
+import { firewall } from "./git-error-firewall.js";
 import { resolveRemoteUrl } from "./remote-url.js";
 import { withSpinner, type SpinnerOp } from "./spinner.js";
 
@@ -159,26 +160,34 @@ function spawnArgvVerbatim(
     ...(opts.encoding !== undefined ? { encoding: opts.encoding } : {}),
   };
 
-  if (!isWindows) {
-    // POSIX: no shell, argv passed verbatim to execvp. No word-split.
-    const out = execFileSync(exe, args as string[], baseOpts);
-    return typeof out === "string" ? out : "";
-  }
+  // A.1 firewall: narrate any spawn failure at the boundary. The invocation
+  // path below (.exe-direct / .cmd-shell-quoted) is UNCHANGED — only the throw
+  // is decorated. `firewall()` mutates the raw execFileSync error in place, so
+  // its `.stderr`/`.status`/`.code` survive for `inspectGhError`'s 404 classifier.
+  try {
+    if (!isWindows) {
+      // POSIX: no shell, argv passed verbatim to execvp. No word-split.
+      const out = execFileSync(exe, args as string[], baseOpts);
+      return typeof out === "string" ? out : "";
+    }
 
-  const resolved = resolveWindowsExecutable(exe);
-  if (resolved !== null && !resolved.needsShell) {
-    // Direct .exe/.com image — Node launches without a shell; argv verbatim.
-    const out = execFileSync(resolved.path, args as string[], baseOpts);
-    return typeof out === "string" ? out : "";
-  }
+    const resolved = resolveWindowsExecutable(exe);
+    if (resolved !== null && !resolved.needsShell) {
+      // Direct .exe/.com image — Node launches without a shell; argv verbatim.
+      const out = execFileSync(resolved.path, args as string[], baseOpts);
+      return typeof out === "string" ? out : "";
+    }
 
-  // Fallback: .cmd/.bat shim (or unresolved name). MUST go through cmd.exe.
-  // Quote the executable path + EACH arg so a space-bearing arg stays one
-  // token and shell metachars are inert (closes G.14 a review finding + the word-split).
-  const exePath = resolved !== null ? resolved.path : exe;
-  const quoted = buildShellCommand(exePath, args);
-  const out = execFileSync(quoted, [], { ...baseOpts, shell: true });
-  return typeof out === "string" ? out : "";
+    // Fallback: .cmd/.bat shim (or unresolved name). MUST go through cmd.exe.
+    // Quote the executable path + EACH arg so a space-bearing arg stays one
+    // token and shell metachars are inert (closes G.14 a review finding + the word-split).
+    const exePath = resolved !== null ? resolved.path : exe;
+    const quoted = buildShellCommand(exePath, args);
+    const out = execFileSync(quoted, [], { ...baseOpts, shell: true });
+    return typeof out === "string" ? out : "";
+  } catch (err) {
+    throw firewall(err, { op: "reach GitHub" });
+  }
 }
 
 // Build the single cmd.exe command string for the .cmd/.bat fallback path:
@@ -252,20 +261,26 @@ async function spawnArgvVerbatimAsync(
     ...(opts.env !== undefined ? { env: opts.env } : {}),
   };
 
-  if (!isWindows) {
-    await execFileAsync(exe, args as string[], baseOpts);
-    return;
+  // A.1 firewall: narrate any spawn failure at the boundary (invocation path
+  // unchanged). Mutates the raw error in place — `.stderr`/`.code` preserved.
+  try {
+    if (!isWindows) {
+      await execFileAsync(exe, args as string[], baseOpts);
+      return;
+    }
+    const resolved = resolveWindowsExecutable(exe);
+    if (resolved !== null && !resolved.needsShell) {
+      await execFileAsync(resolved.path, args as string[], baseOpts);
+      return;
+    }
+    // .cmd/.bat shim (or unresolved) — go through cmd.exe with each arg quoted
+    // (identical posture to the sync fallback path).
+    const exePath = resolved !== null ? resolved.path : exe;
+    const quoted = buildShellCommand(exePath, args);
+    await execFileAsync(quoted, [], { ...baseOpts, shell: true });
+  } catch (err) {
+    throw firewall(err, { op: "reach GitHub" });
   }
-  const resolved = resolveWindowsExecutable(exe);
-  if (resolved !== null && !resolved.needsShell) {
-    await execFileAsync(resolved.path, args as string[], baseOpts);
-    return;
-  }
-  // .cmd/.bat shim (or unresolved) — go through cmd.exe with each arg quoted
-  // (identical posture to the sync fallback path).
-  const exePath = resolved !== null ? resolved.path : exe;
-  const quoted = buildShellCommand(exePath, args);
-  await execFileAsync(quoted, [], { ...baseOpts, shell: true });
 }
 
 // Spinner-wrapped async gh/git runners. The spinner is a no-op when not on a
@@ -332,9 +347,12 @@ export const realFederationGhClient: FederationGhClient = {
       runGh(["api", "--silent", `/repos/${handle}/${repoName}`]);
       return true;
     } catch (err) {
-      const { is404, summary } = inspectGhError(err);
+      const { is404 } = inspectGhError(err);
       if (is404) return false;
-      throw new Error(`realFederationGhClient.repoExists(${handle}/${repoName}): ${summary}`);
+      // Non-404 (auth / network / 5xx): keep narration. `err` is already a
+      // FirewalledError from spawnArgvVerbatim; firewall() is idempotent and
+      // preserves its raw `.message` + `.stderr` for any upstream classifier.
+      throw firewall(err, { op: "reach GitHub" });
     }
   },
 

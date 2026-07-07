@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Lyt — federated markdown-vault mesh CLI. Meta package: pulls in @younndai/lyt-vault + @younndai/lyt-mesh + @younndai/lyt-skills, and ships a unified `lyt` binary.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -46,17 +46,15 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "clean": "rimraf --glob dist .turbo *.tsbuildinfo",
-    "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "node ../../scripts/check-no-vendored-deps.mjs --root ../.."
+    "clean": "rimraf --glob dist .turbo *.tsbuildinfo"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
-    "@younndai/lyt-mcp": "^0.10.0",
-    "@younndai/lyt-mesh": "^0.10.0",
-    "@younndai/lyt-runner": "^0.10.0",
-    "@younndai/lyt-skills": "^0.10.0",
-    "@younndai/lyt-vault": "^0.10.0",
+    "@younndai/lyt-mcp": "^0.11.0",
+    "@younndai/lyt-mesh": "^0.11.0",
+    "@younndai/lyt-runner": "^0.11.0",
+    "@younndai/lyt-skills": "^0.11.0",
+    "@younndai/lyt-vault": "^0.11.0",
     "commander": "^12.1.0"
   },
   "devDependencies": {

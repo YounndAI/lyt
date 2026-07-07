@@ -105,7 +105,7 @@ export interface PrimerGenerateArgs {
   nowIso?: string;
   // When true, the flow renders + returns markdown but skips disk write.
   dryRun?: boolean;
-  // Open-once seam (v1.A.5 CR-B1 pattern).
+  // Open-once seam (v1.A.5 pattern).
   registryDb?: Client;
 }
 

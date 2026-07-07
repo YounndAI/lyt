@@ -385,8 +385,8 @@ function buildPutInSection(): string {
     "- Never fabricate purpose/topic — ask. Never author-fill `links-out-of-vault` (scanner-filled).",
     "- Never write YON in a user Figment (YON is for `.lyt/*` system files only).",
     "- Capture writes the file only — it does NOT git. Sync is separate (`[lyt.sync]`).",
-    "- Same ceremony, different home: `/lyt-plan` `/lyt-progress` `/lyt-result` `/lyt-retro`",
-    "  `/lyt-insight` `/lyt-decision` `/lyt-handoff` -> work-management Figments.",
+    "- Every durable note — a thought, a decision, a plan, a result — lands via `/lyt-capture`;",
+    "  categorize with `topic:` (e.g. `insight`, `decision`, `planning`, `result`).",
     "",
     "**WHERE it lands:** default `<vault>/notes/YYYY-MM-DD-<slug>.md`. `lyt capture --dir",
     "<vault-relative>` relocates it (fail-closed: rejects empty / absolute / `..`-escape / vault-root",
@@ -436,14 +436,21 @@ function buildUntrustedSection(): string {
 
 function buildGateSection(): string {
   return [
-    "## `[lyt.gate]` Write gate — before ANY write",
+    "## `[lyt.publish-gate]` Publish gate — before you PUSH / PUBLISH / SHARE (NOT before local writes)",
     "",
-    "`lyt vault info <name> --json` -> read the `writable` field (`vault.writable`):",
-    "true = proceed | false = offer {save local-only, capture to home vault, request access}",
-    '| "unknown" = first run `lyt vault refresh <name>` (re-probes gh write access + refreshes the',
-    "cached verdict — the deterministic remedy for a stale/unknown verdict), then re-read `writable`.",
-    "Only if it stays `unknown` after the refresh: PAUSE and ASK. The `writableDetermination` reason",
-    "tailors the prompt.",
+    "A LOCAL write to your OWN vault (capture, heal, backfill) NEVER gates — write freely. If you must",
+    "check, read `localWritable` from `lyt vault info <name> --json` (`vault.localWritable`): for your",
+    "own vault it is ALWAYS `true` — even with no remote or `gh` offline. Only a SUBSCRIBED vault is",
+    "`localWritable:false` — then write-with-redirect (offer to put it in a home vault), NEVER block,",
+    "NEVER silently strand the edit. `localWritableReason` tailors that redirect.",
+    "",
+    "The gate is for going OUTWARD. Before a PUSH / PUBLISH / SHARE, read the `publishable` field",
+    '(`vault.publishable`): `true` = proceed | `false`/`"unknown"` = save locally + explain, never block',
+    'the local write. On `"unknown"`, first run `lyt vault refresh <name>` (re-probes gh push access +',
+    "refreshes the cached verdict — the deterministic remedy for a stale/unknown verdict), then re-read",
+    "`publishable`. Only if it stays `unknown` after the refresh: PAUSE and ASK before pushing. The",
+    "`publishableReason` tailors the prompt. (`writable` is a DEPRECATED alias of `publishable` — do",
+    "NOT gate a LOCAL write on it.)",
   ].join("\n");
 }
 
@@ -456,11 +463,56 @@ function buildSyncSection(): string {
   ].join("\n");
 }
 
+// stay-current slice — teach the agent to keep the install current. The
+// agent-first update path: even before the CLI verbs, an agent that reads this
+// knows to check + offer. Pairs with the `outdated`/`update` verbs + the
+// doctor/init currency line.
+function buildUpdateSection(): string {
+  return [
+    "## `[lyt.update]` Staying current — check, then offer (never auto-update)",
+    "",
+    "Lyt ships often. Two npm-style verbs keep an install current: `lyt outdated` (read-only —",
+    "is a newer version published on the alpha channel?) and `lyt update` (installs it, after a",
+    "confirmation). `lyt doctor` and `lyt init` also surface a one-line currency check.",
+    "",
+    "Be proactive, never auto-act: on a fresh session, or when the handler hits a bug that smells",
+    "version-related, run `lyt outdated`; if it reports a newer version, OFFER `lyt update` (it",
+    "confirms before changing the global install — and refuses to run non-interactively without",
+    "`--yes`). An unreachable registry is NOT an error — say so and move on.",
+  ].join("\n");
+}
+
 function buildDestructiveSection(): string {
   return [
     "## `[lyt.destructive]` Destructive verbs need handler confirmation",
     "",
     "`lyt vault delete|forget`, `git push --force`. Non-idempotent by design.",
+  ].join("\n");
+}
+
+function buildAdoptSection(): string {
+  return [
+    "## `[lyt.adopt]` Guided adopt — bring an existing Obsidian vault into the pod",
+    "",
+    "`/lyt-adopt` (or `lyt vault adopt <path>`) upgrades an existing Obsidian vault into a Lyt",
+    "vault: additive-only (`.lyt/` is created; your `.md` files are NEVER touched), then it",
+    "registers, homes, links patterns, and indexes the vault so search/recall hit immediately.",
+    "The skill gathers these before calling adopt:",
+    "",
+    "- **name** — the vault name (`{mesh}/{vault}` or a leaf). Defaults to owner/repo when the",
+    "  path is under `~/lyt/vaults`, else the folder basename. Override with `--name`.",
+    "- **mesh** — the home mesh, DEFAULT `personal`. A bare adopt homes the vault into",
+    "  `personal/<leaf>` (find-or-create the `personal` mesh) instead of leaving it ORPHAN.",
+    "  Override with `--mesh <name>`.",
+    "- **backfill** (DEFERRED — OFFER-ONLY) — re-indexing historical figments / rebuilding all",
+    "  tiers beyond the on-adopt index. The skill only OFFERS it as a future step; it is NOT",
+    "  implemented here. Do not promise it runs.",
+    "- **remote** (DEFERRED — OFFER-ONLY) — wiring a GitHub remote / first push. Also offer-only;",
+    "  adopt never contacts a remote. Point the user at `/lyt-sync` once a remote exists.",
+    "",
+    "On adopt, pattern links are rebuilt per-machine under `.lyt/patterns/` (machine-local,",
+    "gitignored, Lyt-owned) and the vault's content caches are rebuilt. Adopt is the inverse of",
+    "`vault abandon` (the clean anti-lock-in leave: removes only `.lyt/`, never your markdown).",
   ].join("\n");
 }
 
@@ -605,6 +657,8 @@ function buildVerbsSection(): string {
     "- *recovery:* `vault snapshot` / `restore` / `freeze` / `unfreeze`.",
     "- *maintenance:* `reindex` (rebuild content caches), `vault|mesh rebuild-rollup`,",
     "  `repair [--dry-run|--apply]`, `doctor` (see `[lyt.heal]`).",
+    "- *stay current:* `outdated` (is a newer version published?), `update` (install it,",
+    "  confirmation-gated) — see `[lyt.update]`.",
   ].join("\n");
 }
 
@@ -722,10 +776,10 @@ async function buildSkillIndex(skillsDir: string): Promise<string> {
     ...rows,
     "",
     "> The WHEN-USER-SAYS fast-path tables above cover the high-traffic skills (recall/search/pod/",
-    "> primer/sync); the work-management skills (`/lyt-plan` `/lyt-progress` `/lyt-result` `/lyt-retro`",
-    "> `/lyt-insight` `/lyt-decision` `/lyt-handoff`) route via this full index rather than the fast",
-    "> path. Note: `lyt-version` in `lyt skills list` output is the per-skill version COLUMN (a",
-    "> maintenance field), not a skill — it is not counted in the total above.",
+    "> primer/sync); the remaining skills (`/lyt-capture` `/lyt-pattern` `/lyt-alias` `/lyt-adopt`",
+    "> `/lyt-update`) route via this full index rather than the fast path. Note: `lyt-version` in",
+    "> `lyt skills list` output is the per-skill version COLUMN (a maintenance field), not a skill —",
+    "> it is not counted in the total above.",
   ].join("\n");
 }
 
@@ -769,6 +823,10 @@ export async function generateAgentManual(args: AgentManualArgs): Promise<AgentM
     buildAddressingSection(),
     "",
     buildSyncSection(),
+    "",
+    buildAdoptSection(),
+    "",
+    buildUpdateSection(),
     "",
     buildDestructiveSection(),
     "",

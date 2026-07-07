@@ -27,7 +27,12 @@ import {
   type VaultRow,
 } from "../registry/repo.js";
 import { computeDisplayName, vaultOriginCoordinate } from "../registry/vault-addressing.js";
-import { deriveVaultWritable, type WritabilityVerdict } from "./writability.js";
+import {
+  deriveLocalWritable,
+  deriveVaultWritable,
+  type LocalWritability,
+  type WritabilityVerdict,
+} from "./writability.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 import { detectLicenseFromContent, type DetectedLicense } from "../util/license-detect.js";
 import { ridsEqual } from "../util/uuid7.js";
@@ -73,9 +78,20 @@ export interface InfoFlowResult {
     registeredAt: string;
     lastVerifiedAt: string | null;
     verifyFailCount: number;
-    // v1.G.2 — tri-state writability derived on-demand from
-    // (mesh_vaults.role, gh viewerPermission). Path C: no schema column;
-    // value is recomputed per call (in-process 1-min cache).
+    // 0.11.0 write/publish-gate split — TWO distinct axes (see flows/writability.ts):
+    //   localWritable — "can I write a figment to disk here?" role-derived; the
+    //     user's own vault is ALWAYS true with no gh probe (no-remote / gh-offline
+    //     never gates a LOCAL write — dogfood F10). This is what an agent should
+    //     read before a local capture/heal.
+    //   publishable — "can I push/share this outward?" the gh push verdict; this is
+    //     what a push/publish/share flow should read.
+    localWritable: LocalWritability["localWritable"];
+    localWritableReason: LocalWritability["reason"];
+    publishable: WritabilityVerdict["writable"];
+    publishableReason: WritabilityVerdict["reason"];
+    // v1.G.2 — DEPRECATED alias of `publishable` (the gh push verdict), retained
+    // for back-compat this version; consumers gating a LOCAL write must move to
+    // `localWritable`, and push/share consumers to `publishable`. Removed next minor.
     writable: WritabilityVerdict["writable"];
     writableDetermination: WritabilityVerdict["reason"];
   };
@@ -141,11 +157,11 @@ export async function infoVaultFlow(
       }
     }
 
-    const writability = await deriveVaultWritable(
-      vault,
-      db,
-      opts.gh !== undefined ? { gh: opts.gh } : {},
-    );
+    const ghOpts = opts.gh !== undefined ? { gh: opts.gh } : {};
+    // Order matters: deriveVaultWritable runs the V-A-10 git_url self-heal (below);
+    // deriveLocalWritable reuses the now-cached verdict for any subscription probe.
+    const writability = await deriveVaultWritable(vault, db, ghOpts);
+    const localWritability = await deriveLocalWritable(vault, db, ghOpts);
 
     // V-A-10: deriveVaultWritable self-heals a null git_url from the live
     // origin and persists it. `vault` was loaded before that heal, so re-read
@@ -173,6 +189,11 @@ export async function infoVaultFlow(
         registeredAt: vault.registeredAt,
         lastVerifiedAt: vault.lastVerifiedAt,
         verifyFailCount: vault.verifyFailCount,
+        localWritable: localWritability.localWritable,
+        localWritableReason: localWritability.reason,
+        publishable: writability.writable,
+        publishableReason: writability.reason,
+        // DEPRECATED alias of `publishable` (see the interface note).
         writable: writability.writable,
         writableDetermination: writability.reason,
       },

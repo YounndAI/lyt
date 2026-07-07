@@ -25,7 +25,7 @@ import {
   regenInstalledPrimerSection,
   type InstalledPatternSummary,
 } from "../templates/priming.js";
-import { getUserPatternsDir } from "../util/pattern-paths.js";
+import { getUserPatternsDir, getVaultPatternsLinkDir } from "../util/pattern-paths.js";
 import { parsePatternYon } from "../yon/pattern.js";
 import { parseVaultYon } from "../yon/parse.js";
 
@@ -47,27 +47,20 @@ function readVaultCreatedAt(vaultPath: string): string {
   return new Date().toISOString();
 }
 
-// Suggested skills-by-pattern mapping (matches the 10 default skills shipped in
-// @younndai/lyt-skills@0.2.0). Used to populate the "→ skills:" annotation.
-// External patterns get an empty skills list (the meta `/lyt-pattern` skill covers
-// arbitrary-pattern dispatch).
+// Suggested skills-by-pattern mapping. Used to populate the "→ skills:"
+// annotation on linked patterns. After the 0.11.0 opinion cut, the only bundled
+// pattern is knowledge-capture, which has dedicated skill wrappers
+// (`/lyt-capture` + `/lyt-recall`). Any pattern the user installs themselves
+// gets an empty skills list here (the meta `/lyt-pattern run <pattern> <verb>`
+// skill covers dispatch).
 const DEFAULT_PATTERN_SKILLS: Record<string, string[]> = {
-  "work-management": [
-    "/lyt-plan",
-    "/lyt-progress",
-    "/lyt-result",
-    "/lyt-retro",
-    "/lyt-insight",
-    "/lyt-handoff",
-  ],
   "knowledge-capture": ["/lyt-capture", "/lyt-recall"],
-  "decision-log": ["/lyt-decision"],
 };
 
-// Walk <vaultPath>/Patterns/ and return a summary per linked pattern (with verbs from
+// Walk <vaultPath>/.lyt/patterns/ and return a summary per linked pattern (with verbs from
 // the master ~/lyt/patterns/<name>/pattern.yon and a best-effort skill mapping).
 export function collectInstalledPatterns(vaultPath: string): InstalledPatternSummary[] {
-  const patternsDir = join(vaultPath, "Patterns");
+  const patternsDir = getVaultPatternsLinkDir(vaultPath);
   if (!existsSync(patternsDir)) return [];
   const masterDir = getUserPatternsDir();
   const out: InstalledPatternSummary[] = [];

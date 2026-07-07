@@ -16,6 +16,8 @@
 
 import { execFileSync } from "node:child_process";
 
+import { firewall } from "./git-error-firewall.js";
+
 export interface GhRepoInfo {
   description: string;
   topics: string[];
@@ -34,10 +36,15 @@ export interface GhClient {
 
 export const realGhClient: GhClient = {
   async getRepo(owner, name): Promise<GhRepoInfo> {
-    const raw = execFileSync("gh", ["api", `/repos/${owner}/${name}`], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let raw: string;
+    try {
+      raw = execFileSync("gh", ["api", `/repos/${owner}/${name}`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      throw firewall(err, { op: "reach GitHub" });
+    }
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const description =
       typeof parsed["description"] === "string" ? (parsed["description"] as string) : "";
@@ -58,7 +65,11 @@ export const realGhClient: GhClient = {
     for (const t of topics) {
       args.push("--add-topic", t);
     }
-    execFileSync("gh", args, { stdio: ["ignore", "ignore", "pipe"] });
+    try {
+      execFileSync("gh", args, { stdio: ["ignore", "ignore", "pipe"] });
+    } catch (err) {
+      throw firewall(err, { op: "reach GitHub" });
+    }
   },
 };
 

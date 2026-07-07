@@ -36,16 +36,24 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 
 import {
+  CaptureOperation,
   captureIndexFlow,
+  closeOpLog,
   closeRegistry,
+  closeVaultDb,
   getVaultByName,
   listVaults,
+  openAuditDb,
+  openOpLog,
   rankVaultTopicsFlow,
   openRegistry,
   patternRunFlow,
+  recordOperationAudit,
+  type PatternRunResult,
   type TopicCount,
   type VaultRow,
 } from "@younndai/lyt-vault";
+import type { Client } from "@libsql/client";
 
 const CAPTURE_PATTERN = "knowledge-capture";
 const CAPTURE_VERB = "capture";
@@ -215,14 +223,11 @@ async function runCapture(text: string | undefined, opts: CaptureCliOpts): Promi
   // topics/<topic-slug>/; else the template's notes/ default stands. The
   // resulting dir is fail-closed-guarded inside patternRunFlow (resolveCaptureDir).
   const dir = resolveTopicFolderDir(opts.dir, opts.topicFolder, topic);
-  const r = await patternRunFlow({
-    patternName: CAPTURE_PATTERN,
-    verbId: CAPTURE_VERB,
-    vaultName,
-    slug,
-    ...(dir !== undefined ? { dir } : {}),
-    vars,
-  });
+  // A.3 — route the write through the capture Operation so it records an
+  // undoable op in the pod-level op-log (`lyt undo`). Best-effort: if the op-log
+  // can't be opened, fall back to a direct capture — the write is load-bearing;
+  // undoability is a bonus, never a reason to fail a capture.
+  const r = await captureThroughOp(title, vaultName, slug, dir, vars);
 
   if (opts.json === true) {
     // eslint-disable-next-line no-console
@@ -246,6 +251,73 @@ async function runCapture(text: string | undefined, opts: CaptureCliOpts): Promi
   if (r.indexDeferred === true && r.indexNote !== undefined) {
     // eslint-disable-next-line no-console
     console.log(`  ⚠ ${r.indexNote}`);
+  }
+}
+
+// A.3 — perform the capture through the CaptureOperation (which records an
+// undoable op) when the pod-level op-log is available, else fall back to a direct
+// pattern-run. Either way returns the SAME PatternRunResult the caller renders —
+// the Operation adds the op-log write, not a new output shape. The op-log is
+// opened+closed per capture (its cost is what makes `lyt undo` possible).
+async function captureThroughOp(
+  title: string,
+  vaultName: string,
+  slug: string,
+  dir: string | undefined,
+  vars: Record<string, string>,
+): Promise<PatternRunResult> {
+  const runArgs = {
+    patternName: CAPTURE_PATTERN,
+    verbId: CAPTURE_VERB,
+    vaultName,
+    slug,
+    ...(dir !== undefined ? { dir } : {}),
+    vars,
+  };
+  let opLogDb: Client | null = null;
+  try {
+    opLogDb = await openOpLog();
+  } catch {
+    opLogDb = null; // op-log unavailable → capture still works, just not undoable this run
+    // Surface the degraded state to stderr (never stdout / --json), mirroring the
+    // indexDeferred soft-note posture — else the capture is silently non-undoable.
+    // eslint-disable-next-line no-console
+    console.error("  ⚠ undo is unavailable for this capture (couldn't open the local history).");
+  }
+  if (opLogDb === null) {
+    return patternRunFlow(runArgs);
+  }
+  try {
+    const op = new CaptureOperation(
+      { vaultName, title, slug, ...(dir !== undefined ? { dir } : {}), vars },
+      {
+        opLogDb,
+        // a review finding fix-pass — record the op-level audit entry into the vault's own
+        // audit ledger (`op.capture`, target = the figment path). Previously this
+        // seam existed but no caller passed it, so the entry was dark. Best-effort:
+        // a capture must NEVER fail because its audit note didn't land, so the sink
+        // opens/closes the vault's audit db itself and swallows its own errors.
+        audit: async (operation, receipt, ctx) => {
+          let auditDb: Client | null = null;
+          try {
+            auditDb = await openAuditDb(ctx.vaultPath);
+            await recordOperationAudit(ctx.vaultPath, auditDb, operation, receipt, {
+              targetType: "figment",
+              targetId: ctx.relPath,
+            });
+          } catch {
+            // audit is a bonus; never block or fail the capture on it
+          } finally {
+            if (auditDb !== null) await closeVaultDb(auditDb);
+          }
+        },
+      },
+    );
+    await op.apply();
+    // apply() always sets lastResult before any non-throwing return.
+    return op.lastResult!;
+  } finally {
+    await closeOpLog(opLogDb);
   }
 }
 

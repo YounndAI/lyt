@@ -27,7 +27,8 @@ lyt init
 `gh auth login` if needed, installs the Lyt skills and agent manual, probes
 GitHub for an existing pod on your handle (cross-machine adopt-detect), creates
 your `personal` mesh and first vault, forges Your Pod (`{handle}/lyt-pod`), and
-captures a welcome note. Pass `--dry-run` to preview every step without writing.
+captures a welcome note. Run `lyt init --wizard --dry-run` to preview every step
+without writing (`--dry-run` is valid only in combination with `--wizard`).
 
 ## 3. Or create a vault by hand
 

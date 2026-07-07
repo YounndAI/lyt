@@ -24,41 +24,36 @@
 
 ## What is this?
 
-`@younndai/lyt-skills` is where [Lyt™](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: sixteen harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can capture notes, search your pod, record decisions, write plans, retros, and handoffs, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
+`@younndai/lyt-skills` is where [Lyt™](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: eleven harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can capture notes, search your pod, prime on context, adopt a vault, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
 
-Most skills wrap a pattern verb from the `lyt pattern run` runtime, so structured knowledge work (plans, results, decisions, captures) shows up as first-class agent skills inside any vault; the read/orient + addressing skills (`/lyt-pod`, `/lyt-search`, `/lyt-primer-context`, `/lyt-mesh-explore`, `/lyt-sync`, `/lyt-alias`) wrap the corresponding CLI verbs directly. Pairs with [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault), which ships the four default patterns the skills resolve against.
+The `/lyt-capture` skill wraps the `knowledge-capture` pattern verb from the `lyt pattern run` runtime, so structured note capture shows up as a first-class agent skill inside any vault; the read/orient + addressing + lifecycle skills (`/lyt-pod`, `/lyt-search`, `/lyt-recall`, `/lyt-primer-context`, `/lyt-mesh-explore`, `/lyt-sync`, `/lyt-alias`, `/lyt-adopt`, `/lyt-update`) wrap the corresponding CLI verbs directly. Pairs with [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault), which ships the bundled `knowledge-capture` pattern the capture/recall skills resolve against (workflow patterns are bring-your-own via `lyt pattern install`).
 
 ## Install
 
 ```bash
 npm install -g @younndai/lyt@alpha   # the meta package bundles lyt-skills
-lyt skills install                   # links the 16 SKILL.md files into your harness(es)
+lyt skills install                   # links the 11 SKILL.md files into your harness(es)
 ```
 
 Tri-runtime: the installer detects Claude Code, Codex, and generic agent runtimes, and installs per-runtime (symlink by default, `--copy` for regular directories).
 
-## The 16 skills
+## The 11 skills
 
 | Skill                 | Wraps                                              | Use it when                                                  |
 | --------------------- | -------------------------------------------------- | ------------------------------------------------------------ |
 | `/lyt-capture`        | knowledge-capture + capture                        | Saving a Figment (markdown note) into a vault.               |
-| `/lyt-recall`         | knowledge-capture + recall                         | Keyword search across a single vault.                        |
+| `/lyt-recall`         | `lyt search --vault` (tiered cascade)              | Ranked search across a single vault.                         |
 | `/lyt-search`         | `lyt search` (tiered cascade)                      | Ranked search across the whole pod, a mesh, or a vault.      |
 | `/lyt-pod`            | `lyt mesh list` + `lyt vault list`                 | Enumerating every mesh + vault on the machine.               |
 | `/lyt-mesh-explore`   | `lyt mesh info`                                    | Drilling into one mesh's members and metadata.               |
 | `/lyt-alias`          | `lyt alias` set/`--list`/`--remove`                | Managing pod-local vault aliases (name → rid).               |
 | `/lyt-primer-context` | `lyt primer` + `lyt vault info`                    | Priming an agent with vault/mesh/pod context.                |
 | `/lyt-sync`           | gated git pull/commit/push                         | Syncing a vault with its remote under the writable gate.     |
-| `/lyt-plan`           | work-management + plan                             | Drafting a multi-phase plan before implementation.           |
-| `/lyt-progress`       | work-management + progress                         | Mid-session progress update or blocker write-up.             |
-| `/lyt-result`         | work-management + result                           | Session-end result with per-clause acceptance.               |
-| `/lyt-retro`          | work-management + retro                            | Post-implementation retrospective.                           |
-| `/lyt-insight`        | work-management + insight                          | Promoting a result into a durable insight.                   |
-| `/lyt-handoff`        | work-management + handoff                          | Writing the next session's handoff brief.                    |
-| `/lyt-decision`       | decision-log + decision                            | Recording a decision + rationale pair.                       |
+| `/lyt-adopt`          | `lyt vault adopt`                                  | Bringing an existing Obsidian vault into the pod.            |
+| `/lyt-update`         | `lyt outdated` + `lyt update`                      | Checking for and installing a newer Lyt release.             |
 | `/lyt-pattern`        | meta-skill over `lyt pattern *`                    | Listing, installing, linking patterns from an agent context. |
 
-Each skill autodetects the active vault + project via `lyt vault info --by-path`, the `LYT_ACTIVE_VAULT` env var, or an explicit `--vault` flag, then calls `lyt pattern run <pattern> <verb>` to write the file at the resolved path.
+Each skill autodetects the active vault via `lyt vault info --by-path`, the `LYT_ACTIVE_VAULT` env var, or an explicit `--vault` flag, then calls the CLI verb (or `lyt pattern run <pattern> <verb>` for `/lyt-capture`) at the resolved path.
 
 ## The capture contract
 
@@ -81,7 +76,7 @@ On an interactive terminal, `/lyt-capture` also resolves **where** the note land
 - A **pattern** is data: a `pattern.yon` descriptor + a `templates/` folder of markdown templates with frontmatter. Patterns live at `~/lyt/patterns/`.
 - A **skill** is a thin SKILL.md adapter an agent harness loads; it calls the pattern runtime.
 
-Fork any default pattern (`lyt pattern fork work-management --as wm-custom`) without modifying the master. See `lyt help patterns` and `lyt help skills`.
+Fork any installed pattern (`lyt pattern fork knowledge-capture --as kc-custom`) without modifying the master. See `lyt help patterns` and `lyt help skills`.
 
 ## The Lyt toolchain
 

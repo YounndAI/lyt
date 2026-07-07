@@ -49,6 +49,7 @@ import {
   readPackageVersion,
   resolveRuntimeDestination,
 } from "./agent-manual.js";
+import { checkCurrency, type CurrencyResult } from "./currency.js";
 import { findLegacyAgentFiles } from "../util/agent-file-paths.js";
 import { baseTopicsForClass } from "../scaffold/github-defaults.js";
 import { parseOwnerRepoFromUrl, realGhClient, type GhClient } from "../util/gh.js";
@@ -110,6 +111,9 @@ export interface DoctorOptions {
   // Test seam — override the pod root the identity check reads. Defaults to
   // getFederationRoot() (the flat `~/lyt/pod/`).
   podRootResolver?: (() => string) | undefined;
+  // stay-current slice — currency check seam. Defaults to checkCurrency() (a
+  // throttled, offline-silent npm probe). Tests inject a fake.
+  currencyChecker?: (() => Promise<CurrencyResult>) | undefined;
   // Phase E — GitHub client seam for the topic-conformance check. Defaults to
   // realGhClient (live `gh api`). Tests inject a fake. The check only runs when
   // gh is authenticated AND a client is present; otherwise it emits `info`
@@ -264,6 +268,23 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
     });
   }
 
+  // stay-current slice — version currency. WARN (not fail) when behind: Lyt is
+  // fully usable on an older version. Throttled (~once/day cache) + offline-silent
+  // via checkCurrency, so a doctor run never blocks/fails on an unreachable registry.
+  const currency = await (opts.currencyChecker ?? (() => checkCurrency()))();
+  checks.push({
+    id: "lyt.currency",
+    group: "lyt",
+    label: "Lyt version currency",
+    status: currency.stale ? "warn" : currency.offline ? "info" : "pass",
+    message: currency.offline
+      ? `${currency.installed} (couldn't reach npm to check for updates)`
+      : currency.stale
+        ? `newer available: ${currency.latest} (installed ${currency.installed})`
+        : `up to date (${currency.installed})`,
+    remediation: currency.stale ? "Run: lyt update" : undefined,
+  });
+
   const registryChecks = await checkRegistry({ sampleLimit, full: opts.full === true });
   for (const r of registryChecks) checks.push(r);
 
@@ -313,6 +334,8 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
       // / `lyt vault reconcile --apply`. README/scaffold seeds are exempt (the
       // shared isIndexable funnel excludes them).
       checks.push(await checkFrontmatterContract(db, { sampleLimit, full: opts.full === true }));
+      // Inc1 Phase 0 — version-axis sibling (migration candidates). Dormant at v1.
+      checks.push(await checkFrontmatterVersion(db, { sampleLimit, full: opts.full === true }));
     } finally {
       await closeRegistry(db);
     }
@@ -1900,6 +1923,91 @@ export async function checkFrontmatterContract(
     label: `${label} (${sampleLabel})`,
     status: "pass",
     message: `${subjects.length} sampled vault(s); all figments carry contract-valid frontmatter`,
+  };
+}
+
+// Increment 1 · Phase 0 — the version-axis sibling of checkFrontmatterContract.
+// Reports Figments whose stamped contract version is behind the current one
+// (migration candidates), reusing scanFrontmatterContract's already-computed
+// `behind` axis. DETECT-ONLY — doctor never mutates.
+//
+// DORMANT at v1: every unstamped Figment reads as the baseline, so `behind` is
+// empty and this check always PASSES today. It lights up when the frontmatter
+// contract first bumps to v2 — pre-existing Figments surface here and the
+// remediation points at the reconcile surfacing (the migration write-apply heal
+// rides the Phase-A Operation primitive). `opts.targetVersion` is a testability
+// seam (defaults to the live contract version; a test overrides it to populate
+// `behind` before a real v2 exists).
+export async function checkFrontmatterVersion(
+  db: Client,
+  opts: { sampleLimit: number; full: boolean; targetVersion?: number },
+): Promise<CheckResult> {
+  const id = "vaults.frontmatter-version";
+  const group = "vaults";
+  const label = "figment frontmatter is at the current contract version";
+
+  const active = (await listVaults(db)).filter((v) => v.status === "active" && existsSync(v.path));
+  if (active.length === 0) {
+    return { id, group, label, status: "pass", message: "no active vaults to check" };
+  }
+  const subjects = opts.full ? active : active.slice(0, opts.sampleLimit);
+  const sampleLabel = opts.full
+    ? `all ${active.length}`
+    : `sample ${subjects.length}/${active.length}`;
+
+  const behind: { name: string; count: number; targetVersion: number; samples: string[] }[] = [];
+  const probeErrors: { name: string; reason: string }[] = [];
+  for (const v of subjects) {
+    try {
+      const scan = scanFrontmatterContract(v.path, opts.targetVersion);
+      if (scan.behind.length > 0) {
+        behind.push({
+          name: v.name,
+          count: scan.behind.length,
+          targetVersion: scan.targetVersion,
+          samples: scan.behind.slice(0, 5).map((c) => c.relPath),
+        });
+      }
+    } catch (err) {
+      probeErrors.push({ name: v.name, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  if (behind.length > 0) {
+    const totalBehind = behind.reduce((n, b) => n + b.count, 0);
+    const target = behind[0]!.targetVersion;
+    return {
+      id,
+      group,
+      label: `${label} (${sampleLabel})`,
+      status: "warn",
+      message: `${totalBehind} figment(s) across ${behind.length} vault(s) are behind contract v${target}: ${behind
+        .map((b) => `${b.name} (${b.count})`)
+        .join(", ")}`,
+      remediation: `Run: ${behind
+        .map((b) => `lyt vault reconcile '${b.name}'`)
+        .join(" ; ")} to list the version-behind figments (the migration heal lands with the contract bump).`,
+      detail: { behind, probeErrors: probeErrors.length > 0 ? probeErrors : undefined },
+    };
+  }
+  if (probeErrors.length > 0) {
+    return {
+      id,
+      group,
+      label: `${label} (${sampleLabel})`,
+      status: "warn",
+      message: `${probeErrors.length} vault(s) could not be scanned for version drift: ${probeErrors
+        .map((p) => p.name)
+        .join(", ")}`,
+      detail: { probeErrors },
+    };
+  }
+  return {
+    id,
+    group,
+    label: `${label} (${sampleLabel})`,
+    status: "pass",
+    message: `${subjects.length} sampled vault(s); all figments at the current contract version`,
   };
 }
 

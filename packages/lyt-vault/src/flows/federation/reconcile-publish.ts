@@ -37,6 +37,7 @@ import {
   type FederationRepoVisibility,
 } from "../../util/gh-federation.js";
 import { runGit as defaultRunGit } from "../../util/git-run.js";
+import { narrate } from "../../util/git-error-firewall.js";
 import { isPermissionDeniedPush } from "../../util/push-classify.js";
 import { isValidGhHandle } from "../../util/identity.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
@@ -511,8 +512,10 @@ async function publishOneVault(
           return {
             ...base,
             status: "conflict",
+            // firewall-C1 fix-pass — plain conflict language (no git noun); this
+            // message renders on `lyt sync` via printPublishHuman.
             message:
-              "rebase conflict pulling remote changes — resolve with git, then re-run `lyt sync` (no data was overwritten)",
+              "This vault changed here and in your online copy at the same time, so Lyt couldn't combine them automatically. Your notes are safe and unchanged — nothing was overwritten. Re-run `lyt sync` to try again.",
           };
         }
         pulled = true;
@@ -530,23 +533,28 @@ async function publishOneVault(
       message: pulled ? "rebased remote changes + pushed" : "pushed",
     };
   }
-  // a permission-denied push is TERMINAL: surface ONE actionable line
-  // (suppress the raw `fatal: unable to access …` stderr) and flag terminal so
-  // the drain loop does not retain it as a resumable outbox op.
+  // a permission-denied push is TERMINAL: surface ONE actionable line and flag
+  // terminal so the drain loop does not retain it as a resumable outbox op.
+  // firewall-C1 fix-pass — narrate the denial into plain sense (the firewall's
+  // `auth` narration) instead of naming `gh auth status` + the remote; add the
+  // read-only hint plainly. Renders on `lyt sync` via printPublishHuman.
   if (isPermissionDeniedPush(pushed.stderr)) {
+    const narrated = narrate(pushed.stderr, { op: "save your notes online" });
     return {
       ...base,
       status: "failed",
       terminal: true,
       message:
-        `push denied — you don't have push access to ${repoName}. ` +
-        `If this is a vault you subscribed to, it's read-only (pull-only); capture into a home vault instead. ` +
-        `If it's your own repo, check 'gh auth status' and your remote URL.`,
+        `${narrated.plain} ${narrated.nextAction} ` +
+        `(If this is a vault you only subscribed to, it's read-only — save into one of your own vaults instead.)`,
     };
   }
+  // firewall-C1 fix-pass — the raw-stderr splice (the literal C1 leak) is replaced
+  // by the firewall narration; raw stderr is dropped from the human message.
+  const narrated = narrate(pushed.stderr, { op: "save your notes online" });
   return {
     ...base,
     status: "failed",
-    message: `push failed: ${pushed.stderr.trim().slice(0, 200)}`,
+    message: `${narrated.plain} ${narrated.nextAction}`,
   };
 }

@@ -19,6 +19,7 @@ import { join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName } from "../registry/repo.js";
+import { getVaultPatternsLinkDir } from "../util/pattern-paths.js";
 import { regenAgentsMd } from "./agents-md-regen.js";
 
 export interface PatternUnlinkArgs {
@@ -45,7 +46,7 @@ export async function patternUnlinkFlow(args: PatternUnlinkArgs): Promise<Patter
   } finally {
     await closeRegistry(db);
   }
-  const linkPath = join(vaultPath, "Patterns", args.patternName);
+  const linkPath = join(getVaultPatternsLinkDir(vaultPath), args.patternName);
   if (!existsSync(linkPath)) {
     return {
       patternName: args.patternName,

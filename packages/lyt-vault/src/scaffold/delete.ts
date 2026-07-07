@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
-import { existsSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+
+import { getVaultPatternsLinkDir } from "../util/pattern-paths.js";
 
 export interface DeleteScaffoldResult {
   removedLytDir: boolean;
@@ -42,8 +44,66 @@ export async function deleteVaultDerivedState(vaultPath: string): Promise<Delete
   if (!stat.isDirectory()) {
     throw new Error(`.lyt at ${lytDir} is not a directory; refusing to delete`);
   }
+  // 🔴 L0 DESTRUCTIVE-SAFETY (2026-07 adopt-core): pattern links now live NESTED
+  // under `.lyt/patterns/<name>`. On Windows these are directory JUNCTIONS
+  // (`symlinkSync(master, link, "junction")`) pointing at the shared pod master
+  // `~/lyt/patterns/<name>`. A recursive `rmSync(lytDir, { recursive })` MUST NOT
+  // be trusted to descend-safely into a nested junction — so we EXPLICITLY
+  // unlink each pattern LINK first (unlink the link, NEVER recursive-descend it),
+  // BEFORE the recursive teardown of `.lyt/`. Descending a junction would wipe
+  // the shared master's contents (the 2026-06-03 incident vector). We NEVER swap
+  // rmSync for a shell `rm -rf`/rimraf/PowerShell — those DO follow junctions.
+  unlinkNestedPatternLinks(vaultPath);
   await rmWithRetry(lytDir);
   return { removedLytDir: true, lytDirPath: lytDir };
+}
+
+// Unlink each entry under `.lyt/patterns/` treating it as a LINK, never a tree.
+// - A symlink/junction (`lstatSync().isSymbolicLink()` — true for Windows
+//   directory junctions too) is removed with `unlinkSync` / `rmSync(recursive:
+//   false)`, which detaches the LINK and leaves the master target untouched.
+// - A plain copy-fallback directory (no-admin path) is NOT a junction and is
+//   left for the subsequent recursive `.lyt/` teardown — it holds no outward
+//   junction, so recursively removing it is safe.
+// Best-effort + fail-soft: a missing dir or a per-entry error never aborts the
+// delete (the recursive teardown below is the backstop for plain dirs). The one
+// thing we guarantee is that we NEVER recursive-descend a junction.
+function unlinkNestedPatternLinks(vaultPath: string): void {
+  // SoT (2026-07-05 release review Minor): route through getVaultPatternsLinkDir so
+  // the pattern-LINK dir is computed in exactly ONE place — if the location ever
+  // moves, this destructive-safety guard follows it automatically (no coupled
+  // constant to drift out of lockstep).
+  const patternsLinkDir = getVaultPatternsLinkDir(vaultPath);
+  let entries: string[];
+  try {
+    if (!existsSync(patternsLinkDir)) return;
+    entries = readdirSync(patternsLinkDir);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    const linkPath = join(patternsLinkDir, name);
+    try {
+      const lst = lstatSync(linkPath);
+      if (lst.isSymbolicLink()) {
+        // Junction or symlink → detach the LINK only, NEVER recursive. A Windows
+        // directory junction reports isSymbolicLink()===true but `unlinkSync`
+        // EPERMs on it (unlink is file-only), so `rmSync(recursive:false)` is the
+        // primary junction-detach (removes just the reparse point, leaving the
+        // master target intact); `unlinkSync` is the fallback for a plain file
+        // symlink. Crucially: recursive:false — we detach, we never descend.
+        try {
+          rmSync(linkPath, { recursive: false, force: true });
+        } catch {
+          unlinkSync(linkPath);
+        }
+      }
+      // Non-symlink (plain copy-fallback dir or stray file): leave it for the
+      // recursive `.lyt/` teardown — it carries no outward junction.
+    } catch {
+      // best-effort per entry
+    }
+  }
 }
 
 // Exported: flows/clone.ts

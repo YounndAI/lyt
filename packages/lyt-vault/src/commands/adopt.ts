@@ -30,21 +30,35 @@ export function buildAdoptCommand(): Command {
     )
     .option("--parent <vault>", "Parent vault ref (e.g., vault:al0)")
     .option("--tier-hint <tier>", "Tier label hint")
-    .action(async (path: string, opts: { name?: string; parent?: string; tierHint?: string }) => {
-      const result = await adoptVaultFlow({
-        vaultPath: path,
-        name: opts.name,
-        parent: opts.parent,
-        tierHint: opts.tierHint,
-      });
-      // eslint-disable-next-line no-console
-      console.log(`Adopted vault '${result.name}'`);
-      // eslint-disable-next-line no-console
-      console.log(`  path:     ${result.vaultPath}`);
-      // eslint-disable-next-line no-console
-      console.log(`  rid:      ${result.vaultRid}`);
-      // eslint-disable-next-line no-console
-      console.log(`  registry: registered`);
-    });
+    .option(
+      "--mesh <mesh>",
+      "Mesh to home the adopted vault into (find-or-create). Defaults to 'personal'.",
+    )
+    .action(
+      async (
+        path: string,
+        opts: { name?: string; parent?: string; tierHint?: string; mesh?: string },
+      ) => {
+        const result = await adoptVaultFlow({
+          vaultPath: path,
+          name: opts.name,
+          parent: opts.parent,
+          tierHint: opts.tierHint,
+          mesh: opts.mesh,
+        });
+        // eslint-disable-next-line no-console
+        console.log(`Adopted vault '${result.name}'`);
+        // eslint-disable-next-line no-console
+        console.log(`  path:     ${result.vaultPath}`);
+        // eslint-disable-next-line no-console
+        console.log(`  rid:      ${result.vaultRid}`);
+        // eslint-disable-next-line no-console
+        console.log(`  registry: registered`);
+        // eslint-disable-next-line no-console
+        console.log(
+          `  mesh:     ${result.homeMeshAssigned ? `${result.homeMesh}${result.homeMeshCreated ? " (created)" : ""}` : "orphan (unassigned)"}`,
+        );
+      },
+    );
   return cmd;
 }

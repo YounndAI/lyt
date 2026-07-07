@@ -205,7 +205,7 @@ export interface InstalledPatternSummary {
   name: string;
   version: string;
   verbIds: readonly string[];
-  // Skill slugs that wrap this pattern's verbs (e.g., ["/lyt-plan", "/lyt-retro"]).
+  // Skill slugs that wrap this pattern's verbs (e.g., ["/lyt-capture", "/lyt-recall"]).
   // Optional — when omitted, the listing shows pattern + verbs without skill mapping.
   skills?: readonly string[] | undefined;
 }
@@ -260,7 +260,7 @@ function renderInstalledPatternsSection(
     return `_(No patterns linked into this vault yet. Run \`lyt pattern list\` to see what's installed at \`~/lyt/patterns/\`, then \`lyt pattern link <name> --vault <this-vault>\` to link them. Or run \`lyt vault adopt <path>\` / \`lyt vault join <path>\` — both auto-rebuild symlinks for every installed pattern.)_`;
   }
   const lines: string[] = [];
-  lines.push(`This vault has the following Lyt patterns linked at \`Patterns/\`:`, ``);
+  lines.push(`This vault has the following Lyt patterns linked at \`.lyt/patterns/\`:`, ``);
   for (const p of installed) {
     const verbs = p.verbIds.join(", ");
     if (p.skills && p.skills.length > 0) {

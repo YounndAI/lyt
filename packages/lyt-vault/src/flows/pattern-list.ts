@@ -19,7 +19,11 @@ import { join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName } from "../registry/repo.js";
-import { getUserPatternsDir, listPatternNames } from "../util/pattern-paths.js";
+import {
+  getUserPatternsDir,
+  getVaultPatternsLinkDir,
+  listPatternNames,
+} from "../util/pattern-paths.js";
 import { parsePatternYon } from "../yon/pattern.js";
 
 export interface PatternListEntry {
@@ -38,7 +42,7 @@ export interface PatternListResult {
 
 // List patterns at ~/lyt/patterns/. If `vaultName` is provided, also report whether
 // each pattern is currently linked into that vault (by checking for a symlink at
-// <vault>/Patterns/<pattern-name>).
+// <vault>/.lyt/patterns/<pattern-name>).
 export async function patternListFlow(vaultName?: string): Promise<PatternListResult> {
   const patternsDir = getUserPatternsDir();
   const names = listPatternNames(patternsDir);
@@ -74,7 +78,7 @@ export async function patternListFlow(vaultName?: string): Promise<PatternListRe
 }
 
 function isLinkedInto(vaultPath: string, patternName: string): boolean {
-  const linkPath = join(vaultPath, "Patterns", patternName);
+  const linkPath = join(getVaultPatternsLinkDir(vaultPath), patternName);
   if (!existsSync(linkPath)) return false;
   try {
     const stat = lstatSync(linkPath);

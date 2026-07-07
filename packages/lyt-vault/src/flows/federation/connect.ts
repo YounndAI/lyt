@@ -116,10 +116,6 @@ export interface ConnectPodArgs {
     | undefined;
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 // Resolve the pod's CURRENT identity (pod identity.yon > local cache). Used to
 // decide whether connect is needed (provisional) and to carry verified_at
 // forward into the reconciled record.
@@ -167,9 +163,11 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
         ...base,
         status: "gh-unauthed",
         provisionalHandle,
+        // firewall-C1 fix-pass — plain sign-in guidance (no raw `gh` CLI); "GitHub"
+        // stays as the destination service name. Renders via printConnectHuman.
         message:
-          "Your pod is local-only. To connect + back up to GitHub: run `gh auth login` " +
-          "in another terminal, then re-run `lyt sync`.",
+          "Your pod is saved on this machine only. To connect it and back it up online, " +
+          "sign in to your GitHub account, then re-run `lyt sync`.",
       };
     }
 
@@ -183,7 +181,9 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
         ...base,
         status: "gh-unauthed",
         provisionalHandle,
-        message: `Couldn't read your GitHub handle (${errMsg(err)}). Run \`gh auth login\`, then re-run \`lyt sync\`.`,
+        // firewall-C1 fix-pass — drop the raw `gh` CLI + the raw error text; plain
+        // sign-in guidance (the raw error stays out of the human message).
+        message: "Lyt couldn't read your GitHub account details. Sign in to your GitHub account, then re-run `lyt sync`.",
       };
     }
     if (!isValidGhHandle(realHandle)) {
@@ -208,7 +208,9 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
     } catch (err) {
       // A probe failure (offline/auth) is non-fatal — treat as "no remote" and
       // let the publish pass surface any real network issue authoritatively.
-      warnings.push(`existing-remote probe failed (offline/auth?): ${errMsg(err)}`);
+      // firewall-C1 fix-pass — plain non-fatal note; the raw error text (which can
+      // carry git/gh output) stays out of the human warning.
+      warnings.push(`Lyt couldn't check whether you already have a pod online — you may be offline or signed out.`);
     }
     if (remoteExists) {
       const existingRemote = federationRepoFullName(realHandle);
@@ -222,12 +224,14 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
         realHandle,
         existingRemote,
         adoptRemoteChosen: adopt,
+        // firewall-C1 fix-pass — "uploaded" instead of the plumbing noun "pushed";
+        // "GitHub" stays as the destination service name.
         message: adopt
-          ? `You already have a pod on GitHub (${existingRemote}). Your local notes are preserved on disk — ` +
-            `nothing was pushed or overwritten. Reconciling local notes into the existing pod is not yet automated ` +
-            `(it needs the disk⇄remote merge); for now, keep working locally and the merge lane will land it safely.`
+          ? `You already have a pod on GitHub (${existingRemote}). Your local notes are safe on this machine — ` +
+            `nothing was uploaded or overwritten. Combining your local notes into the existing pod isn't automated ` +
+            `yet; for now, keep working locally and Lyt will bring them together safely later.`
           : `Keeping your local pod as-is. An existing pod (${existingRemote}) is on GitHub but was NOT touched; ` +
-            `nothing was pushed or overwritten.`,
+            `nothing was uploaded or overwritten.`,
       };
     }
 
@@ -247,16 +251,17 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
         status: "pod-create-deferred",
         provisionalHandle,
         realHandle,
+        // firewall-C1 fix-pass — drop the raw error text; keep "GitHub" (service).
         message:
-          `Couldn't create your pod repo on GitHub yet (${errMsg(err)}). ` +
-          "Nothing was changed — your pod stays local. Re-run `lyt sync` to retry.",
+          "Lyt couldn't set up your pod on GitHub yet. " +
+          "Nothing was changed — your pod stays on this machine. Re-run `lyt sync` to retry.",
       };
     }
     let podRepoCreated = true;
     try {
       await gh.setRepoTopics(realHandle, federationRepoName(), POD_TOPICS);
     } catch (err) {
-      warnings.push(`pod topic-set failed non-fatally: ${errMsg(err)}`);
+      warnings.push(`Your pod is set up online, but Lyt couldn't finish labeling it (this is harmless).`);
     }
 
     // 7. The pod repo exists now → reconcile (auto-adopt the real handle).
@@ -277,7 +282,7 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       writeIdentityCache(reconciledIdentity);
       writePodIdentity(reconciledIdentity, podDir);
     } catch (err) {
-      warnings.push(`identity rewrite failed non-fatally: ${errMsg(err)}`);
+      warnings.push(`Lyt couldn't finish updating your pod's author details (this is harmless).`);
     }
 
     // (c) Re-derive pod.yon under the real handle (so @FEDERATION handle= is

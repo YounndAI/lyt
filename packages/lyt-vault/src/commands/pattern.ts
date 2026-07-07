@@ -120,7 +120,7 @@ function buildUninstallSub(): Command {
 
 function buildLinkSub(): Command {
   const c = new Command("link");
-  c.description("Symlink <vault>/Patterns/<name> -> ~/lyt/patterns/<name>.")
+  c.description("Symlink <vault>/.lyt/patterns/<name> -> ~/lyt/patterns/<name>.")
     .argument("<name>", "Pattern name")
     .requiredOption("--vault <vault-name>", "Target vault")
     .action(async (name: string, opts: { vault: string }) => {
@@ -133,7 +133,7 @@ function buildLinkSub(): Command {
 
 function buildUnlinkSub(): Command {
   const c = new Command("unlink");
-  c.description("Remove <vault>/Patterns/<name>.")
+  c.description("Remove <vault>/.lyt/patterns/<name>.")
     .argument("<name>", "Pattern name")
     .requiredOption("--vault <vault-name>", "Target vault")
     .action(async (name: string, opts: { vault: string }) => {

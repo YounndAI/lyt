@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName } from "../registry/repo.js";
-import { getUserPatternsDir } from "../util/pattern-paths.js";
+import { getUserPatternsDir, getVaultPatternsLinkDir } from "../util/pattern-paths.js";
 import { regenAgentsMd } from "./agents-md-regen.js";
 
 export interface PatternLinkArgs {
@@ -36,7 +36,7 @@ export interface PatternLinkResult {
   agentsMdRegenerated: boolean;
 }
 
-// Create a symlink at <vault>/Patterns/<pattern-name> -> ~/lyt/patterns/<pattern-name>.
+// Create a symlink at <vault>/.lyt/patterns/<pattern-name> -> ~/lyt/patterns/<pattern-name>.
 // On Windows where symlink creation requires admin privileges, falls back to a directory
 // copy and surfaces status="copied-fallback".
 export async function patternLinkFlow(args: PatternLinkArgs): Promise<PatternLinkResult> {
@@ -61,7 +61,7 @@ export async function patternLinkFlow(args: PatternLinkArgs): Promise<PatternLin
     await closeRegistry(db);
   }
 
-  const linkPath = join(vaultPath, "Patterns", args.patternName);
+  const linkPath = join(getVaultPatternsLinkDir(vaultPath), args.patternName);
   if (existsSync(linkPath)) {
     return {
       patternName: args.patternName,

@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { firewall } from "./git-error-firewall.js";
 import { resolveRemoteUrl } from "./remote-url.js";
 
 // v1.B.1 — injectable client for mesh-repo GH + git operations. Mirrors
@@ -44,20 +45,32 @@ export interface MeshGhClient {
 
 const isWindows = process.platform === "win32";
 
+// A.1 firewall: narrate spawn failures at the boundary. The invocation
+// (shell:isWindows — a pre-existing concern, out of A.1 scope) is untouched;
+// only the throw is decorated. firewall() mutates in place, preserving
+// .stderr/.status/.code for any consumer.
 function runGh(args: readonly string[]): string {
-  return execFileSync("gh", args as string[], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    shell: isWindows,
-  });
+  try {
+    return execFileSync("gh", args as string[], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: isWindows,
+    });
+  } catch (err) {
+    throw firewall(err, { op: "reach GitHub" });
+  }
 }
 
 function runGit(cwd: string, args: readonly string[]): void {
-  execFileSync("git", args as string[], {
-    cwd,
-    stdio: ["ignore", "ignore", "pipe"],
-    shell: isWindows,
-  });
+  try {
+    execFileSync("git", args as string[], {
+      cwd,
+      stdio: ["ignore", "ignore", "pipe"],
+      shell: isWindows,
+    });
+  } catch (err) {
+    throw firewall(err, { op: "reach GitHub" });
+  }
 }
 
 export const realMeshGhClient: MeshGhClient = {
@@ -73,10 +86,14 @@ export const realMeshGhClient: MeshGhClient = {
   async cloneRepo(handle, repoName, localDir): Promise<void> {
     mkdirSync(dirname(localDir), { recursive: true });
     const url = resolveRemoteUrl(handle, repoName);
-    execFileSync("git", ["clone", url, localDir], {
-      stdio: ["ignore", "ignore", "pipe"],
-      shell: isWindows,
-    });
+    try {
+      execFileSync("git", ["clone", url, localDir], {
+        stdio: ["ignore", "ignore", "pipe"],
+        shell: isWindows,
+      });
+    } catch (err) {
+      throw firewall(err, { op: "reach GitHub" });
+    }
     // Pin local-repo identity so subsequent commits never block on missing
     // global git config — mirrors gh-federation.ts cloneExisting guard.
     runGit(localDir, ["config", "user.name", handle]);

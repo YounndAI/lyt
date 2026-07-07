@@ -70,7 +70,7 @@ lyt provenance trace <file|rid>    # follow the @STAMP provenance chain
 # Health and help
 lyt doctor [--json|--full]         # git/gh/node/npm checks, registry integrity, self-heal hints
 lyt help [<topic>]                 # getting-started, mesh, agents, patterns, troubleshooting…
-lyt pattern list|run|fork|…        # the bundled pattern runtime (4 default patterns)
+lyt pattern list|run|fork|…        # the bundled pattern runtime (1 bundled: knowledge-capture)
 ```
 
 The full v1 verb set also includes `vault clone|forget|disconnect|delete|add-edge|verify|regen-context`, the registry verbs, audit export, and friction tracking. Run `lyt help commands` for the complete list.

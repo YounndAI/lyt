@@ -20,7 +20,7 @@
 // order: lanes → arcs → fts → rollup. Distinct from `lyt vault rebuild-index`
 // (C4: that DROPs + recreates the DB schema — destructive; this rebuilds
 // CONTENT from the markdown SoT into the existing schema). Composes the four
-// existing single-tier flows behind the open-once registry seam (v1.A.5 CR-B1):
+// existing single-tier flows behind the open-once registry seam (v1.A.5 ):
 // open the registry once here, thread it through every sub-flow.
 //
 // Order rationale: rollup reads each vault's `lanes` cache (rebuild-rollup.ts
@@ -57,7 +57,7 @@ export interface RebuildVaultArgs {
   vault: string;
   // Lane clustering threshold passthrough (default = rebuild-lanes default).
   threshold?: number;
-  // Open-once seam (v1.A.5 CR-B1). When supplied the caller owns lifecycle.
+  // Open-once seam (v1.A.5 ). When supplied the caller owns lifecycle.
   registryDb?: Client;
   // Deterministic timestamp override threaded to lanes/arcs/rollup.
   nowIso?: string;

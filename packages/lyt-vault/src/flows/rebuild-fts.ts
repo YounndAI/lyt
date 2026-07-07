@@ -28,7 +28,7 @@
 // - delegates the walk + insert to `upsertFtsCache`
 // - returns a shaped result for the manual CLI verb's --json output
 //
-// Open-once seam from the start (v1.A.5 CR-B1 + v1.D.1 + v1.D.2a
+// Open-once seam from the start (v1.A.5 + v1.D.1 + v1.D.2a
 // vindication): accept optional `registryDb?: Client` and `lytDb?:
 // Client`; only `openRegistry()` / `openLytDb()` when omitted; caller
 // owns lifecycle when supplied. Mirrors rebuild-arcs.ts. Applies to
@@ -49,7 +49,7 @@ export interface RebuildFtsArgs {
   // Test / automator seam — bypass the registry lookup and operate on
   // the given vault path directly.
   vaultPathOverride?: string;
-  // Open-once seam (v1.A.5 CR-B1 pattern). When supplied, the flow
+  // Open-once seam (v1.A.5 pattern). When supplied, the flow
   // uses the caller's registry client and does NOT close it.
   registryDb?: Client;
   // Open-once seam for the per-vault lyt.db. Threaded through to

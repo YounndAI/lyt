@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import { getIdentity } from "../util/identity.js";
 import { newUuidv7Bytes } from "../util/uuid7.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
+import { getVaultGitignore } from "../templates/index.js";
 import { renderMemscopeYon } from "../yon/memscope.js";
 import { renderVaultYon } from "../yon/vault.js";
 import { copyBundledAutomators, writeScaffoldConformance } from "./init.js";
@@ -32,6 +33,10 @@ export interface AdoptOptions {
   // Parent vault rid bytes. v1.A.1b on-disk shape per renderVaultYon.
   parentVaultRid?: Uint8Array | undefined;
   tierHint?: string | undefined;
+  // G1 guided-adopt — the mesh to home the adopted vault into (find-or-create).
+  // Defaults to `personal` at the flow layer. Ignored by the scaffold step
+  // (which only writes `.lyt/` files); consumed by adoptVaultFlow.
+  mesh?: string | undefined;
 }
 
 export interface AdoptResult {
@@ -44,6 +49,14 @@ export interface AdoptResult {
   // UNIT 4 — relative paths of scaffold-conformance priming files written on
   // adopt (sentinel-bearing lyt-overview.md / agents.md / README.md when absent).
   conformanceFilesWritten: string[];
+  // 2026-07-05 pre-merge release review (MAJOR-1) — outcome of landing the Lyt
+  // derived-state gitignore rules (crucially `.lyt/patterns/`) in the adopted
+  // vault. "created" = wrote a fresh .gitignore; "appended" = additively added
+  // the Lyt block to the handler's existing one; "present" = the rules were
+  // already there (idempotent re-adopt). Adopt creates git-visible pattern-link
+  // junctions under `.lyt/patterns/`, so without this they would be tracked —
+  // contradicting the "machine-local, gitignored" contract in the SoT + skill.
+  gitignore: "created" | "appended" | "present";
 }
 
 export function adoptVault(opts: AdoptOptions): AdoptResult {
@@ -117,6 +130,11 @@ export function adoptVault(opts: AdoptOptions): AdoptResult {
   // handler content (see writeScaffoldConformance blast-radius notes).
   const conformance = writeScaffoldConformance({ vaultPath: abs, name, owner });
 
+  // MAJOR-1 (2026-07-05 pre-merge release review): land the Lyt derived-state
+  // gitignore rules in the adopted vault. Additive by design — see
+  // ensureVaultGitignore.
+  const gitignore = ensureVaultGitignore(abs);
+
   return {
     vaultPath: abs,
     vaultRid,
@@ -125,7 +143,38 @@ export function adoptVault(opts: AdoptOptions): AdoptResult {
     addedLytDir: true,
     alreadyLytAware: false,
     conformanceFilesWritten: conformance.written,
+    gitignore,
   };
+}
+
+// MAJOR-1 (2026-07-05 pre-merge release review): ensure the Lyt derived-state
+// gitignore rules — crucially the load-bearing `.lyt/patterns/` rule — land in
+// the adopted vault. `init` writes `.gitignore` from scratch; `adopt` must be
+// ADDITIVE: a plain Obsidian vault may already carry a handler `.gitignore` we
+// must NEVER clobber. So:
+//   - no `.gitignore`      → write the full Lyt template
+//   - `.gitignore` present → append the Lyt block, UNLESS the rules are already
+//                            there (marker = the `.lyt/patterns/` rule) → no-op
+// Idempotent: a re-adopt over a vault that already carries the rules is a no-op
+// (the round-trip init→delete→adopt path, where the init-written `.gitignore`
+// survives the `.lyt/`-only delete).
+function ensureVaultGitignore(vaultPath: string): "created" | "appended" | "present" {
+  const gitignorePath = join(vaultPath, ".gitignore");
+  const block = getVaultGitignore();
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, block, "utf8");
+    return "created";
+  }
+  const existing = readFileSync(gitignorePath, "utf8");
+  // Presence marker = the load-bearing junction-ignore rule. If it is already
+  // there, the Lyt block was written before (a prior adopt/init) — do not
+  // duplicate it.
+  if (existing.includes(".lyt/patterns/")) {
+    return "present";
+  }
+  const sep = existing.endsWith("\n") ? "\n" : "\n\n";
+  writeFileSync(gitignorePath, existing + sep + block, "utf8");
+  return "appended";
 }
 
 export function deriveNameFromPath(abs: string): string {

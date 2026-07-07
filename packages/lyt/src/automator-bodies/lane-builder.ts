@@ -35,7 +35,7 @@
 // evidence-of-life for the underlying flow; this wrapper adds scheduling
 // + provenance routing through the 5-step protocol.
 //
-// Caller-side OPT-1 (v1.A.5 CR-B10) — the body receives ledgerClients via
+// Caller-side OPT-1 (v1.A.5 ) — the body receives ledgerClients via
 // AutomatorBodyArgs so any downstream @STAMP-routed writes share the
 // pre-opened audit + provenance clients. Lanes don't write notes
 // directly today, but threading the bundle keeps the contract symmetric

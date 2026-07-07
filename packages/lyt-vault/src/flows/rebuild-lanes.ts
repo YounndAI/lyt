@@ -21,7 +21,7 @@
 // and writes the deterministic YON SoT at `<vault>/.lyt/indexes/lanes.yon`
 // via `writeLanesDoc`.
 //
-// Open-once seam from the start (v1.A.5 CR-B1 lesson): accept optional
+// Open-once seam from the start (v1.A.5 lesson): accept optional
 // `registryDb?: Client`; only `openRegistry()` when omitted; caller owns
 // lifecycle when supplied. Applies to BOTH the manual `lyt vault
 // rebuild-lanes` CLI verb (no caller-supplied db → flow opens + closes)
@@ -65,7 +65,7 @@ export interface RebuildLanesArgs {
   // Minimum number of notes a tag must appear in to form a lane. Default
   // = 2 per brief.
   threshold?: number;
-  // Open-once seam (v1.A.5 CR-B1 pattern). When supplied, the flow uses
+  // Open-once seam (v1.A.5 pattern). When supplied, the flow uses
   // the caller's registry client and does NOT close it. When omitted,
   // the flow opens + closes its own registry client.
   registryDb?: Client;

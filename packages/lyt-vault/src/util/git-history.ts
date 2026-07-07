@@ -16,6 +16,8 @@
 
 import { spawn } from "node:child_process";
 
+import { firewall } from "./git-error-firewall.js";
+
 // v1.C.4 — git-history primitive used by `lyt repair --apply` to restore
 // an unparseable mesh.yon from the last-known-good revision in Git
 // (federation-design §11:521 "offer to restore from last-known-good in
@@ -53,18 +55,29 @@ const defaultGit: GitExecutor = (args, opts) =>
       const e = err as NodeJS.ErrnoException;
       if (e.code === "ENOENT") {
         reject(
-          new Error(
-            "`git` CLI not found on PATH. Install Git ≥ 2.40 from https://git-scm.com/downloads. " +
-              "lyt repair --apply needs `git` to restore mesh.yon from history.",
+          firewall(
+            Object.assign(
+              new Error(
+                "`git` CLI not found on PATH. Install Git ≥ 2.40 from https://git-scm.com/downloads. " +
+                  "lyt repair --apply needs `git` to restore mesh.yon from history.",
+              ),
+              { code: "ENOENT" },
+            ),
           ),
         );
         return;
       }
-      reject(err);
+      reject(firewall(err));
     });
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(`git ${args.join(" ")} exited ${code}: ${stderr.trim()}`));
+        reject(
+          firewall(
+            Object.assign(new Error(`git ${args.join(" ")} exited ${code}: ${stderr.trim()}`), {
+              stderr,
+            }),
+          ),
+        );
         return;
       }
       resolve(stdout);

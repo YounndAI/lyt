@@ -38,6 +38,19 @@ export function getUserPatternsDir(): string {
   return join(getLytHome(), "patterns");
 }
 
+// Single source of truth for the per-VAULT pattern-LINK directory. The links
+// (Windows junctions → the pod master ~/lyt/patterns/<name>, or copy-fallback
+// dirs on no-admin) are Lyt-owned machine-local state, so they live UNDER
+// `.lyt/` (gitignored via the `.lyt/patterns/` rule in templates/index.ts, and
+// removed for free when `.lyt/` is torn down on abandon/delete) rather than at
+// the vault root. EVERY vault-side `join(vaultPath, "Patterns", name)` site
+// routes through this helper so the location never drifts (coupled-constant
+// lockstep). NOTE: this is the vault-side LINK dir; the pod-master patterns dir
+// is `getUserPatternsDir()`.
+export function getVaultPatternsLinkDir(vaultPath: string): string {
+  return join(vaultPath, ".lyt", "patterns");
+}
+
 // Where bundled patterns live in the source tree (dev) and in the published tarball
 // (after build → dist/patterns/). The loader auto-detects both layouts.
 export function getBundledPatternsDir(): string {

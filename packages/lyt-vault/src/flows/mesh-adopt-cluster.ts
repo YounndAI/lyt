@@ -53,7 +53,7 @@ import { meshInitFlow, type MeshInitOptions } from "./mesh-init.js";
 // meshInitFlow opens + commits its own libSQL connection in a single
 // transaction; cloneVaultFlow uses the caller-supplied db. We do NOT wrap
 // both inside a single outer tx because meshInitFlow's signature predates
-// the open-once seam (introduced v1.A.5 CR-B1) — folding it would require
+// the open-once seam (introduced v1.A.5 ) — folding it would require
 // a separate refactor outside v1.C.3 scope. Each sub-step is atomic; if
 // member clone N fails the main + members 1..N-1 stay in place,
 // surfacing the partial-state as a structured error. The handler can

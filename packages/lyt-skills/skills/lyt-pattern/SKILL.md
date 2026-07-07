@@ -24,13 +24,12 @@ Manage Lyt patterns: install, link/unlink, fork for customization, list availabl
 
 ## When NOT to invoke
 
-For the common write-a-Figment-of-type-X flow, use the dedicated skill:
+For the common write-a-Figment flow, use the dedicated skill:
 
-- `/lyt-plan`, `/lyt-progress`, `/lyt-result`, `/lyt-retro`, `/lyt-insight`, `/lyt-handoff` (work-management)
-- `/lyt-capture`, `/lyt-recall` (knowledge-capture)
-- `/lyt-decision` (decision-log)
+- `/lyt-capture` (knowledge-capture) — save any Figment note (use `topic:` to categorize)
+- `/lyt-recall`, `/lyt-search` — read/search the vault or pod
 
-Use `/lyt-pattern` for pattern management itself OR for verbs that don't yet have a dedicated skill wrapper (e.g., `project-lifecycle/project-init`, `project-lifecycle/checkpoint`, `decision-log/rationale`).
+Use `/lyt-pattern` for pattern management itself OR for verbs that have no dedicated skill wrapper — i.e. verbs from patterns you install yourself (`lyt pattern install --from <dir>`). Lyt bundles only `knowledge-capture` (wrapped by `/lyt-capture` + `/lyt-recall`); opinionated workflow patterns are not shipped. Invoke any installed pattern's verb via `/lyt-pattern run <pattern> <verb>` (e.g. `/lyt-pattern run <your-pattern> <verb>`).
 
 ## The verb surface
 
@@ -47,15 +46,15 @@ lyt pattern run <pattern> <verb> --vault <v> [--project <p>] [--slug <s>] [--var
 
 ## Symlink + fork mechanics
 
-Patterns live at `~/lyt/patterns/<name>/` (per-machine, per-user, like the registry). `pattern link` creates `<vault>/Patterns/<name>` as a junction symlink to the master. Symlinks are gitignored from vault repos — `lyt vault adopt` and `lyt vault join` auto-rebuild them per-machine.
+Patterns live at `~/lyt/patterns/<name>/` (per-machine, per-user, like the registry). `pattern link` creates `<vault>/.lyt/patterns/<name>` as a junction symlink to the master. Symlinks are gitignored from vault repos (via the `.lyt/patterns/` rule) — `lyt vault adopt` and `lyt vault join` auto-rebuild them per-machine.
 
 To customize without touching the master, use `pattern fork`:
 
 ```bash
-lyt pattern fork work-management --as wm-custom
-# edit ~/lyt/patterns/wm-custom/
-lyt pattern unlink work-management --vault <v>
-lyt pattern link wm-custom --vault <v>
+lyt pattern fork knowledge-capture --as kc-custom
+# edit ~/lyt/patterns/kc-custom/
+lyt pattern unlink knowledge-capture --vault <v>
+lyt pattern link kc-custom --vault <v>
 ```
 
 ## Version migration (v1 caveat)
@@ -64,7 +63,7 @@ Newer pattern versions replace the master at `~/lyt/patterns/<name>/`. Files alr
 
 ## Verb-name conflicts
 
-If two installed patterns both declare a `plan` verb, address via explicit qualification: `lyt pattern run work-management plan` (not just `lyt pattern run plan`). Skills wrap by pattern convention: `/lyt-plan` ties to work-management; a second pattern with `plan` would generate as `/lyt-<pattern2-id>-plan`.
+If two installed patterns both declare the same verb (e.g. a `note` verb), address via explicit qualification: `lyt pattern run <pattern-id> note` (not just `lyt pattern run note`). The pattern id is always the disambiguator — the qualified `lyt pattern run <pattern> <verb>` form never guesses.
 
 ## Companion skills
 

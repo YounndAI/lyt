@@ -16,6 +16,7 @@
 
 import { spawn } from "node:child_process";
 
+import { firewall } from "./git-error-firewall.js";
 import { resolveSpawnInvocation } from "./gh-federation.js";
 
 // v1.C.3 — gh CLI client surface for `lyt discover` + `lyt mesh adopt`.
@@ -76,18 +77,31 @@ const defaultGh: GhExecutor = (args) =>
       const e = err as NodeJS.ErrnoException;
       if (e.code === "ENOENT") {
         reject(
-          new Error(
-            "`gh` CLI not found on PATH. Install GitHub CLI: https://cli.github.com/. " +
-              "lyt discover requires `gh` for `gh api` access.",
+          firewall(
+            Object.assign(
+              new Error(
+                "`gh` CLI not found on PATH. Install GitHub CLI: https://cli.github.com/. " +
+                  "lyt discover requires `gh` for `gh api` access.",
+              ),
+              { code: "ENOENT" },
+            ),
           ),
         );
         return;
       }
-      reject(err);
+      reject(firewall(err));
     });
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(`gh ${args.join(" ")} exited ${code}: ${stderr.trim()}`));
+        // `.message` keeps the raw stderr so gh-discover's own 404/Not-Found
+        // classifiers (fetchVaultYonContent, checkPushPermission) still match.
+        reject(
+          firewall(
+            Object.assign(new Error(`gh ${args.join(" ")} exited ${code}: ${stderr.trim()}`), {
+              stderr,
+            }),
+          ),
+        );
         return;
       }
       resolve(stdout);

@@ -63,7 +63,7 @@ export interface UpsertEmbeddingsCacheResult {
 }
 
 export interface UpsertEmbeddingsCacheOpts {
-  // Open-once seam (v1.A.5 CR-B1 pattern).
+  // Open-once seam (v1.A.5 pattern).
   lytDb?: Client;
   // Test seam — inject a pre-loaded embedder (skips loadEmbedder()).
   embedder?: Embedder;
