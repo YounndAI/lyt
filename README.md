@@ -37,7 +37,7 @@
 
 A vault's identity is its **`rid`** (a UUIDv7 minted on this machine); the human-readable `{mesh}/{vault}` name is *computed* from the vault's home mesh plus its leaf, so renaming or moving a vault updates the name automatically while the `rid` stays stable. Names, bare leaves, pod-local aliases, and `lyt:vault:<host>/<owner>/<repo>` origin coordinates all resolve to the `rid`.
 
-Lyt is **AI-first by design**: an AI agent is a first-class operator of your knowledge, not a bolted-on feature. Every vault and mesh speaks [YON](https://yon.younndai.com) — structured records any agent reads directly — and the same operation set is exposed to you via the CLI and to agents via harness skills and an MCP server. Lyt is the reference implementation of the AI-first standard we're defining.
+Lyt is **AI-first by design**: an AI agent is a first-class operator of your knowledge, not a bolted-on feature. Every vault and mesh speaks [YON](https://yon.younndai.com) — structured records any agent reads directly — and the same operation set is exposed to you via the CLI and to agents via harness skills and an MCP server. Lyt is the reference implementation of an AI-first approach we're working out in the open.
 
 You keep the markdown. Lyt is the thin federation layer over it: it never asks you to move your notes into a database or a proprietary format, works with any markdown editor (Obsidian, VS Code, your terminal), and it never phones home. Lyt ships as npm packages, installs globally, and is driven by the `lyt` CLI — and by AI agents via the harness skills in [`@younndai/lyt-skills`](packages/lyt-skills/README.md).
 

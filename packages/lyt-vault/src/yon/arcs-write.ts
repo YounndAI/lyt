@@ -22,13 +22,16 @@
 // `@younndai/yon-parser` runtime dep is deferred per project posture.
 //
 // Determinism contract: identical input → byte-identical output. Required
-// for master-plan §v1.D.2a acceptance "position monotonic". The
-// `last_touched` stamp is the only field allowed to drift across rebuilds
-// — preserved via the caller-supplied `lastTouched` field rather than
-// computed inline.
+// for master-plan §v1.D.2a acceptance "position monotonic". Option A
+// : the machine-local `last_touched` stamp (max member mtime — which
+// is per-machine, reset on every fresh clone/pull) is NOT serialized into
+// the committed arcs.yon. It lives only in the libSQL cache (see upsert-
+// arcs-cache.ts). Omitting it makes the committed file content-only and
+// byte-stable across rebuilds, so it travels cross-machine without churning
+// the git tree. Every field that IS serialized is deterministic in input.
 //
 // Arc shape:
-// @ARC rid=arc:<slug> | name="..." | category="..." | last_touched:ts=<iso>
+// @ARC rid=arc:<slug> | name="..." | category="..."
 // @ARC_MEMBER arc_rid=arc:<slug>
 // | figment_rid="<vault-relative-posix-path>"
 // | position:int=N
@@ -68,9 +71,12 @@ export interface ArcRecord {
   // the same arc with different categories.
   category: string;
   // ISO 8601 timestamp of the most-recently-touched member figment
-  // (max(mtime) across members per the ratified default). Caller-controlled to
-  // preserve byte-stable round-trips in tests.
-  lastTouched: string;
+  // (max(mtime) across members per the ratified default). Machine-local
+  // derived state (Option A): NOT serialized into the committed
+  // arcs.yon — it is stamped into the libSQL cache at upsert time. Optional
+  // here so the read path can carry it when parsing a legacy file that
+  // still has the field, and omit it for freshly-written content-only files.
+  lastTouched?: string;
 }
 
 export interface ArcMemberRecord {
@@ -111,7 +117,10 @@ export function renderArcsYon(doc: ArcsDoc): string {
     lines.push(`@ARC rid=arc:${arc.ridSlug}`);
     lines.push(`  | name="${escapeQuoted(arc.name)}"`);
     lines.push(`  | category="${escapeQuoted(arc.category)}"`);
-    lines.push(`  | last_touched:ts=${arc.lastTouched}`);
+    // last_touched intentionally NOT serialized (Option A): it is
+    // machine-local derived state (max member mtime) kept in the libSQL
+    // cache, not the committed content SoT. Emitting it here would
+    // reintroduce cross-machine churn (mtime resets on every fresh clone).
     lines.push(``);
   }
 

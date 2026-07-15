@@ -17,12 +17,12 @@
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { getMeshByName } from "../registry/meshes-repo.js";
+import { getMeshByName, listMeshes } from "../registry/meshes-repo.js";
 import { getHandleFromIdentity } from "../util/identity.js";
 import {
   checkPushPermission,
   fetchVaultYonContent,
-  walkUserRepos,
+  walkReposForOwners,
   type DiscoveredRepo,
   type GhExecutor,
 } from "../util/gh-discover.js";
@@ -148,10 +148,16 @@ export async function discoverFlow(opts: DiscoverArgs = {}): Promise<DiscoverRes
   const owner = opts.owner ?? getHandleFromIdentity();
 
   try {
-    // 1. Walk repos.
+    // 1. Walk repos. B3c — walk NOT only the single federation owner but also
+    // every registered mesh's ORG `push_target` handle, so org-mesh vaults
+    // (living under e.g. `younndai/*`) are discovered too. `/user/repos` already
+    // returns every repo the user can see across all their orgs, so this is one
+    // fetch with a widened owner filter (see walkReposForOwners). The union is
+    // case-insensitive-deduped; the primary owner is always included.
+    const walkOwners = await collectDiscoverWalkOwners(db, owner);
     let repos: DiscoveredRepo[];
     try {
-      repos = await walkUserRepos({ owner, gh: opts.ghExecutor });
+      repos = await walkReposForOwners({ owners: walkOwners, gh: opts.ghExecutor });
     } catch (err) {
       throw new DiscoverGhUnavailableError(err instanceof Error ? err.message : String(err));
     }
@@ -296,6 +302,36 @@ export async function discoverFlow(opts: DiscoverArgs = {}): Promise<DiscoverRes
   } finally {
     if (!callerSupplied) await closeRegistry(db);
   }
+}
+
+// B3c (Inc-2 Phase B slice 2) — the ordered, deduped set of GH owner handles
+// `lyt discover` walks: the primary federation owner FIRST, then every
+// registered mesh's ORG `push_target` handle (`push_kind === 'org'`). Only
+// ORG push targets are added — a `handle` push_kind is the user's own personal
+// handle (already covered by the primary owner or by a redundant re-add), and
+// a null push_target contributes nothing. Case-insensitive dedup preserves
+// first-seen order (primary owner stays first → `walkOwner` in the result stays
+// the primary). Exported for the focused B3c test.
+export async function collectDiscoverWalkOwners(
+  db: Client,
+  primaryOwner: string,
+): Promise<string[]> {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (handle: string | null | undefined): void => {
+    if (handle === null || handle === undefined) return;
+    const trimmed = handle.trim();
+    if (trimmed.length === 0) return;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(trimmed);
+  };
+  add(primaryOwner);
+  for (const m of await listMeshes(db)) {
+    if (m.pushKind === "org") add(m.pushTarget);
+  }
+  return out;
 }
 
 // =====================================================================

@@ -45,6 +45,7 @@ export type BoundaryCategory =
   | "detached-head"
   | "dirty-tree"
   | "not-found"
+  | "access-removed"
   | "tool-missing"
   | "unknown";
 
@@ -86,7 +87,9 @@ const RE_DIRTY_TREE =
 const RE_PUSH_REJECTED =
   /\[rejected\]|non-fast-forward|failed to push|Updates were rejected|tip of your current branch is behind/i;
 
-const NARRATION: Record<Exclude<BoundaryCategory, "unknown">, NarratedError> = {
+// `access-removed` is produced by the dedicated `narrateAccessRemoved()` (A6),
+// NOT via this default-chain table — excluded here alongside `unknown`.
+const NARRATION: Record<Exclude<BoundaryCategory, "unknown" | "access-removed">, NarratedError> = {
   auth: {
     category: "auth",
     plain: "Lyt couldn't save to your online copy — your access wasn't accepted (it may have expired).",
@@ -129,6 +132,70 @@ const NARRATION: Record<Exclude<BoundaryCategory, "unknown">, NarratedError> = {
     nextAction: "Run `lyt doctor` to see what's missing, then install it and retry.",
   },
 };
+
+// ─── A6 share-revoke access-loss (0.12.0 Phase D) ────────────────────────────
+// A revoked private-repo access (or a deleted repo) surfaces as `remote:
+// Repository not found` / HTTP 404 / "could not resolve to a Repository" on git
+// fetch/pull or a gh probe. That is a DISTINCT failure from a transient OFFLINE
+// error (`could not resolve host`, connection timeout) — mis-classifying offline
+// as access-loss would wrongly flip a reachable vault to access_lost. So
+// `isAccessRemoved` matches the not-found / 404 signals but explicitly EXCLUDES
+// the offline signals first.
+//
+// This helper lives in the firewall (same class as A1) but is deliberately NOT
+// wired into `narrate()`'s default chain: the generic `not-found` narration
+// ("Lyt couldn't find that online copy") stays for a first-time bad-name case,
+// while the access-loss surfaces (sync / sync --check / vault info) call
+// `isAccessRemoved` + `narrateAccessRemoved` to produce the sharper "your access
+// was removed" message AND flip the vault status.
+const RE_OFFLINE =
+  /could not resolve host|couldn'?t resolve host|network is unreachable|temporary failure in name resolution|connection timed out|connection refused|operation timed out|failed to connect/i;
+const RE_ACCESS_REMOVED =
+  /remote: Repository not found|Repository not found|remote: Not Found|\bHTTP 404\b|could not resolve to a Repository|the requested URL returned error: 404/i;
+
+/**
+ * True when a raw git/gh failure proves our ACCESS to the online copy is gone
+ * (revoked collaborator access, or the repo was deleted) — a `Repository not
+ * found` / 404 signal. Fail-safe: an OFFLINE failure (host unreachable, timeout)
+ * returns false so a merely-disconnected machine is never mistaken for access
+ * loss. Never throws; unknown shapes → false.
+ *
+ * A6-1 (0.12.0 Phase D fix-pass) — a `Repository not found` / 404 is ALSO what
+ * GitHub returns for a private repo that EXISTS but the caller isn't authorized
+ * to see: logged-out HTTPS creds, an expired-or-underscoped `gh` token, or an
+ * SSO-not-authorized session. That is a FIXABLE auth state, NOT a revoke —
+ * flipping a vault to `access_lost` on it is a false positive. So the caller may
+ * pass the CURRENT gh-auth verdict via `opts.ghAuthOk`; when it is anything other
+ * than a confirmed `true` (false = unauthed, null = unverifiable), a not-found is
+ * NOT classified as access-removed (the conservative call: let the caller treat
+ * it as `unknown`/transient, never `access_lost`). When `opts.ghAuthOk` is
+ * omitted, the pre-A6-1 text-only behaviour is preserved (pure-classifier callers
+ * and unit tests that don't supply an auth verdict are unaffected).
+ */
+export function isAccessRemoved(
+  raw: unknown,
+  opts: { ghAuthOk?: boolean | null } = {},
+): boolean {
+  const text = extractText(raw);
+  if (text.length === 0) return false;
+  if (RE_OFFLINE.test(text)) return false;
+  if (!RE_ACCESS_REMOVED.test(text)) return false;
+  // A6-1: a not-found under absent/expired/unverifiable auth is a fixable auth
+  // state, not a revoke. Only an EXPLICIT non-true verdict downgrades it — an
+  // omitted verdict keeps the text-only classification (back-compat).
+  if (opts.ghAuthOk !== undefined && opts.ghAuthOk !== true) return false;
+  return true;
+}
+
+/** The plain, jargon-free "your access was removed" narration (A6). */
+export function narrateAccessRemoved(): NarratedError {
+  return {
+    category: "access-removed",
+    plain:
+      "Your access to this shared vault was removed, so Lyt can't reach it online anymore. Your local copy is safe.",
+    nextAction: "Ask the owner to share it with you again, or remove it with `lyt vault forget`.",
+  };
+}
 
 /**
  * Re-narrate a raw git/gh failure into a NarratedError. Never throws, never

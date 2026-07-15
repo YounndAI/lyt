@@ -83,6 +83,19 @@ const ACCESS_ISOLATED = ["tests/access/**/*.test.ts"];
 // real fetch never fires). Passes in isolation; only flaked in the full run.
 const EMBEDDINGS_PROGRESS_ISOLATED = ["tests/util/embeddings-download-progress.test.ts"];
 
+// The observable-degrade regression hoists a
+// vi.mock("../../src/yon/federation-vault-ledger-author.js") so it can inject a
+// transient authoring fault into renameVaultFlow / moveVaultFlow and prove the
+// non-fatal degrade is surfaced. Under the shared single-fork module graph
+// (isolate:false + fileParallelism:false), a sibling file that imports the REAL
+// rename/move flows first leaves them cached against the un-mocked author module,
+// so this file's hoisted mock is dropped and the injection never fires (author
+// runs for real → fedVaultAuthored stays true). Same shared-state-pollution class
+// as ACCESS_ISOLATED / EMBEDDINGS_PROGRESS_ISOLATED — carve it into its own
+// project with isolate:true so its mock can never be stripped. Passes in isolation;
+// only failed in the full single-fork run.
+const FED_OBSERVABLE_ISOLATED = ["tests/federation/r1-observable-degrade.red-prove.test.ts"];
+
 export default defineConfig({
   test: {
     projects: [
@@ -91,7 +104,18 @@ export default defineConfig({
           ...baseTest,
           name: "main",
           include: ["tests/**/*.test.ts"],
-          exclude: [...ACCESS_ISOLATED, ...EMBEDDINGS_PROGRESS_ISOLATED],
+          exclude: [...ACCESS_ISOLATED, ...EMBEDDINGS_PROGRESS_ISOLATED, ...FED_OBSERVABLE_ISOLATED],
+        },
+      },
+      {
+        test: {
+          ...baseTest,
+          name: "fed-observable-isolated",
+          include: FED_OBSERVABLE_ISOLATED,
+          // Fresh module graph so the hoisted federation-vault-ledger-author mock
+          // can never be stripped by a sibling — guarantees the injected authoring
+          // fault fires so the observable-degrade contract is actually exercised.
+          isolate: true,
         },
       },
       {

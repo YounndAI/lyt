@@ -38,6 +38,28 @@
 // the @younndai/yon-parser runtime dep replaces both hand-rolled walkers.
 
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
+
+// CRIT-B (residual sweep) — parse-side guard for `figment_rid` values read
+// from cluster YON (lanes.yon / arcs.yon), which now travels cross-machine.
+// A vault-relative POSIX figment path is the only legitimate shape; anything
+// absolute or carrying a `..` segment is a traversal attempt (peer-authored
+// `figment_rid` containing dot-dot segments). Members failing this
+// are SKIPPED at parse (matches the existing "skip malformed record" posture),
+// so the poison never enters the libSQL cache. Defense-in-depth alongside the
+// FS-sink containment gate in search-cascade.readSnippetFromDisk.
+export function isSafeVaultRelativeFigmentPath(p: string): boolean {
+  if (p.length === 0) return false;
+  // POSIX-absolute (`/...`) or Windows drive-absolute (`C:...`) → reject.
+  if (p.startsWith("/") || /^[A-Za-z]:/.test(p)) return false;
+  // Native-absolute on the current OS (covers `\\?\` / UNC on Windows).
+  if (isAbsolute(p)) return false;
+  // Any `..` path segment (split on both separators, defensively).
+  for (const seg of p.split(/[\\/]/)) {
+    if (seg === "..") return false;
+  }
+  return true;
+}
 
 export function escapeQuoted(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');

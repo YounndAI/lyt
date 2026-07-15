@@ -28,6 +28,7 @@ import {
   type ReconcilePublishResult,
 } from "./federation/reconcile-publish.js";
 import { adoptAndPrimeFlow } from "./adopt-and-prime.js";
+import { reconstructionExitCode } from "./federation/recover-pod.js";
 import { embeddingsOfferGate } from "./embeddings-offer.js";
 import { resolveAskedState } from "./embeddings-offer-state.js";
 import { markAsked } from "../registry/nudge-state-repo.js";
@@ -128,6 +129,10 @@ export interface WizardPhaseResult {
   data?: {
     vaultPath?: string;
     branch?: "fresh" | "adopted";
+    // G1 (a review finding) — the reconstruction exit code (0 clean · 11 state-drift drop ·
+    // 12 owner-misresolved/bug drop) surfaced by phase_adoptPod so the `lyt init`
+    // command can wire it to process.exitCode with the bug/state granularity.
+    reconstructExitCode?: number;
   };
 }
 
@@ -1338,6 +1343,58 @@ export async function phase_adoptPod(opts: WizardRunOptions): Promise<WizardPhas
     const createdNote = result.firstVaultCreated
       ? " + scaffolded personal/main (pod had no acquirable vaults)"
       : "";
+    // FIX A (A2-R3 MAJOR-1) — a SEMANTIC REFUSAL (the cloned pod.yon parsed but is
+    // incoherent) is a FAILURE, not a clean adopt. adoptAndPrimeFlow already failed
+    // closed EARLY (no gh-walk, no scaffold); surface it as ok:false with the
+    // distinct exit code 13 so the command maps it to process.exitCode and never
+    // reports "Adopted … successfully".
+    if (result.manifestRefused === true) {
+      return {
+        phase: 8,
+        name: "adopt-pod",
+        ok: false,
+        message:
+          `Refusing the adopt of pod ${result.podHandle}/${federationRepoName()} — the cloned ` +
+          `pod.yon parsed but is semantically INCOHERENT; no vault was cloned. ` +
+          `${result.manifestRefusedReason ?? ""}`.trimEnd() +
+          ` Inspect/repair the pod.yon (or re-clone the pod) and re-run.`,
+        // a review finding — carry the refusal exit code (13) so the command maps it to
+        // process.exitCode, distinct from the drop codes (12/11) and clean (0).
+        data: {
+          vaultPath: "",
+          branch: "adopted",
+          reconstructExitCode: reconstructionExitCode({ drops: [], refused: true }),
+        },
+      };
+    }
+    // G1 (0.12.1) — a reconstruction that DROPPED any vault is INCOMPLETE. Do
+    // NOT report a clean adopt: surface the drops loudly and fail this phase
+    // (ok:false → the wizard exits nonzero). The recover-pod flow already
+    // console.error'd the classified per-vault summary; here we name the drops
+    // in the phase message so the command surface is honest. Each dropped vault
+    // is idempotently re-acquirable on a re-run once its cause (owner
+    // mis-resolution vs a moved repo) is addressed.
+    const drops = result.manifestDrops ?? [];
+    if (drops.length > 0) {
+      const names = drops.map((d) => d.vaultName).join(", ");
+      return {
+        phase: 8,
+        name: "adopt-pod",
+        ok: false,
+        message:
+          `Adopted pod ${result.podHandle}/${federationRepoName()} but reconstruction is ` +
+          `INCOMPLETE — dropped ${drops.length} vault(s): ${names}. See the per-vault ` +
+          `classification above (owner-misresolved = bug; repo-moved-or-deleted = state). ` +
+          `Re-run after resolving the cause.`,
+        // a review finding — carry the bug(12)/state(11) exit code so the command maps it
+        // to process.exitCode.
+        data: {
+          vaultPath: result.primaryVaultPath ?? "",
+          branch: "adopted",
+          reconstructExitCode: reconstructionExitCode({ drops }),
+        },
+      };
+    }
     return {
       phase: 8,
       name: "adopt-pod",

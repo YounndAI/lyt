@@ -732,6 +732,305 @@ CREATE TABLE IF NOT EXISTS embeddings_nudge_state (
 `,
 };
 
+// Inc-2 Phase B / → (2026-07-11) — additive migration 008: the foreign-
+// vault PROVENANCE discriminator. `vaults.source` positively records the ENTRY
+// RELATIONSHIP of a vault:
+//   own        = the user's OWN vault (init / adopt / graduate-a-template clone)
+//   shared     = a DIFFERENT owner's PRIVATE vault GRANTED to the handler
+//                (affiliation; renders RO or RW) — the core teamwork case
+//   subscribed = a DIFFERENT owner's PUBLIC vault the handler self-subscribed to
+//                (no grant; always RO)
+// This is the keystone signal that later lets a safe orphan-clone-dir removal
+// delete a CONFIRMED foreign dir without ever risking an own vault's markdown (a
+// wrong own-vs-foreign signal is L0-adjacent). `writable` (RO|RW) stays DERIVED
+// from the gh push verdict — it is NEVER stored here; `source` and writability
+// are orthogonal axes.
+//
+// widens the BINARY enum ('own','subscribed') to the ratified TERNARY
+// ('own','shared','subscribed'). The column is UNPUSHED (local-only), so the
+// CHECK is amended IN PLACE rather than via a new migration. The additive
+// ADD COLUMN default stays 'own'.
+//
+// FAIL-CLOSED BY CONSTRUCTION: `NOT NULL DEFAULT 'own'`. Every pre-existing row
+// (all of which are the user's own vaults, created before any foreign-inflow
+// path set this field) takes 'own' on the ALTER; a vault is 'shared'/'subscribed'
+// ONLY when a foreign-inbound path POSITIVELY marks it so. The CHECK pins the
+// three legal values. `source` is an ADDITIVE ORTHOGONAL field (standing
+// directive) — NOT a `status` enum value: an older client that never learned
+// about `source` skips it, and status/source vary independently (a foreign vault
+// can be active|missing|access_lost just like an own one).
+//
+// RUNNER CONTRACT (migrate.ts): purely additive `ALTER TABLE ... ADD COLUMN`
+// with a CONSTANT default (SQLite/libSQL requires the default be constant for
+// ADD COLUMN, and 'own' is). ADD COLUMN is not `IF NOT EXISTS`-guardable in
+// SQLite, but the per-version skip in migrate.ts makes it run EXACTLY ONCE on a
+// given DB — the same additive posture migration 004 relies on. No FK toggle,
+// no table-rebuild, no data mutation. The back-compat READER (repo.ts
+// rowToVault) still defaults a null/absent/unknown `source` to 'own', so a read
+// against any pre-008 shape (or a NULL that slipped in) resolves fail-closed to
+// 'own'.
+const migration008VaultSource: Migration = {
+  version: 8,
+  name: "vault-source-provenance",
+  sql: `
+ALTER TABLE vaults
+  ADD COLUMN source TEXT NOT NULL DEFAULT 'own'
+  CHECK (source IN ('own', 'shared', 'subscribed'));
+
+CREATE INDEX IF NOT EXISTS idx_vaults_source ON vaults(source);
+`,
+};
+
+// Inc-2 Phase B / (2026-07-11) — CONVERGE migration 009: rebuild `vaults`
+// so `source`'s CHECK is the ratified TERNARY ('own','shared','subscribed').
+//
+// WHY THIS MIGRATION EXISTS (the stranded-DB defect). Migration 008 shipped a
+// BINARY CHECK ('own','subscribed') at commit f06fcc2, then was amended IN PLACE
+// to the ternary CHECK at 302a6aa (for fresh DBs). But the runner (migrate.ts)
+// SKIPS any version already recorded in schema_migrations, and SQLite has NO
+// `ALTER TABLE ... ALTER/DROP CONSTRAINT` — so a DB that already ran the binary
+// 008 keeps the binary CHECK FOREVER and rejects every `source='shared'` write.
+// An in-place edit of 008 can never reach such a DB; a NEW version must. 009
+// rebuilds `vaults` to the ternary CHECK via the SQLite 12-step table-rebuild,
+// converging a stranded-binary DB. Migration 008 STAYS ternary (fresh DBs get the
+// right shape from 008 directly and 009 is then a rebuild-to-the-same-shape).
+//
+// IDEMPOTENT / SAFE ON A FRESH TERNARY-008 DB: the per-version skip runs 009
+// exactly once. On a fresh DB (ternary 008 already applied) 009 rebuilds `vaults`
+// to a byte-equivalent ternary shape — a harmless no-op-equivalent; every `source`
+// value (own/shared/subscribed) is copied forward unchanged.
+//
+// WHAT IS PRESERVED VERBATIM (the CURRENT post-001/003/004/008 `vaults` shape):
+//  - all 13 base columns from the 003 rebuild (rid PK, name, path UNIQUE,
+//    memscope_rid, parent_vault, home_mesh_rid, tier_hint, the 5-value `status`
+//    CHECK, git_url, created_at, registered_at, last_verified_at, verify_fail_count);
+//  - the `leaf` VIRTUAL generated column added by 004 — RECREATED verbatim in the
+//    new table's CREATE (a generated column CANNOT appear in the INSERT column
+//    list, so it is DELIBERATELY omitted from the copy — SQLite recomputes it);
+//  - both FKs (parent_vault → vaults ON DELETE SET NULL; home_mesh_rid → meshes
+//    ON DELETE SET NULL);
+//  - all SIX indexes on `vaults` (idx_vaults_name, idx_vaults_status,
+//    idx_vaults_home_mesh_rid from 003; idx_vaults_leaf, idx_vaults_git_url from
+//    004; idx_vaults_source from 008).
+// ONLY `source`'s CHECK changes: binary → ternary. `vaults` carries NO triggers
+// (grep-confirmed), so none are recreated.
+//
+// CIRCULAR FK: `meshes.main_vault_rid → vaults(rid)` points INTO `vaults`. The
+// FK-off window lets us DROP+RENAME `vaults` without that inbound FK (or the
+// dependent-table FKs in mesh_vaults/mesh_edges/mesh_subscriptions/machine_leases/
+// vault_aliases) re-resolving mid-rebuild; the RENAME re-binds every by-name FK to
+// the rebuilt table (sqlite_version >= 3.25, true for bundled libSQL). Mirrors the
+// vetted 003/005/006 FK-off single-table-rebuild idiom exactly.
+//
+// RUNNER CONTRACT (migrate.ts): the runner has NO wrapping txn — it splits `sql`
+// on top-level `;` and runs each statement individually. So the migration
+// self-manages the FK toggle + explicit BEGIN/COMMIT. `PRAGMA foreign_keys` is a
+// no-op inside a transaction, so the OFF/ON toggles sit OUTSIDE the BEGIN..COMMIT
+// (OFF before BEGIN, ON after COMMIT). The leading `DROP TABLE IF EXISTS
+// vaults_new` makes the migration crash-retry re-runnable.
+//
+// NOVEL SUBSTRATE: another FK-off table-rebuild through the split-statement runner
+// (the fourth after 003/005/006) — carries the mandatory novel-substrate /release
+// review (repo CLAUDE.md) of the literal SQL.
+const migration009VaultSourceTernary: Migration = {
+  version: 9,
+  name: "vault-source-ternary-check",
+  sql: `
+-- Step 0: crash-retry re-runnability — clear any half-built scratch table from a
+-- prior aborted run before we begin.
+DROP TABLE IF EXISTS vaults_new;
+
+-- Step 1: disable FK enforcement (OUTSIDE any transaction — PRAGMA is a no-op
+-- inside one). Lets us drop/rename vaults without its inbound circular FK
+-- (meshes.main_vault_rid) or the dependent-table FKs re-resolving mid-rebuild.
+PRAGMA foreign_keys=OFF;
+
+-- Step 2: one transaction wraps the whole rebuild.
+BEGIN;
+
+-- Step 3: new vaults table — IDENTICAL to the current post-004/008 shape EXCEPT
+-- source's CHECK is the ternary ('own','shared','subscribed'). The leaf VIRTUAL
+-- generated column (004) is recreated verbatim; both FKs and every column shape
+-- are preserved.
+CREATE TABLE vaults_new (
+  rid BLOB PRIMARY KEY,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  memscope_rid BLOB,
+  parent_vault BLOB,
+  home_mesh_rid BLOB,
+  tier_hint TEXT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disconnected', 'missing', 'tombstoned', 'access_lost')),
+  git_url TEXT,
+  created_at TEXT,
+  registered_at TEXT NOT NULL,
+  last_verified_at TEXT,
+  verify_fail_count INTEGER NOT NULL DEFAULT 0,
+  leaf TEXT GENERATED ALWAYS AS (
+    CASE
+      WHEN instr(name, '/') = 0 THEN name
+      ELSE replace(name, rtrim(name, replace(name, '/', '')), '')
+    END
+  ) VIRTUAL,
+  source TEXT NOT NULL DEFAULT 'own' CHECK (source IN ('own', 'shared', 'subscribed')),
+  FOREIGN KEY (parent_vault) REFERENCES vaults(rid) ON DELETE SET NULL,
+  FOREIGN KEY (home_mesh_rid) REFERENCES meshes(rid) ON DELETE SET NULL
+);
+
+-- Step 4: copy data with an EXPLICIT named column list (never SELECT *). The
+-- generated \`leaf\` column is DELIBERATELY omitted (it cannot be written; SQLite
+-- recomputes it). Every real column — including \`source\` — is carried verbatim,
+-- so own/shared/subscribed values all survive byte-for-byte.
+INSERT INTO vaults_new (
+  rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint,
+  status, git_url, created_at, registered_at, last_verified_at, verify_fail_count,
+  source
+)
+SELECT
+  rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint,
+  status, git_url, created_at, registered_at, last_verified_at, verify_fail_count,
+  source
+FROM vaults;
+
+-- Step 5: drop the old table.
+DROP TABLE vaults;
+
+-- Step 6: rename the rebuilt table into place. SQLite re-points the child FKs in
+-- mesh_vaults / mesh_edges / mesh_subscriptions / machine_leases / vault_aliases
+-- and the inbound meshes.main_vault_rid FK to the renamed table (sqlite_version
+-- >= 3.25).
+ALTER TABLE vaults_new RENAME TO vaults;
+
+-- Step 7: recreate ALL SIX indexes that lived on vaults (003 + 004 + 008).
+CREATE INDEX IF NOT EXISTS idx_vaults_name ON vaults(name);
+CREATE INDEX IF NOT EXISTS idx_vaults_status ON vaults(status);
+CREATE INDEX IF NOT EXISTS idx_vaults_home_mesh_rid ON vaults(home_mesh_rid);
+CREATE INDEX IF NOT EXISTS idx_vaults_leaf ON vaults(leaf);
+CREATE INDEX IF NOT EXISTS idx_vaults_git_url ON vaults(git_url);
+CREATE INDEX IF NOT EXISTS idx_vaults_source ON vaults(source);
+
+-- Step 8: commit the rebuild.
+COMMIT;
+
+-- Step 9: re-enable FK enforcement (OUTSIDE the transaction). The runner's
+-- production open path (client.ts) also sets foreign_keys=ON per connection, so
+-- this guards the in-migration connection.
+PRAGMA foreign_keys=ON;
+`,
+};
+
+// Inc-2 Phase B slice 2 / MA (2026-07-11) — mesh-provenance flag closing the
+// origin-hijack. B2a derives a leaf vault's repo OWNER from its home mesh's org
+// `push_target`. That push_target comes UNVALIDATED from a foreign mesh.yon (via
+// mesh-join → insertMesh), so a user who homes their OWN vault in a FOREIGN-
+// JOINED org mesh would publish it to the FOREIGN org (repo hijack). The fix
+// gates owner-derivation on the mesh being OWN-created (mesh init), never joined.
+//
+// `own_created` is a dedicated BOOLEAN provenance flag — NOT a status/source enum
+// value. FAIL-CLOSED default 0: every existing row (pre-migration) AND every
+// insert that does not positively assert own-creation reads as NOT own-created,
+// so owner-derivation falls back to the federation handle (the safe pre-B2a
+// behavior). Only `mesh init` sets it to 1; `mesh join` (and the foreign/bucket/
+// reconstitution insert paths) leave it 0.
+//
+// REPLAY-SAFETY (Inc-2 0.12.0 fix-pass): the original 010 was a BARE
+// `ALTER TABLE meshes ADD COLUMN own_created` with NO crash-retry guard. The
+// runner (migrate.ts) stamps schema_migrations ONLY AFTER every statement runs,
+// so a crash AFTER the ALTER lands but BEFORE the version-10 stamp replays the
+// whole migration on recovery — and a bare ADD COLUMN is NOT idempotent in
+// SQLite/libSQL (no `ADD COLUMN IF NOT EXISTS`): the replay throws "duplicate
+// column name: own_created", which wedges EVERY registry open (vault list / mesh
+// list / sync all dead) with no recovery path. The fix folds own_created into the
+// SAME crash-retry-safe FK-off single-table-rebuild idiom migration 009 uses for
+// the `vaults` circular-FK table: DROP TABLE IF EXISTS meshes_new → CREATE with
+// own_created baked in → copy the SURVIVING columns (own_created is DELIBERATELY
+// omitted from the copy so it re-takes its DEFAULT 0 identically on a fresh run
+// AND on a replay — mirroring migration 003 step 8's kind-column idiom) →
+// drop+rename. Replaying it is a no-op-equivalent (rebuilds an already-correct
+// shape) and never throws.
+//
+// CIRCULAR FK: `vaults.home_mesh_rid → meshes(rid)` points INTO meshes, and
+// `meshes.main_vault_rid → vaults(rid)` points back out. The FK-off window lets
+// us DROP+RENAME meshes without that inbound FK (or the dependent-table FKs in
+// mesh_vaults / mesh_edges / mesh_subscriptions) re-resolving mid-rebuild; the
+// RENAME re-binds every by-name FK to the rebuilt table (sqlite_version >= 3.25,
+// true for bundled libSQL). Mirrors the vetted 003/005/006/009 FK-off idiom.
+//
+// WHAT IS PRESERVED VERBATIM: all six meshes columns from the 003 rebuild (rid PK,
+// name, push_target, push_kind CHECK, main_vault_rid, created_at), the
+// main_vault_rid → vaults FK (ON DELETE SET NULL), and idx_meshes_name. ONLY
+// own_created is added.
+//
+// RUNNER CONTRACT (migrate.ts): the runner has NO wrapping txn — it splits `sql`
+// on top-level `;` and runs each statement individually. So the migration self-
+// manages the FK toggle + explicit BEGIN/COMMIT. `PRAGMA foreign_keys` is a no-op
+// inside a transaction, so the OFF/ON toggles sit OUTSIDE the BEGIN..COMMIT (OFF
+// before BEGIN, ON after COMMIT). The leading `DROP TABLE IF EXISTS meshes_new`
+// makes the migration crash-retry re-runnable.
+//
+// NOVEL SUBSTRATE: another FK-off table-rebuild through the split-statement runner
+// (the fifth after 003/005/006/009) — carries the mandatory novel-substrate
+// /release review (repo CLAUDE.md) of the literal SQL.
+const migration010MeshOwnCreated: Migration = {
+  version: 10,
+  name: "mesh-own-created-provenance",
+  sql: `
+-- Step 0: crash-retry re-runnability — clear any half-built scratch table from a
+-- prior aborted run before we begin.
+DROP TABLE IF EXISTS meshes_new;
+
+-- Step 1: disable FK enforcement (OUTSIDE any transaction — PRAGMA is a no-op
+-- inside one). Lets us drop/rename meshes without its inbound circular FK
+-- (vaults.home_mesh_rid) or the dependent-table FKs re-resolving mid-rebuild.
+PRAGMA foreign_keys=OFF;
+
+-- Step 2: one transaction wraps the whole rebuild.
+BEGIN;
+
+-- Step 3: new meshes table — IDENTICAL to the current post-003 shape EXCEPT the
+-- added own_created provenance flag (fail-closed DEFAULT 0, CHECK IN (0,1)). The
+-- main_vault_rid → vaults FK is preserved verbatim.
+CREATE TABLE meshes_new (
+  rid BLOB PRIMARY KEY,
+  name TEXT NOT NULL,
+  push_target TEXT,
+  push_kind TEXT CHECK (push_kind IN ('handle', 'org')),
+  main_vault_rid BLOB,
+  created_at TEXT NOT NULL,
+  own_created INTEGER NOT NULL DEFAULT 0 CHECK (own_created IN (0, 1)),
+  FOREIGN KEY (main_vault_rid) REFERENCES vaults(rid) ON DELETE SET NULL
+);
+
+-- Step 4: copy data with an EXPLICIT named column list (never SELECT *). own_created
+-- is DELIBERATELY omitted from the copy so it re-takes its DEFAULT 0 identically —
+-- on a FRESH run (old meshes has no own_created) AND on a crash-retry replay (old
+-- meshes already HAS own_created, but we still copy only the six originals, so the
+-- DEFAULT re-applies byte-identically). Mirrors migration 003 step 8's kind idiom.
+INSERT INTO meshes_new (rid, name, push_target, push_kind, main_vault_rid, created_at)
+SELECT rid, name, push_target, push_kind, main_vault_rid, created_at FROM meshes;
+
+-- Step 5: drop the old table.
+DROP TABLE meshes;
+
+-- Step 6: rename the rebuilt table into place. SQLite re-points the child FKs in
+-- vaults (home_mesh_rid) / mesh_vaults / mesh_edges / mesh_subscriptions to the
+-- renamed table (sqlite_version >= 3.25).
+ALTER TABLE meshes_new RENAME TO meshes;
+
+-- Step 7: recreate the name index verbatim from 001/003.
+CREATE INDEX IF NOT EXISTS idx_meshes_name ON meshes(name);
+
+-- Step 8: commit the rebuild.
+COMMIT;
+
+-- Step 9: re-enable FK enforcement (OUTSIDE the transaction). The runner's
+-- production open path (client.ts) also sets foreign_keys=ON per connection, so
+-- this guards the in-migration connection.
+PRAGMA foreign_keys=ON;
+`,
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   migration001Init,
   migration002Aliases,
@@ -740,4 +1039,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration005DropExternalMesh,
   migration006MeshEdgePk,
   migration007NudgeState,
+  migration008VaultSource,
+  migration009VaultSourceTernary,
+  migration010MeshOwnCreated,
 ];

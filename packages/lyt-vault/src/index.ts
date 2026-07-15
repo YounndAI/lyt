@@ -292,6 +292,8 @@ export { regenContextFlow } from "./flows/regen-context.js";
 export type { RegenContextResult } from "./flows/regen-context.js";
 export { rebuildVaultIndexFlow } from "./flows/rebuild-index.js";
 export type { RebuildIndexArgs, RebuildIndexResult } from "./flows/rebuild-index.js";
+export { migrateVaultGitignoreIndexRule } from "./flows/migrate-gitignore.js";
+export type { MigrateGitignoreResult } from "./flows/migrate-gitignore.js";
 export {
   rebuildLanesFlow,
   parseFrontmatterTags,
@@ -443,6 +445,22 @@ export type {
 } from "./flows/rebuild-vault.js";
 export { reindexFlow } from "./flows/reindex.js";
 export type { ReindexArgs, ReindexResult, ReindexScope } from "./flows/reindex.js";
+// Inc-2 Phase B / lazy repair for already-commingled foreign vaults.
+export { repairForeignHomingFlow } from "./flows/repair-foreign-homing.js";
+export type {
+  RepairForeignHomingArgs,
+  RepairForeignHomingResult,
+  RelocatedForeignVault,
+} from "./flows/repair-foreign-homing.js";
+// B2a (Inc-2 Phase B slice 2 / M1) — org-mesh vault origin-owner repair. Wired
+// into repairFlow as the `mis-owned-origin` finding class; also exported for
+// direct invocation.
+export { repairVaultOriginOwnerFlow } from "./flows/repair-vault-origin-owner.js";
+export type {
+  RepairVaultOriginOwnerArgs,
+  RepairVaultOriginOwnerResult,
+  RepointedOrigin,
+} from "./flows/repair-vault-origin-owner.js";
 // Phase D (0.10.0 frontmatter-contract lane) — disk↔index + frontmatter-contract
 // DETECT primitives (pure, read-only; the meta CLI's backfill/reconcile verbs +
 // the doctor check consume these). The HEAL side lives in @younndai/lyt.
@@ -566,6 +584,11 @@ export { makeReceipt } from "./op/receipt.js";
 // wrappers already decorate (A.G release review C1). `firewall`/`isFirewalled` ride
 // along for callers that decorate a thrown error rather than a resolved stderr.
 export { narrate, firewall, isFirewalled } from "./util/git-error-firewall.js";
+// 0.12.0 Phase D · A6 — the share-revoke access-loss classifier + narration
+// (same firewall class). The sync / sync --check / vault info surfaces call
+// these to detect a revoked-access `Repository not found` / 404 and surface a
+// plain "access removed" message instead of a raw git noun or a stale `active`.
+export { isAccessRemoved, narrateAccessRemoved } from "./util/git-error-firewall.js";
 export type {
   NarratedError,
   FirewalledError,
@@ -952,6 +975,9 @@ export {
   CorruptLytDbError,
   openLytDbActionable,
   isLytDbCorrupt,
+  // Phase C (C-2) — the win32 EBUSY/EPERM rename retry primitive, reused by the
+  // rename-aside connect flow to survive libSQL's post-close handle hold.
+  renameWithRetry,
 } from "./registry/vault-db.js";
 export {
   LEDGER_REGISTRY,
@@ -1143,6 +1169,17 @@ export type {
   ConnectStatus,
   ConnectGitRunner,
 } from "./flows/federation/connect.js";
+// Phase C (B4) — the rename-aside ACTIONABLE connect path. When
+// connectPodFlow's guard detects an existing remote pod WITH CONTENT, the `lyt
+// sync` command offers the 3-option menu and (on "adopt") runs this flow: back
+// up the whole LYT_HOME aside, L0-strip the backup's junctions, adopt the remote
+// fresh, and hand off the merge to the Obsidian-import funnel.
+export { adoptRemoteRenameAsideFlow } from "./flows/federation/adopt-remote-rename-aside.js";
+export type {
+  AdoptRemoteRenameAsideArgs,
+  AdoptRemoteRenameAsideResult,
+  RenameAsideStatus,
+} from "./flows/federation/adopt-remote-rename-aside.js";
 export {
   openOutbox,
   closeOutbox,
@@ -1156,10 +1193,15 @@ export {
 export type { OutboxOp, OutboxEntry } from "./flows/federation/outbox.js";
 // Brief B (B.5 / a review finding) — pod.yon-driven recovery (clone + register each
 // @FED_VAULT repo on a clean machine).
-export { recoverVaultsFromPodManifest } from "./flows/federation/recover-pod.js";
+export {
+  recoverVaultsFromPodManifest,
+  reconstructionExitCode,
+} from "./flows/federation/recover-pod.js";
 export type {
   RecoverPodArgs,
   RecoverPodResult,
+  RecoverDrop,
+  RecoverDropClassification,
   VaultCloneFn,
 } from "./flows/federation/recover-pod.js";
 export type { AdoptAndPrimeArgs, AdoptAndPrimeResult } from "./flows/adopt-and-prime.js";
@@ -1373,6 +1415,39 @@ export {
   listSubscriptionShards,
 } from "./yon/subscription-ledger-read.js";
 export type { SubscriptionRecord, LiveSubscription } from "./yon/subscription-ledger-read.js";
+// Inc-2 Phase 0 — per-writer append-only @FED_VAULT / @FED_MESH
+// manifest ledger (HLC-LWW register keyed on rid). The sharded-CRDT write/merge
+// SoT under the byte-stable `pod.yon` derived view.
+export {
+  appendFedVaultRecord,
+  appendFedVaultActive,
+  appendFedVaultTombstone,
+  getFedVaultLedgerDir,
+} from "./yon/federation-vault-ledger-write.js";
+export type { AppendFedVaultArgs, FedVaultState } from "./yon/federation-vault-ledger-write.js";
+export {
+  foldFedVaults,
+  liveFedVaults,
+  readAllFedVaultRecords,
+  listFedVaultShards,
+  observedMaxFedVaultHlc,
+} from "./yon/federation-vault-ledger-read.js";
+export type { FedVaultLedgerRecord, LiveFedVault } from "./yon/federation-vault-ledger-read.js";
+export {
+  appendFedMeshRecord,
+  appendFedMeshActive,
+  appendFedMeshTombstone,
+  getFedMeshLedgerDir,
+} from "./yon/federation-mesh-ledger-write.js";
+export type { AppendFedMeshArgs, FedMeshState } from "./yon/federation-mesh-ledger-write.js";
+export {
+  foldFedMeshes,
+  liveFedMeshes,
+  readAllFedMeshRecords,
+  listFedMeshShards,
+  observedMaxFedMeshHlc,
+} from "./yon/federation-mesh-ledger-read.js";
+export type { FedMeshLedgerRecord, LiveFedMesh } from "./yon/federation-mesh-ledger-read.js";
 export { renderLanesYon, writeLanesDoc, getLanesYonPath } from "./yon/lanes-write.js";
 export type { LaneRecord, LaneMemberRecord, LanesDoc } from "./yon/lanes-write.js";
 export { parseLanesFile } from "./yon/lanes-read.js";

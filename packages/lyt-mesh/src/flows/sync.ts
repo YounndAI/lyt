@@ -24,19 +24,24 @@ import {
   deriveWriteGate,
   GitRemoteProvider,
   getHandleFromIdentity,
+  isAccessRemoved,
   isConfigPath,
   isFigmentPath,
   isLytDbCorrupt,
   isPermissionDeniedPush,
   listMeshes,
+  migrateVaultGitignoreIndexRule,
   listSubscriptionsForMesh,
   listVaults,
   narrate,
+  narrateAccessRemoved,
   openRegistry,
   readFigmentTitle,
   readFrozenLock,
+  realIdentityRunner,
   regenContextFlow,
   runGit as defaultRunGit,
+  updateVaultStatus,
   upsertArcsCache,
   upsertFtsCache,
   upsertLanesCache,
@@ -77,7 +82,35 @@ export type VaultSyncStatus =
   | "skipped-missing"
   | "no-upstream"
   | "not-git-repo"
+  // 0.12.0 Phase D · A6 — the online copy replied `Repository not found` / 404:
+  // our access was revoked (or the repo was deleted). Distinct from a transient
+  // `error` (couldn't reach) — this is a definite access-loss, persisted to the
+  // registry as `access_lost` so `vault info` reflects it.
+  | "access-lost"
   | "error";
+
+// 0.12.0 Phase D · A1 — concurrent-write conflict resolution choice. A 2-machine/
+// 2-user edit that rebase-conflicts is resolved by ONE plain choice — never a raw
+// marker. `mine` keeps the local version, `theirs` keeps the online version, and
+// `both` is the safe never-lose default (preserve local on disk + the online copy
+// stays online; nothing overwritten).
+export type ConflictChoice = "mine" | "theirs" | "both";
+
+export interface ConflictContext {
+  vaultName: string;
+  /** The plain note paths that conflicted (never a git noun). */
+  conflictPaths: readonly string[];
+}
+
+/**
+ * Resolve a concurrent-write conflict to a single plain choice. Supplied by the
+ * command layer (a TTY prompt, or a non-TTY safe default of `both`). When absent
+ * (programmatic callers / legacy tests), the flow preserves its pre-A1 behavior:
+ * abort + a plain `conflict` report.
+ */
+export type ConflictResolver = (
+  ctx: ConflictContext,
+) => ConflictChoice | Promise<ConflictChoice>;
 
 export interface VaultSyncReport {
   name: string;
@@ -124,6 +157,10 @@ export interface VaultSyncReport {
   // future inverse class can't silently drift this field out of sync (a review finding,
   // coupled-constant discipline).
   reversible?: Inverse["class"];
+  // 0.12.0 Phase D · A1 — set when a concurrent-write conflict was resolved via
+  // the plain keep-mine/theirs/both choice (absent when there was no conflict, or
+  // when no resolver was supplied and the legacy `conflict` report was returned).
+  conflictResolution?: ConflictChoice;
 }
 
 export interface SyncFrictionHint {
@@ -161,6 +198,19 @@ export interface SyncFlowArgs {
   // the pre-A.4 inline push/pull). Tests inject a fake to drive the honest
   // horizon (pushed vs committed-not-pushed) deterministically.
   remote?: RemoteProvider;
+  // 0.12.0 Phase D · A1 — concurrent-write conflict resolver. When supplied and a
+  // rebase conflict occurs, the flow surfaces a plain keep-mine/theirs/both choice
+  // through this callback and applies it (never a raw marker). When absent, the
+  // pre-A1 legacy `conflict` report is returned unchanged (back-compat).
+  resolveConflict?: ConflictResolver;
+  // A6-1 (0.12.0 Phase D fix-pass) — the current gh-auth verdict, consulted ONLY
+  // when a fetch fails with a `Repository not found` / 404. GitHub returns that
+  // same 404 for a private repo the user is merely UNAUTHORIZED to see (logged-out
+  // HTTPS creds / expired-or-underscoped token / SSO) — a fixable auth state, not a
+  // revoke. When auth is not confirmed valid, the 404 is treated as a transient
+  // reach failure (never `access_lost`). Defaults to the real `gh auth status`;
+  // injectable for deterministic tests.
+  ghAuthOk?: () => boolean | null;
 }
 
 const MESH_CONTEXT_PATH = ".lyt/mesh-context.md";
@@ -171,6 +221,9 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
   // seam, so behavior is unchanged when no fake is injected.
   const remote = args.remote ?? new GitRemoteProvider(runGit);
   const now = args.now ?? new Date();
+  // A6-1 (0.12.0 Phase D fix-pass) — the gh-auth verdict, consulted only on a
+  // fetch-404 to distinguish a genuine revoke from an unauthed/expired 404.
+  const ghAuthOk = args.ghAuthOk ?? (() => realIdentityRunner.ghAuthStatus());
   const db = await openRegistry();
   let candidates: VaultRow[];
   // v1.C.2 — derive the set of subscribed-vault rids across all
@@ -230,6 +283,8 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       args.resolveMeshContext === true,
       args.message,
       readOnlyRidHexes.has(ridHex),
+      args.resolveConflict,
+      ghAuthOk,
     );
     if (subscribedRidHexes.has(ridHex)) {
       report.subscribed = true;
@@ -256,7 +311,48 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     }
     reports.push(report);
   }
-  const ok = reports.every((r) => r.status !== "conflict" && r.status !== "error");
+  // 0.12.0 Phase D · A6 — reconcile the registry from what the loop observed. Done
+  // once, post-loop (syncOneVault has no db handle); best-effort — a persist hiccup
+  // never fails the sync (the report already carries the honest per-vault status).
+  //
+  // A6-3 fix-pass — key the persist by RID via INDEX correlation (reports[i]
+  // corresponds to candidates[i]), NOT by `name`. `vaults.name UNIQUE` was dropped
+  // (registry/migrations.ts:248 — two same-named vaults from different origins can
+  // coexist), so matching on `name` false-flipped an innocent same-named sibling.
+  //
+  // A6-2 fix-pass — reconcile BOTH directions: persist `access_lost` for a fresh
+  // revoke, AND recover `access_lost → active` for a vault that reached its online
+  // copy cleanly this run (a re-granted share). Without the recovery leg, a vault
+  // that syncs fine still reported "no access" on `vault info` / `sync --check`.
+  const reconcileTargets: { rid: Uint8Array; status: "access_lost" | "active" }[] = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const v = candidates[i];
+    const r = reports[i];
+    if (v === undefined || r === undefined) continue;
+    if (r.status === "access-lost" && v.status !== "access_lost") {
+      reconcileTargets.push({ rid: v.rid, status: "access_lost" });
+    } else if (v.status === "access_lost" && isReachedOnlineStatus(r.status)) {
+      // Recovery: a previously-lost vault that reached online cleanly this run.
+      reconcileTargets.push({ rid: v.rid, status: "active" });
+    }
+  }
+  if (reconcileTargets.length > 0) {
+    const persistDb = await openRegistry();
+    try {
+      for (const t of reconcileTargets) {
+        try {
+          await updateVaultStatus(persistDb, t.rid, t.status);
+        } catch {
+          // non-fatal — the report already surfaces the honest status this run.
+        }
+      }
+    } finally {
+      await closeRegistry(persistDb);
+    }
+  }
+  const ok = reports.every(
+    (r) => r.status !== "conflict" && r.status !== "error" && r.status !== "access-lost",
+  );
   return { reports, ok, frictionHints: deriveFrictionHints(reports) };
 }
 
@@ -276,7 +372,36 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
 // ledger → lanes → arcs → fts. The downstream upsert flows each early-
 // return ran=false when their SoT is absent, so calling all four on a
 // vault that only has notes/ (or only ledgers) is cheap, not wasteful.
-async function reconcileVaultCaches(vaultPath: string, vaultName: string): Promise<void> {
+async function reconcileVaultCaches(
+  vaultPath: string,
+  vaultName: string,
+  opts?: { skipGitignoreMigration?: boolean },
+): Promise<void> {
+  // CRIT-A (residual sweep): self-heal a stale bare `.lyt/indexes/`
+  // gitignore rule → `.lyt/indexes/*` on every sync post-pull, so the installed
+  // base (which fresh-init never touched) starts staging the committed
+  // lanes.yon/arcs.yon. Best-effort + non-fatal, matching the upsert posture
+  // below; idempotent + no-op when already migrated/absent.
+  //
+  // re-release review Major (residual sweep): GATED to writable/own vaults.
+  // `reconcileVaultCaches` also runs on the READ-ONLY subscriber pull path (the
+  // two `if (readOnly)` call sites pass `skipGitignoreMigration: true`). A
+  // subscriber can never stage/push the reincluded cluster YON, so rewriting its
+  // tracked `.gitignore` there is pure downside: it dirties the read-only tree →
+  // the NEXT sync sees ` M .gitignore` → `dirtyCount>0` → a false
+  // `readonlyDiverged` with a looping "discard to match the shared original"
+  // remedy for a file Lyt itself wrote. The migration therefore fires only on
+  // the writable/own call sites (default), never on the read-only path.
+  if (!opts?.skipGitignoreMigration) {
+    try {
+      migrateVaultGitignoreIndexRule(vaultPath);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `lyt sync: gitignore index-rule migration failed for ${vaultName}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   try {
     await upsertLedgerCache(vaultPath);
   } catch (err) {
@@ -328,6 +453,23 @@ async function reconcileVaultCaches(vaultPath: string, vaultName: string): Promi
   writeIndexWatermark(vaultPath);
 }
 
+// A6-2 (0.12.0 Phase D fix-pass) — true when a per-vault sync status proves the
+// online copy was REACHED cleanly this run (the fetch succeeded and the sync
+// completed without an error/conflict/skip). These are exactly the statuses that
+// can only be produced after a successful `git fetch`, so they are the honest
+// signal that a previously `access_lost` vault has recovered. `no-upstream`
+// (no remote), `not-git-repo`, `error`, `conflict`, `access-lost`, and every
+// `skipped-*` are excluded — none of them proves a clean reach.
+function isReachedOnlineStatus(status: VaultSyncStatus): boolean {
+  return (
+    status === "clean" ||
+    status === "committed" ||
+    status === "pushed" ||
+    status === "pulled" ||
+    status === "diverged-synced"
+  );
+}
+
 function deriveFrictionHints(reports: readonly VaultSyncReport[]): SyncFrictionHint[] {
   const hints: SyncFrictionHint[] = [];
   for (const r of reports) {
@@ -358,6 +500,8 @@ async function syncOneVault(
   resolveMeshContext: boolean,
   messageOverride?: string,
   readOnly = false,
+  resolveConflict?: ConflictResolver,
+  ghAuthOk: () => boolean | null = () => realIdentityRunner.ghAuthStatus(),
 ): Promise<VaultSyncReport> {
   const base: VaultSyncReport = {
     name: vault.name,
@@ -400,6 +544,28 @@ async function syncOneVault(
   if (hasUpstreamFlag) {
     const fetched = await runGit(["fetch", "--quiet"], { cwd: vault.path, allowFailure: true });
     if (fetched.code !== 0) {
+      // 0.12.0 Phase D · A6 — a `Repository not found` / 404 on fetch means our
+      // access was revoked (or the repo was deleted) — a DEFINITE access-loss,
+      // distinct from a transient reachability blip. `isAccessRemoved` excludes
+      // offline signals (host unreachable / timeout) so a merely-disconnected
+      // machine is never mis-flagged. Surface the plain "access removed"
+      // narration + the `access-lost` status (persisted to the registry by the
+      // syncFlow loop) so the human — and `vault info` — see the real state
+      // instead of a stale `active`. Raw stderr stays on `errorOutput`.
+      // A6-1 fix-pass — a `Repository not found` / 404 is only a genuine revoke
+      // when gh auth is CONFIRMED valid; the same 404 under logged-out / expired /
+      // SSO-unauthorized creds is a FIXABLE auth state, not a revoke. Pass the auth
+      // verdict so an unauthed 404 falls through to the transient reach-failure
+      // surface below (never a false `access_lost` flip).
+      if (isAccessRemoved(fetched.stderr, { ghAuthOk: ghAuthOk() })) {
+        const narrated = narrateAccessRemoved();
+        return {
+          ...base,
+          status: "access-lost",
+          message: `${narrated.plain} ${narrated.nextAction}`,
+          errorOutput: fetched.stderr,
+        };
+      }
       // firewall-C1 fix-pass — this is an allowFailure path (no throw), so the raw
       // stderr never passed through the spawn-wrapper's narration. This is a READ
       // failure (couldn't reach the online copy to check for updates); narrate()'s
@@ -460,14 +626,108 @@ async function syncOneVault(
       // routed through the RemoteProvider port — a read-only sync never pushes
       // and emits no SyncOperation/horizon, so porting it would be pure churn
       // with no honest-horizon benefit. Same git args either way.
-      const pulled = await runGit(["pull", "--rebase", "--quiet"], {
+      // A2c fix — `--autostash` (mirrors the pod-ledger pull, sync-pod-ledger.ts)
+      // so a subscriber that carries an uncommitted TRACKED edit STILL receives
+      // upstream. Without it, `git pull --rebase` ABORTS on the dirty tree
+      // ("cannot pull with rebase: You have unstaged changes") and the read-only
+      // copy silently stops receiving. Autostash stashes the edit, replays the
+      // (fast-forward — a pure subscriber has no local commits) pull, then pops
+      // the edit back.
+      const pulled = await runGit(["pull", "--rebase", "--autostash", "--quiet"], {
         cwd: vault.path,
         allowFailure: true,
       });
       if (pulled.code === 0) {
-        await reconcileVaultCaches(vault.path, vault.name);
-        pulledMsg = `Brought in ${behind} update(s) from the shared original; `;
-        behind = 0;
+        // Edge: `--autostash` COMPLETES the pull (exit 0, upstream received) yet
+        // can leave the tree with an UNRESOLVED autostash-pop conflict when the
+        // local edit overlaps an incoming change on the same lines — git prints
+        // "Applying autostash resulted in conflicts" but still exits 0. Detect
+        // it explicitly; never silently swallow a pop failure (the tree would
+        // carry `UU` conflict markers behind a false "clean receive" report).
+        const unmerged = await runGit(["diff", "--name-only", "--diff-filter=U"], {
+          cwd: vault.path,
+          allowFailure: true,
+        });
+        const popConflicted = unmerged.code === 0 && unmerged.stdout.trim().length > 0;
+        if (popConflicted) {
+          // The upstream updates DID land (HEAD moved forward); only re-applying
+          // the local edit conflicted. Git RETAINS the autostash entry in the
+          // stash on a pop conflict, so the edit is NOT lost — it lives in this
+          // vault's `git stash` (reachable there; NOT via `lyt capture`, which
+          // cannot see stash content — the pre-fix message pointed there and was
+          // a dead end). Clear the half-applied pop so this read-only copy is
+          // left genuinely CLEAN (never carrying `UU` markers, which would
+          // re-wedge the next pull). `git reset --hard HEAD` returns every
+          // tracked path to the received upstream in ALL cases — including the
+          // modify/delete edge where upstream DELETED a file the local edit
+          // modified (a plain `checkout HEAD -- .` cannot restore a path absent
+          // from HEAD, so its unmerged entry would linger and the tree would
+          // never be clean). `reset --hard` does not touch the stash, so the
+          // edit stays recoverable in every case.
+          const reset = await runGit(["reset", "--hard", "HEAD"], {
+            cwd: vault.path,
+            allowFailure: true,
+          });
+          // re-release review Major — read-only subscriber path: never rewrite the
+          // tracked `.gitignore` here (it would dirty the tree and loop a false
+          // readonlyDiverged on the next sync). Caches still reconcile.
+          await reconcileVaultCaches(vault.path, vault.name, { skipGitignoreMigration: true });
+          // VERIFY the remedy before claiming clean — never fall through to a
+          // "now matches the original" clean-claim on an unverified reset (the
+          // exact false-clean state this guard exists to prevent). Re-check for
+          // unmerged paths; report honestly if any linger or the reset failed.
+          const recheck = await runGit(["diff", "--name-only", "--diff-filter=U"], {
+            cwd: vault.path,
+            allowFailure: true,
+          });
+          const residualUnmerged = recheck.stdout
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+          const treeClean =
+            reset.code === 0 && recheck.code === 0 && residualUnmerged.length === 0;
+          const stashHint =
+            `Your edit was kept safely in this vault's git stash — view it with ` +
+            `\`git -C "${vault.path}" stash show -p\`, or bring it back with ` +
+            `\`git -C "${vault.path}" stash pop\` and copy it into a vault you own.`;
+          if (treeClean) {
+            return {
+              ...base,
+              status: "skipped-readonly",
+              readonlyDiverged: true,
+              message:
+                `Brought in ${behind} update(s) from the shared original. One of your local edits ` +
+                `overlapped an incoming change and couldn't be re-applied automatically, so this ` +
+                `shared copy now matches the original. ${stashHint}`,
+              ahead,
+              behind: 0,
+              dirtyCount: 0,
+            };
+          }
+          // Honest non-clean report — the reset did NOT fully clear the tree
+          // (reset failed, or unmerged paths remain). Do not claim clean; the
+          // edit is still preserved in the stash.
+          return {
+            ...base,
+            status: "skipped-readonly",
+            readonlyDiverged: true,
+            message:
+              `Brought in ${behind} update(s) from the shared original, but one of your local ` +
+              `edits overlapped an incoming change and this shared copy could not be automatically ` +
+              `returned to a clean state (it may still carry conflict markers). ${stashHint} Run ` +
+              `\`lyt doctor\` if this keeps happening.`,
+            ahead,
+            behind: 0,
+            dirtyCount: residualUnmerged.length,
+          };
+        } else {
+          // re-release review Major — read-only subscriber path: skip the tracked
+          // `.gitignore` self-heal (dirtying it would loop a false
+          // readonlyDiverged next sync). Caches still reconcile.
+          await reconcileVaultCaches(vault.path, vault.name, { skipGitignoreMigration: true });
+          pulledMsg = `Brought in ${behind} update(s) from the shared original; `;
+          behind = 0;
+        }
       }
       // A pull failure on a read-only vault is non-fatal here — we still report
       // skipped-readonly (no push is attempted regardless); the user's read-only
@@ -611,6 +871,9 @@ async function syncOneVault(
   }
 
   let meshContextResolved = false;
+  // 0.12.0 Phase D · A1 — set when a concurrent-write conflict was resolved via
+  // the plain keep-mine/theirs/both choice, so the final report carries it.
+  let conflictChoice: ConflictChoice | undefined;
   if (behind > 0) {
     // Increment 1 · Phase A.4 — pull routed through the RemoteProvider port. The
     // default GitRemoteProvider wraps the SAME `git pull --rebase --quiet` with
@@ -668,13 +931,102 @@ async function syncOneVault(
           await reconcileVaultCaches(vault.path, vault.name);
           reconciled = true;
         }
+      } else if (resolveConflict !== undefined && conflictPaths.length > 0 && !isMeshContextOnly) {
+        // A1-1 fix-pass — the `conflictPaths.length > 0` guard is load-bearing: a
+        // pull can fail with NO unmerged paths (a transient network blip mid-pull,
+        // a dirty-tree abort) — that is NOT a concurrent-write conflict. Without
+        // this guard, such a failure entered the resolver branch and, under the
+        // non-TTY `both` default, mis-narrated a plain reach failure as "you and
+        // your online copy changed the same note(s) … Lyt kept BOTH". With the
+        // guard, an empty-conflict pull failure falls through to the generic
+        // conflict/reach-failure surface below instead of the concurrent-write UX.
+        //
+        // 0.12.0 Phase D · A1 — a concurrent 2-machine/2-user write conflict.
+        // Surface the PLAIN keep-mine / keep-theirs / keep-both choice and apply
+        // it — never a raw rebase marker, never a silent data loss.
+        //
+        // MECHANISM: abort the rebase first (returns the tree to the clean local
+        // state — your version fully intact, no markers), THEN reconcile via a
+        // strategy MERGE. A merge (not a mid-rebase `checkout --ours/--theirs`)
+        // is used deliberately: the rebase ours/theirs are inverted + a
+        // conflict-resolved-to-one-side commit can go EMPTY and wedge
+        // `rebase --continue`; a merge with `-X ours`/`-X theirs` resolves
+        // conflicting hunks to the chosen side, keeps the OTHER side's
+        // non-conflicting changes, and always produces a clean, pushable merge
+        // commit. For a merge, "ours" = the local branch and "theirs" = the
+        // online copy (NOT inverted).
+        await runGit(["rebase", "--abort"], { cwd: vault.path, allowFailure: true });
+        const choice = await resolveConflict({ vaultName: vault.name, conflictPaths });
+        if (choice === "both") {
+          // The safe never-lose default (also the non-TTY default): keep BOTH —
+          // the local version stays on disk here, the online version stays online
+          // (still in the fetched remote copy). Nothing is overwritten; the user
+          // decides later. Reported as `conflict` so it still signals attention.
+          return {
+            ...base,
+            status: "conflict",
+            conflictResolution: "both",
+            message:
+              `You and your online copy changed the same note(s) at the same time: ` +
+              `${conflictPaths.join(", ") || "(unknown)"}. Lyt kept BOTH — your version is right ` +
+              `here on this machine and the online version is safe online, so nothing was ` +
+              `overwritten. Re-run \`lyt sync\` when you're ready to combine them.`,
+            ahead,
+            behind,
+            dirtyCount,
+            errorOutput: pulled.stderr,
+          };
+        }
+        // mine → keep local ( `-X ours` ); theirs → keep online ( `-X theirs` ).
+        const strategyOpt = choice === "mine" ? "ours" : "theirs";
+        const merged = await runGit(
+          ["merge", "--no-edit", `-X${strategyOpt}`, "@{u}"],
+          { cwd: vault.path, allowFailure: true },
+        );
+        if (merged.code !== 0) {
+          // The strategy merge didn't complete cleanly (rare — e.g. a
+          // rename/rename). Abort to a safe state (local intact) and fall back to
+          // the plain conflict report; never leak a marker.
+          await runGit(["merge", "--abort"], { cwd: vault.path, allowFailure: true });
+          return {
+            ...base,
+            status: "conflict",
+            message:
+              `You and your online copy changed the same note(s) in different ways, so Lyt ` +
+              `couldn't combine them automatically: ${conflictPaths.join(", ") || "(unknown)"}. ` +
+              `Your notes are safe and unchanged — nothing was overwritten. Re-run \`lyt sync\` ` +
+              `to try again, or copy your version into another vault to keep it.`,
+            ahead,
+            behind,
+            dirtyCount,
+            errorOutput: merged.stderr || pulled.stderr,
+          };
+        }
+        // Resolved. Reconcile caches from the merged tree, recompute ahead/behind
+        // (the merge commit is now ahead of the online copy, behind is cleared),
+        // then fall through to the push leg so the resolution reaches online.
+        conflictChoice = choice;
+        if (!reconciled) {
+          await reconcileVaultCaches(vault.path, vault.name);
+          reconciled = true;
+        }
+        const ab2 = await runGit(["rev-list", "--left-right", "--count", "HEAD...@{u}"], {
+          cwd: vault.path,
+          allowFailure: true,
+        });
+        if (ab2.code === 0) {
+          const parts = ab2.stdout.trim().split(/\s+/);
+          ahead = Number(parts[0]) || 0;
+          behind = Number(parts[1]) || 0;
+        }
       } else {
         await runGit(["rebase", "--abort"], { cwd: vault.path, allowFailure: true });
         // firewall-C1 fix-pass — plain conflict language (no git recipe). The
         // mesh-context-only case points at the ONE Lyt verb that heals it; the
         // general case names the affected notes (plain paths, not git nouns) and
-        // reassures the work is safe. Full plain keep-yours/theirs/both conflict
-        // UX is a later increment (charter BS5/MM1) — this narrates honestly today.
+        // reassures the work is safe. The keep-mine/theirs/both resolver branch
+        // above (A1) supersedes this when a resolver is supplied; this legacy
+        // branch is the no-resolver / mesh-context path.
         const recipe = isMeshContextOnly
           ? `Your vault's shared settings changed here and online at the same time. Re-run \`lyt sync --resolve-mesh-context\` and Lyt will sort it out for you.`
           : `You and your online copy changed the same note(s) in different ways, so Lyt couldn't combine them automatically: ${conflictPaths.join(", ") || "(unknown)"}. Your notes are safe and unchanged — nothing was overwritten. Re-run \`lyt sync\` to try again, or copy your version into another vault to keep it.`;
@@ -787,6 +1139,15 @@ async function syncOneVault(
     finalStatus = "pulled";
     message = `Brought in ${behind} update(s) from your online copy.`;
   }
+  // 0.12.0 Phase D · A1 — when a concurrent-write conflict was just resolved via
+  // keep-mine/keep-theirs, override the message with plain confirmation of which
+  // version was kept (the machine `status` stays the honest pushed/diverged
+  // label). `both` returns earlier, so only mine/theirs reach here.
+  if (conflictChoice === "mine") {
+    message = "You and your online copy changed the same note(s) — Lyt kept your version and saved it online.";
+  } else if (conflictChoice === "theirs") {
+    message = "You and your online copy changed the same note(s) — Lyt kept the online version.";
+  }
   return {
     ...base,
     status: finalStatus,
@@ -795,6 +1156,7 @@ async function syncOneVault(
     behind,
     dirtyCount,
     meshContextResolved,
+    ...(conflictChoice !== undefined ? { conflictResolution: conflictChoice } : {}),
     // Increment 1 · Phase A.4 — attach the honest horizon + reversibility class
     // when a push was attempted (ahead > 0). Read back from the SyncOperation's
     // actual push result; absent on pull-only / up-to-date / no-push syncs.
@@ -904,7 +1266,16 @@ export function classifyCheckStatus(args: {
 }): string {
   if (args.frozen) return "frozen";
   if (!args.hasUpstream) return "no-upstream";
-  if (args.dirtyCount > 0) return "dirty";
+  if (args.dirtyCount > 0) {
+    // A2a fix — a dirty tree must NOT erase a pending inbound-receive signal.
+    // The pre-fix `return "dirty"` short-circuited before `behind` was ever
+    // tested, so a subscriber that is BOTH dirty AND behind classified as bare
+    // "dirty" and the "to receive" count vanished. When there are updates to
+    // receive, return the combined `dirty-behind` status so the renderer can
+    // surface both the unsaved change count AND the pending receive count.
+    if (args.behind > 0) return "dirty-behind";
+    return "dirty";
+  }
   if (args.ahead > 0 && args.behind > 0) return "diverged";
   if (args.ahead > 0) return `ahead-${args.ahead}`;
   if (args.behind > 0) return `behind-${args.behind}`;

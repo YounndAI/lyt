@@ -52,6 +52,15 @@ export type GitRunner = (args: readonly string[], opts: GitRunOptions) => Promis
 
 export interface MaterializeVaultOptions {
   handle: string;
+  // B2a (Inc-2 Phase B slice 2) — the GitHub OWNER the vault repo lives under
+  // (gh-create target + `origin` URL owner). Defaults to `handle`. A vault homed
+  // in an ORG mesh passes the mesh's org `push_target` here so its repo is
+  // created/wired under the ORG, not the user's personal federation handle. Kept
+  // SEPARATE from `handle` (which still drives the local git commit identity +
+  // the invalid-handle skip) so the org owner only ever reaches the repo owner,
+  // never the commit author. Validated against isValidGhHandle before it can
+  // reach a git-remote/gh spawn.
+  repoOwner?: string | undefined;
   // Outward gh-create. B.1 = false (held); B.2 = true (post-consent). Default false.
   createRemoteIfMissing?: boolean | undefined;
   // Outward push. B.1 = false (held); B.2 = true (post-consent). Default false.
@@ -105,6 +114,9 @@ export async function materializeVaultPublishable(
   const setRemote = opts.setRemote ?? true;
   const visibility = opts.visibility ?? resolveConfig().defaultRepoVisibility;
   const { handle } = opts;
+  // B2a — the repo owner (gh-create + origin URL). Defaults to the federation
+  // handle; an org-mesh vault passes the mesh's org push_target.
+  const repoOwner = opts.repoOwner ?? handle;
   const repoName = vaultRepoName(vault.name);
   const warnings: string[] = [];
 
@@ -130,6 +142,12 @@ export async function materializeVaultPublishable(
   // anyway). Mirrors the guard adopt-and-prime + wizard apply before gh-walk.
   if (!isValidGhHandle(handle)) {
     return { ...result, skipped: true, skippedReason: "invalid-handle" };
+  }
+  // B2a — the repo owner ALSO feeds a git-remote URL + gh-create spawn, so it
+  // gets the same defense-in-depth handle validation (a poisoned org push_target
+  // must never reach the spawn as a `-`/`/`-bearing owner).
+  if (!isValidGhHandle(repoOwner)) {
+    return { ...result, skipped: true, skippedReason: "invalid-repo-owner" };
   }
   // Skip non-live vaults + missing paths — never materialize a tombstoned or
   // absent vault.
@@ -177,14 +195,16 @@ export async function materializeVaultPublishable(
   // retries (B.2 create-if-missing is the durable path via outbox).
   if (createRemote) {
     try {
-      const exists = await gh.repoExists(handle, repoName);
+      // B2a — create/probe under `repoOwner` (the org for an org-mesh vault),
+      // not the personal `handle`.
+      const exists = await gh.repoExists(repoOwner, repoName);
       if (!exists) {
-        await gh.createRepo(handle, repoName, visibility, formatRepoDescription(vault.name));
+        await gh.createRepo(repoOwner, repoName, visibility, formatRepoDescription(vault.name));
         result.repoCreated = true;
         try {
-          await gh.setRepoTopics(handle, repoName, BRAND_TOPICS);
+          await gh.setRepoTopics(repoOwner, repoName, BRAND_TOPICS);
         } catch (err) {
-          warnings.push(`topic-set failed for ${handle}/${repoName}: ${errMsg(err)}`);
+          warnings.push(`topic-set failed for ${repoOwner}/${repoName}: ${errMsg(err)}`);
         }
       }
     } catch (err) {
@@ -199,7 +219,8 @@ export async function materializeVaultPublishable(
   // a no-gh LOCAL init passes setRemote=false so the provisional handle
   // never lands in a remote URL; connect re-materializes with setRemote=true.
   if (setRemote) {
-    const originUrl = resolveRemoteUrl(handle, repoName);
+    // B2a — wire `origin` under `repoOwner` (org for an org-mesh vault).
+    const originUrl = resolveRemoteUrl(repoOwner, repoName);
     const origin = await git(["remote", "get-url", "origin"], {
       cwd: vault.path,
       allowFailure: true,

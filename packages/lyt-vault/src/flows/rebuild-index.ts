@@ -36,6 +36,7 @@ import {
   mapProvenanceYonToCacheArgs,
 } from "../registry/_helpers/ledger-yon-mapper.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
+import { migrateVaultGitignoreIndexRule } from "./migrate-gitignore.js";
 import { newUuidv7Bytes } from "../util/uuid7.js";
 import { KNOWN_LEDGERS, type LedgerName } from "./housekeep.js";
 
@@ -100,6 +101,14 @@ export async function rebuildVaultIndexFlow(args: RebuildIndexArgs): Promise<Reb
   if (args.force !== true) {
     await enforceNotFrozen(vault.path, vault.name);
   }
+
+  // CRIT-A (residual sweep): self-heal the installed base's stale bare
+  // `.lyt/indexes/` gitignore rule → `.lyt/indexes/*` so the committed
+  // lanes.yon/arcs.yon can stage. Idempotent + no-op when already migrated or
+  // absent; runs on BOTH the full and ledger-only rebuild paths (before the
+  // ledger branch returns) and on any `lyt reindex`. Not gated on the
+  // `.lyt/patterns/` marker (that gate is what makes adopt miss this).
+  migrateVaultGitignoreIndexRule(vault.path);
 
   // v1.A.2 ledger-only rebuild path. Skips the full DB drop; surgically
   // truncates the ledger's table + re-injects from YON SoT.

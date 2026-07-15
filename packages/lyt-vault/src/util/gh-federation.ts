@@ -67,6 +67,28 @@ export interface FederationGhClient {
   initLocalNoRemote(handle: string, localDir: string): Promise<void>;
   cloneExisting(handle: string, repoName: string, localDir: string): Promise<void>;
   commitAndOptionallyPush(localDir: string, message: string, push: boolean): Promise<void>;
+  // Phase C amendment-5 content-probe. Fetch the RAW `pod.yon` from the
+  // remote pod repo's default branch WITHOUT cloning it. Returns the file text,
+  // or `null` when the file is absent (HTTP 404) — i.e. an empty / partial
+  // pre-created `lyt-pod`. THROWS on a non-404 failure (auth / network / 5xx)
+  // so the caller can fail SAFE (treat "unknown" as content → defer, never a
+  // silent destructive dance on an unprobed remote). Optional so alternate
+  // clients / older fakes stay source-compatible; connectPodFlow treats an
+  // absent method as "assume content" (the safe, dance-eligible default).
+  fetchRemotePodManifest?(handle: string, repoName: string): Promise<string | null>;
+  // Phase C (C-1) — does the remote pod repo's default branch have ANY commit?
+  // A local-first pod was FORGED locally (its own root commit, never cloned from
+  // this remote), so ANY commit already on the remote is UNRELATED history: a
+  // subsequent publish push would be non-ff and STRAND the pod if connect had
+  // already flipped identity to gh. connectPodFlow uses this on the "remote
+  // exists but has no pod.yon" fall-through to distinguish a truly-empty
+  // pre-created repo (no commits → safe to push into) from a README-initialized
+  // repo (has commits, unrelated history → route to the guard, never flip).
+  // Returns false for a genuinely empty repo (HTTP 409 "Git Repository is
+  // empty"), true when ≥1 commit exists. THROWS on any other failure (auth /
+  // network / 5xx) so the caller can fail SAFE. Optional so alternate clients /
+  // older fakes stay source-compatible.
+  remoteHasCommits?(handle: string, repoName: string): Promise<boolean>;
 }
 
 const isWindows = process.platform === "win32";
@@ -341,6 +363,27 @@ export function inspectGhError(err: unknown): { is404: boolean; summary: string 
   return { is404, summary };
 }
 
+// Phase C (C-1) — classify the gh error for `remoteHasCommits`. GitHub returns
+// HTTP 409 with "Git Repository is empty" when the commits API is hit on a repo
+// that has no commits yet (a freshly `gh repo create`d, README-less repo). That
+// is the ONLY error `remoteHasCommits` treats as "no commits" (→ safe to push);
+// everything else propagates so the caller fails safe (→ guard). Decodes the
+// same execFileSync error shape inspectGhError reads.
+export function isEmptyRepoError(err: unknown): boolean {
+  const e = err as { status?: number; stderr?: unknown; message?: string };
+  let text = "";
+  if (e.stderr !== undefined && e.stderr !== null) {
+    text =
+      e.stderr instanceof Buffer
+        ? e.stderr.toString("utf8")
+        : typeof e.stderr === "string"
+          ? e.stderr
+          : "";
+  }
+  if (text.length === 0 && typeof e.message === "string") text = e.message;
+  return /\bHTTP\s*409\b/i.test(text) || /Git\s+Repository\s+is\s+empty/i.test(text);
+}
+
 export const realFederationGhClient: FederationGhClient = {
   async repoExists(handle, repoName): Promise<boolean> {
     try {
@@ -440,6 +483,52 @@ export const realFederationGhClient: FederationGhClient = {
     // config. Release review Angle A + B + C.
     runGit(localDir, ["config", "user.name", handle]);
     runGit(localDir, ["config", "user.email", `${handle}@users.noreply.github.com`]);
+  },
+
+  async fetchRemotePodManifest(handle, repoName): Promise<string | null> {
+    // Phase C amendment-5 — read the remote `pod.yon` via the gh contents API
+    // with the RAW media type (returns the file bytes verbatim, not the base64
+    // JSON envelope). A 404 is the ONLY legitimate `null` (no pod.yon → an
+    // empty/partial pre-created repo). Any other failure PROPAGATES so the
+    // caller fails safe (unknown → assume content → defer, never a silent
+    // destructive dance). Read-only — no clone, no local write.
+    try {
+      return runGh([
+        "api",
+        `/repos/${handle}/${repoName}/contents/pod.yon`,
+        "-H",
+        "Accept: application/vnd.github.raw+json",
+      ]);
+    } catch (err) {
+      const { is404 } = inspectGhError(err);
+      if (is404) return null;
+      throw firewall(err, { op: "reach GitHub" });
+    }
+  },
+
+  async remoteHasCommits(handle, repoName): Promise<boolean> {
+    // Phase C (C-1) — probe the remote default branch for ANY commit via the gh
+    // commits API (read-only, no clone). A genuinely EMPTY repo makes GitHub
+    // return HTTP 409 "Git Repository is empty" → false (safe to push into). A
+    // repo with ≥1 commit (e.g. a README-initialized `lyt-pod`) returns a JSON
+    // array → true (unrelated history → the caller routes to the guard rather
+    // than flipping identity into a non-ff strand). Any OTHER failure (auth /
+    // network / 5xx) PROPAGATES so the caller fails safe.
+    let raw: string;
+    try {
+      raw = runGh(["api", `/repos/${handle}/${repoName}/commits?per_page=1`]);
+    } catch (err) {
+      if (isEmptyRepoError(err)) return false; // 409 → no commits yet
+      throw firewall(err, { op: "reach GitHub" });
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.length > 0;
+    } catch {
+      // A non-JSON / unexpected body — fail SAFE to "has commits" (→ guard) so an
+      // unparsable response never slides the pod into the non-ff strand path.
+      return true;
+    }
   },
 
   async commitAndOptionallyPush(localDir, message, push): Promise<void> {

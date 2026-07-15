@@ -21,15 +21,33 @@ import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getMeshByName, getMeshByRid } from "../registry/meshes-repo.js";
-import { getVaultByName, getVaultByRid } from "../registry/repo.js";
-import { canonicalizeCoordinate, vaultOriginCoordinate } from "../registry/vault-addressing.js";
-import { resolveVaultRef, type ResolvedVaultRef } from "../util/federation-paths.js";
+import {
+  getVaultByName,
+  getVaultByRid,
+  type ForeignVaultSource,
+} from "../registry/repo.js";
+import {
+  canonicalizeCoordinate,
+  vaultLeaf,
+  vaultOriginCoordinate,
+} from "../registry/vault-addressing.js";
+import {
+  bucketMeshName,
+  bucketVaultRelDir,
+  entryModeForSource,
+} from "../util/bucket-mesh.js";
+import {
+  isReservedFederationRepoName,
+  resolveVaultRef,
+  slugifyHandle,
+  type ResolvedVaultRef,
+} from "../util/federation-paths.js";
 import { resolveRemoteUrl, resolveRemoteUrlFromSlug } from "../util/remote-url.js";
 import { uuid7BytesToHex } from "../util/uuid7.js";
 import { liveSubscriptions } from "../yon/subscription-ledger-read.js";
 import { appendSubscriptionActive } from "../yon/subscription-ledger-write.js";
 import { cloneVaultFlow } from "./clone.js";
-import { reindexInboundVault } from "./reindex-inbound.js";
+import { reflectInboundIndex } from "./reflect-index.js";
 
 // v1.C.2 — `lyt mesh subscribe --vault <ref-vault> --from-mesh <mesh>`.
 //
@@ -82,11 +100,55 @@ import { reindexInboundVault } from "./reindex-inbound.js";
 
 export type SubscribeCloneOutcome = "cloned" | "already-present";
 
+// the public-vs-private DISCRIMINATOR at receive. Resolves the upstream
+// repo's GitHub visibility so the receive path can decide the ENTRY RELATIONSHIP:
+//   private ⇒ shared      (a granted private vault — affiliation)
+//   public  ⇒ subscribed  (a self-subscribed public vault)
+//   unknown ⇒ subscribed  (fail-closed to the least-committal self-subscribe;
+//                          only an explicit graduate / setVaultSource can later
+//                          correct the SOURCE — the lazy homing repair relocates a
+//                          vault's on-disk home but NEVER mutates `source`)
+// Injectable so tests + library callers stay network-free; the CLI wires the
+// real `gh repo view --json visibility` probe (util/gh-discover.checkRepoVisibility).
+export type RepoVisibilityProbe = (
+  owner: string,
+  repoName: string,
+) => Promise<"public" | "private" | "unknown">;
+
+// map a probed visibility to the stored foreign provenance. When no probe
+// is supplied the receive DEFAULTS to `subscribed` (a self-subscribe), the
+// behavior — only an explicit `private` verdict promotes to `shared`.
+export function foreignSourceForVisibility(
+  visibility: "public" | "private" | "unknown",
+): ForeignVaultSource {
+  return visibility === "private" ? "shared" : "subscribed";
+}
+
 export interface SubscribeCloneArgs {
   // Canonical `{mesh}/{vault}` name (already normalized through
-  // resolveVaultRef; repo-name input arrives here as the vault name).
+  // resolveVaultRef; repo-name input arrives here as the vault name). This stays
+  // the publisher's canonical name — the registered vault name — NOT the bucket
+  // path (the preserve-rid identity guard compares the registered name against
+  // the publisher's declared vault.yon name).
   vaultName: string;
+  // Inc-2 Phase B / (S1) — the mesh the foreign vault homes into. On a
+  // COLLISION (the foreign mesh name equals a locally-OWNED mesh — the dogfood
+  // commingle case) this is the reserved OWNER-BUCKET mesh `subscriptions/{owner}`;
+  // otherwise it is the foreign mesh segment (the external-mesh record model,
+  // unchanged pre-D74). The default cloneFn passes this as `--to-mesh`.
   homeMeshName: string;
+  // Inc-2 Phase B / → (always-separate) — vault-root-relative ON-DISK dir
+  // the clone lands under. ALWAYS set to the owner-keyed bucket tree
+  // (`subscriptions/{owner}/{leaf}` or `shared/{owner}/{leaf}`), so EVERY foreign
+  // vault is separated from the user's own `~/lyt/vaults/{mesh}/…` tree — not
+  // only on a name collision (the superseded collides-only rule). Decoupled from
+  // `vaultName` so the registered name stays the publisher's canonical
+  // `{mesh}/{leaf}` while the dir is bucketed by owner.
+  targetSubdir?: string | undefined;
+  // the resolved foreign provenance (`shared` | `subscribed`) the receive
+  // path stamps on the registered row + uses to pick the bucket tree. `shared`
+  // = a granted PRIVATE vault; `subscribed` = a self-subscribed PUBLIC vault.
+  foreignSource: ForeignVaultSource;
   // convention-derived clone URL
   // (`https://github.com/{owner}/lyt-vault-<mesh>--<leaf>.git`). The default
   // clone fn uses this verbatim; injected test seams may ignore it.
@@ -114,6 +176,12 @@ export interface SubscribeArgs {
   registryDb?: Client | undefined;
   // Test seam. Default calls cloneVaultFlow with name-derived GH URL.
   cloneFn?: SubscribeCloneFn | undefined;
+  // the public-vs-private discriminator. When supplied, the received
+  // foreign vault's provenance is resolved from the upstream repo's visibility
+  // (private ⇒ shared, public ⇒ subscribed). Omitted → default `subscribed`
+  // (self-subscribe; network-free for library/test callers). The CLI wires the
+  // real gh probe.
+  visibilityProbe?: RepoVisibilityProbe | undefined;
 }
 
 export interface SubscribeResult {
@@ -207,12 +275,25 @@ const defaultCloneFn: SubscribeCloneFn = async (args) => {
     url: args.cloneUrl,
     // register under the canonical vault name, never the repo name.
     name: args.vaultName,
+    // Inc-2 Phase B / → (always-separate) — home into the owner-keyed
+    // bucket mesh (args.homeMeshName = `subscriptions/{owner}` | `shared/{owner}`)
+    // and land the clone under the separated on-disk subtree (targetSubdir), NOT
+    // the user's own mesh tree.
     toMesh: args.homeMeshName,
+    ...(args.targetSubdir !== undefined ? { targetSubdir: args.targetSubdir } : {}),
     registryDb: args.registryDb,
     // subscriber intent: an unregistered home mesh becomes an
     // external-mesh RECORD (no scaffolded `<foreign>/main` vault); the
     // consumer is never told to init another owner's mesh.
     autoRegisterExternalMesh: true,
+    // Inc-2 Phase B / (keystone) — positively mark the received foreign
+    // vault with its resolved provenance (`shared` | `subscribed`).
+    foreignSource: args.foreignSource,
+    // a read-only subscriber KEEPS the publisher rid (rid-first
+    // convergence) and lands with a clean working tree: no fresh-rid rewrite
+    // of the tracked vault.yon, no scaffold regen. Independent of detachOrigin
+    // (omitted here → keep upstream origin to pull).
+    preserveRid: true,
   });
   const vault = await getVaultByName(args.registryDb, clone.name);
   if (vault === null || vault.homeMeshRid === null) {
@@ -230,6 +311,36 @@ const defaultCloneFn: SubscribeCloneFn = async (args) => {
 
 export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResult> {
   const startedAt = Date.now();
+
+  // G3 (design §6.1) — the federation manifest repo (`lyt-pod` / `lyt-pod-map`)
+  // is UN-SUBSCRIBABLE: cloning it would pull down every push_target, vault rid,
+  // and the whole federation map of the publisher. Refuse BEFORE opening the
+  // registry or attempting any clone.
+  //
+  // FIX C (A2-R2 G3-3) — key on the REPO NAME, not every raw segment. The old scan
+  // matched a bare `lyt-pod` segment ANYWHERE, which false-positived a legit vault
+  // whose OWNER handle or LEAF is `lyt-pod` (real repo `lyt-vault-<mesh>--<leaf>`).
+  // A resolvable CONVENTION repo (`{owner}/lyt-vault-<mesh>--<leaf>`) is authoritative:
+  // it is reserved only if its convention repoName is (it never is), so a legit
+  // owner/leaf `lyt-pod` in repo-name form is allowed. A DIRECT manifest reference
+  // (`owner/lyt-pod`, or bare `lyt-pod`) does NOT parse as a convention repo — it is
+  // caught by its repo/leaf-position segment being literally reserved.
+  const subRef = resolveVaultRef(args.subscribedVaultName);
+  const repoPositionSegment =
+    args.subscribedVaultName.split(/[\\/]/).filter((s) => s.length > 0).pop() ??
+    args.subscribedVaultName;
+  const referencesReservedManifestRepo =
+    subRef !== null && subRef.inputForm === "repo-name"
+      ? isReservedFederationRepoName(subRef.repoName)
+      : isReservedFederationRepoName(repoPositionSegment);
+  if (referencesReservedManifestRepo) {
+    throw new Error(
+      `Refusing to subscribe '${args.subscribedVaultName}': the federation manifest repo ` +
+        `(lyt-pod / lyt-pod-map) is un-subscribable — it exposes the publisher's every ` +
+        `push_target, vault rid, and whole federation map. Subscribe to individual vaults instead.`,
+    );
+  }
+
   const callerSupplied = args.registryDb !== undefined;
   const db = args.registryDb ?? (await openRegistry());
   const cloneFn = args.cloneFn ?? defaultCloneFn;
@@ -299,10 +410,36 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
           );
         }
       }
+      // Inc-2 Phase B / ALWAYS-SEPARATE, owner-keyed bucket homing
+      // (supersedes the collides-only rule). EVERY foreign inbound vault
+      // homes into its reserved OWNER-BUCKET mesh + a separated on-disk subtree,
+      // regardless of whether its mesh name collides with a locally-owned mesh —
+      // a foreign vault NEVER commingles into the user's own `{mesh}` tree. The
+      // bucket is chosen by the resolved provenance:
+      //   subscribed (public self-subscribe) → `subscriptions/{owner}`
+      //   shared     (private grant)          → `shared/{owner}`
+      // `{owner}` is the slugified GH owner — the SAME segment the sync
+      // reconstitution derives from the origin coordinate (shared rule in
+      // util/bucket-mesh.ts), so the live home mesh and the reconstituted bucket
+      // never diverge.
+      //
+      // The public-vs-private DISCRIMINATOR: probe the upstream repo's GitHub
+      // visibility (private ⇒ shared, public ⇒ subscribed). Injectable — omitted
+      // → default `subscribed` (self-subscribe; network-free). The CLI wires the
+      // real `gh repo view --json visibility` probe.
+      const visibility = args.visibilityProbe
+        ? await args.visibilityProbe(ref.owner, ref.repoName)
+        : "public";
+      const foreignSource = foreignSourceForVisibility(visibility);
+      const bucketOwner = slugifyHandle(ref.owner);
+      const cloneHomeMesh = bucketMeshName(entryModeForSource(foreignSource), bucketOwner);
+      const cloneSubdir = bucketVaultRelDir(foreignSource, bucketOwner, vaultLeaf(ref.vaultName));
       try {
         await cloneFn({
           vaultName: ref.vaultName,
-          homeMeshName,
+          homeMeshName: cloneHomeMesh,
+          targetSubdir: cloneSubdir,
+          foreignSource,
           cloneUrl: ghUrlForVaultRef(ref),
           registryDb: db,
         });
@@ -381,7 +518,7 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       // Even on idempotent re-emit, refresh the local index so a previous
       // partial subscribe that never reached the index build still ends up
       // searchable. reindexInboundVault (all tiers) is itself idempotent.
-      const indexBuilt = await buildLocalIndex(subscribedVault.name, subscribedVault.path, db);
+      const indexBuilt = await reflectInboundIndex(subscribedVault.name, subscribedVault.path);
       return {
         status: "subscription-already-present",
         subscribingMesh: subscribingSummary,
@@ -400,17 +537,22 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
     // (begin no-legacy, Phase C): the mesh.yon SoT no longer carries
     // subscriptions and the cache is EXPECTED to go stale on this branch until
     // the reconstitution phase. We do not wire reconstitution here.
+    // the ledger `entry_mode` MUST match the vault's stored provenance so
+    // the sync reconstitution homes it into the SAME owner-bucket tree the live
+    // receive path did (`shared` → shared/{owner}, else subscriptions/{owner}).
+    // Derive it from the resolved row's `source` (set by the clone/receive path,
+    // or already-present for a pre-registered foreign vault) — never hardcoded.
     appendSubscriptionActive({
       coordinate,
       rid: subscribedSummary.ridHex,
-      entryMode: "subscribe",
+      entryMode: entryModeForSource(subscribedVault.source === "shared" ? "shared" : "subscribed"),
     });
 
     // 6. Local libSQL index build. Best-effort: upsert*Cache flows open the
     // per-vault .lyt/lyt.db; failure logs but does not fail the subscribe
     // (mirrors the lyt-mesh sync post-pull hook pattern). The subscription
     // record is the durable side-effect; index refresh follows.
-    const indexBuilt = await buildLocalIndex(subscribedVault.name, subscribedVault.path, db);
+    const indexBuilt = await reflectInboundIndex(subscribedVault.name, subscribedVault.path);
 
     return {
       status: "subscription-written",
@@ -426,26 +568,12 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
   }
 }
 
-// V-C-1 Phase B (L2) — reindex-on-inbound for a clone-on-subscribe. The prior
-// build was upsertLanesCache + upsertFtsCache (FTS + lanes-from-SoT, NO arcs) —
-// a V-B-6 gap that left tier-0 arc search + primer arcs empty on a subscribed
-// vault. reindexInboundVault rebuilds ALL tiers (lanes+arcs+fts+rollup) from the
-// cloned markdown + stamps the L3 watermark. Best-effort: a failure logs but
-// never fails the subscribe (the subscription is the durable side-effect).
-async function buildLocalIndex(
-  vaultName: string,
-  vaultPath: string,
-  registryDb: Client,
-): Promise<{ lanesRan: boolean; arcsRan: boolean; ftsRan: boolean }> {
-  const idx = await reindexInboundVault({ vault: vaultName, vaultPath, registryDb });
-  if (!idx.reindexed) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `lyt mesh subscribe: post-write index of ${vaultName} deferred (${idx.error ?? "unknown"}); ` +
-        `markdown SoT intact — run \`lyt reindex --vault ${vaultName}\`.`,
-    );
-  }
-  // All tiers rebuild together via rebuildVaultFlow, so the three flags move in
-  // lockstep with the rebuild's success.
-  return { lanesRan: idx.reindexed, arcsRan: idx.reindexed, ftsRan: idx.reindexed };
-}
+// V-C-1 Phase B (L2) — the build-on-inbound for a clone-on-subscribe is the
+// SHARED reflect cascade `reflectInboundIndex` (./reflect-index.ts): it REFLECTS
+// the cloned vault's COMMITTED SoT (ledger → lanes → arcs → fts) into the
+// machine-local caches and stamps the L3 watermark — the SAME reconcile the
+// read-only subscriber PULL path runs on every later sync. See reflect-index.ts
+// for the full WHY-REFLECT-NOT-RE-CLUSTER rationale + the empty-cluster tradeoff.
+// The former private `buildLocalIndex` was a byte-identical duplicate and was
+// folded into that single source of truth (audit-coupled-constant: one reflect
+// cascade, three receive callers — subscribe, accept-share, clone auto-index).

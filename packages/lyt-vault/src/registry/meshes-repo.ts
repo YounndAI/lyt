@@ -17,6 +17,7 @@
 import type { Client } from "@libsql/client";
 
 import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isValidGhHandle } from "../util/identity.js";
 
 // v1.A.1 — meshes table is shipped as an empty container. v1.B.1 will
 // populate it via `lyt mesh init`. This module exists so v1.B.1 imports a
@@ -33,6 +34,13 @@ export interface MeshRow {
   mainVaultRid: Uint8Array | null;
   mainVaultRidHex: string | null;
   createdAt: string;
+  // MA (Inc-2 Phase B slice 2) — mesh PROVENANCE: true only when THIS pod
+  // created the mesh (`lyt mesh init`); false for a FOREIGN-JOINED mesh (`lyt
+  // mesh join`) and every other insert path (fail-closed). The origin-hijack
+  // gate: a mesh's org `push_target` may be used as the repo owner for the
+  // user's OWN vaults ONLY when own_created — a joined mesh's push_target
+  // (untrusted, from a foreign mesh.yon) must never own the user's repos.
+  ownCreated: boolean;
 }
 
 export interface InsertMeshArgs {
@@ -42,6 +50,11 @@ export interface InsertMeshArgs {
   pushKind?: MeshPushKind | null;
   mainVaultRid?: Uint8Array | null;
   createdAt?: string;
+  // MA — provenance. Omitted → FAIL-CLOSED false (NOT own-created). Only
+  // `lyt mesh init` passes true; `lyt mesh join` + foreign/bucket/reconstitution
+  // inserts leave it false so a joined org mesh's push_target can never be
+  // trusted as the owner of the user's own vaults.
+  ownCreated?: boolean;
 }
 
 function toBytesOrNull(raw: unknown, column: string): Uint8Array | null {
@@ -73,6 +86,9 @@ function rowToMesh(row: Record<string, unknown>): MeshRow {
     mainVaultRid: main,
     mainVaultRidHex: main ? uuid7BytesToHex(main) : null,
     createdAt: String(row["created_at"]),
+    // MA — back-compat reader: a pre-migration-010 row (no column) reads as
+    // NOT own-created (fail-closed). Stored as INTEGER 0/1.
+    ownCreated: Number(row["own_created"] ?? 0) === 1,
   };
 }
 
@@ -80,16 +96,36 @@ export async function insertMesh(db: Client, args: InsertMeshArgs): Promise<void
   if (!isUuidv7Bytes(args.rid)) {
     throw new Error("insertMesh: rid must be a 16-byte UUIDv7 BLOB.");
   }
+  // MA (deferred pure-hardening) — `push_target` feeds resolveRemoteUrl → a
+  // `git remote add`/`gh repo create` spawn AND (via deriveVaultRepoOwner) the
+  // repo owner. When it arrives from an [lyt.untrusted] foreign mesh.yon it may
+  // be a `-`/`/`/metachar value; NEUTRALIZE a non-handle push_target at store
+  // time (null it + its push_kind) so it can never reach a spawn or owner
+  // derivation. A valid handle is byte-unchanged (no behavior fork). The pair is
+  // nulled together to keep push_target/push_kind consistent.
+  let pushTarget = args.pushTarget ?? null;
+  let pushKind = args.pushKind ?? null;
+  if (pushTarget !== null && !isValidGhHandle(pushTarget)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `insertMesh: refusing to store invalid push_target ${JSON.stringify(pushTarget)} for ` +
+        `mesh ${JSON.stringify(args.name)}; nulling it (repo-owner derivation falls back to the ` +
+        `federation handle).`,
+    );
+    pushTarget = null;
+    pushKind = null;
+  }
   await db.execute({
-    sql: `INSERT INTO meshes (rid, name, push_target, push_kind, main_vault_rid, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO meshes (rid, name, push_target, push_kind, main_vault_rid, created_at, own_created)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
     args: [
       args.rid,
       args.name,
-      args.pushTarget ?? null,
-      args.pushKind ?? null,
+      pushTarget,
+      pushKind,
       args.mainVaultRid ?? null,
       args.createdAt ?? new Date().toISOString(),
+      args.ownCreated === true ? 1 : 0,
     ],
   });
 }

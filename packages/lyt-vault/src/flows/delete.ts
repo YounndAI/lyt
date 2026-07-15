@@ -19,6 +19,9 @@ import { removeKnownPath } from "../registry/known-paths.js";
 import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
 import { deleteVaultDerivedState } from "../scaffold/delete.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
+import { vaultRepoName } from "../util/federation-paths.js";
+import { appendFedVaultTombstone } from "../yon/federation-vault-ledger-write.js";
+import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
@@ -95,6 +98,30 @@ export async function deleteVaultFlow(
     // shard, idempotent). Reuses the open registry client.
     if (orphanedAliases.length > 0) {
       await dropAliasesForTargetRid(vault.ridHex, db);
+    }
+    // Inc-2 Phase 0 — the CRDT delete channel. A vault delete is an
+    // explicit `state=tombstoned` @FED_VAULT ledger event on THIS writer's own
+    // shard. This is the ONLY manifest retraction path (the reconcile in
+    // derivePodManifestDoc deliberately never tombstones-from-absence — that
+    // would reintroduce the B1 partial-registry clobber). Its fresh monotone hlc
+    // (seeded above every observed remote via the receive rule) makes the
+    // register fold pick this tombstone as the winner for vault_rid, retracting
+    // it cross-machine — the C-1 fix. Non-fatal: a manifest-ledger failure must
+    // never fail the delete (the vault is already gone from the registry).
+    try {
+      appendFedVaultTombstone({
+        vaultRid: vault.ridHex,
+        vaultName: vault.name,
+        homeMeshRidHex: vault.homeMeshRidHex,
+        repo: vaultRepoName(vault.name),
+        visibility: "private",
+        status: "active",
+        observedMaxHlc: observedMaxFedVaultHlc(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.error(`@FED_VAULT tombstone skipped non-fatally on delete — ${msg}`);
     }
     // (Brief A) — delete mutates the registry's vault set; regenerate the
     // derived pod manifest so pod.yon reflects the removal. Non-fatal; reuses

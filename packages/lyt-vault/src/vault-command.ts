@@ -44,6 +44,7 @@ import { buildRegenContextCommand } from "./commands/regen-context.js";
 import { buildRegistryCommand } from "./commands/registry.js";
 import { buildRestoreCommand } from "./commands/restore.js";
 import { buildAccessCommand } from "./commands/access.js";
+import { buildAcceptShareCommand } from "./commands/accept-share.js";
 import { buildInvitesCommand } from "./commands/invites.js";
 import { buildShareCommand } from "./commands/share.js";
 import { buildSnapshotCommand } from "./commands/snapshot.js";
@@ -88,6 +89,7 @@ export function buildVaultSubcommand(): Command {
   vault.addCommand(buildUnshareCommand());
   vault.addCommand(buildAccessCommand());
   vault.addCommand(buildInvitesCommand());
+  vault.addCommand(buildAcceptShareCommand());
   return vault;
 }
 

@@ -22,6 +22,7 @@ import {
   renameVaultFlow,
   VaultNameTakenError,
 } from "../flows/rename.js";
+import { sanitizeForTerminal } from "./mesh-adopt.js";
 
 // v1.B.3 Commit 3 — `lyt vault rename <old> <new>`.
 //
@@ -70,6 +71,15 @@ export function buildRenameCommand(): Command {
           // eslint-disable-next-line no-console
           console.warn(
             " audit: EMISSION FAILED (rename body landed; run 'lyt vault rebuild-index --ledger audit' to reconstruct)",
+          );
+        }
+        // Inc-2 R1 (release review) — a non-fatal @FED_VAULT authoring failure is NOT
+        // self-healing: on another machine the next sync's write-back can REVERT
+        // this rename to the foreign ledger winner. Warn the user to retry sync.
+        if (result.fedVaultAuthored === false) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `  warn: rename recorded LOCALLY but NOT propagated to the pod ledger (vault '${sanitizeForTerminal(result.newName)}'); on another machine the next sync could revert it — retry 'lyt sync' to propagate.`,
           );
         }
       } catch (err) {

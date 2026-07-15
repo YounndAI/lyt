@@ -33,6 +33,8 @@ import {
   listVaults,
 } from "../../registry/repo.js";
 import { canonicalizeCoordinate, gitUrlToCoordinate } from "../../registry/vault-addressing.js";
+import { bucketMeshName } from "../../util/bucket-mesh.js";
+import { slugifyHandle } from "../../util/federation-paths.js";
 import { hexToUuid7Bytes, newUuidv7Bytes } from "../../util/uuid7.js";
 import {
   liveAliases,
@@ -46,6 +48,15 @@ import {
   liveSubscriptions,
   type LiveSubscription,
 } from "../../yon/subscription-ledger-read.js";
+import {
+  foldFedVaultWinners,
+  readAllFedVaultRecords,
+} from "../../yon/federation-vault-ledger-read.js";
+import {
+  foldFedMeshWinners,
+  readAllFedMeshRecords,
+} from "../../yon/federation-mesh-ledger-read.js";
+import { getWriterId } from "../../util/writer-id.js";
 import { regeneratePodManifestNonFatal } from "./regenerate.js";
 
 // Fed-v2 Layer-1 (Phase D1b) — RECONSTITUTION. The per-writer append-only
@@ -93,11 +104,14 @@ import { regeneratePodManifestNonFatal } from "./regenerate.js";
 // machine-local (design §2). The names→rid index (vault-addressing resolver) is
 // the resolution SoT; this flow only ensures the homing mesh_rid FK is satisfiable.
 
-// Reserved bucket-mesh namespace PREFIXES (design §2 plan ). The realized
-// bucket mesh name is `<prefix>/<owner>`. These prefixes are the leading mesh
-// segment guarded by RESERVED_MESH_NAMES (util/identity.ts).
-export const SUBSCRIPTION_BUCKET_MESH = "subscriptions";
-export const SHARED_BUCKET_MESH = "shared";
+// Reserved bucket-mesh namespace PREFIXES + the (entry_mode, owner) → bucket
+// name rule now live in util/bucket-mesh.ts — the SINGLE source of truth shared
+// with the LIVE receive path (flows/clone.ts + flows/subscribe.ts, Inc-2 Phase
+// B). Re-exported here for back-compat with any importer of these symbols.
+export {
+  SUBSCRIPTION_BUCKET_MESH,
+  SHARED_BUCKET_MESH,
+} from "../../util/bucket-mesh.js";
 
 export interface RebuildFederationCacheArgs {
   // Open-once seam (vindicated repeatedly across this codebase): callers may
@@ -157,6 +171,15 @@ export interface RebuildFederationCacheResult {
   // home_mesh from). The ledger is the SoT, so these survive in the ledger and
   // reconstitute once the vaults are present locally; never silently dropped.
   meshEdgesSkippedUnresolved: number;
+  // ----- VAULT / MESH WRITE-BACK — R1 convergence (Inc-2 R1) -----
+  // The @FED_VAULT / @FED_MESH folded winners written BACK into the LOCAL
+  // registry `vaults` / `meshes` tables (name + resolvable home_mesh_rid for
+  // vaults; name for meshes), so a machine that synced a foreign field-update
+  // (e.g. a cross-machine rename) converges its registry to the ledger winner and
+  // the next lifecycle reconcile sees no spurious diff (dissolves the clobber
+  // flip-flop). Counts the rows actually mutated (0 on steady state / no drift).
+  vaultsWrittenBack: number;
+  meshesWrittenBack: number;
   durationMs: number;
 }
 
@@ -227,10 +250,26 @@ export async function rebuildFederationCacheFlow(
       // (subscriptions/Owner) than a post-fix canonical record (subscriptions/owner),
       // splitting one upstream owner across two buckets — the exact split bug 6
       // exists to prevent, leaked onto the homing path.
-      const owner = coordinateOwner(canonicalizeCoordinate(sub.coordinate));
+      //
+      // fix-pass #4 — route the owner through the SAME slugifyHandle that
+      // live/subscribe/repair use, so ALL owner derivations share ONE normalization.
+      // canonicalizeCoordinate only lowercases the owner for KNOWN forges; a
+      // non-GitHub-forge owner could otherwise reach the bucket name un-slugified
+      // and split one upstream across two bucket meshes. No-op for GitHub owners
+      // ([A-Za-z0-9-]: toLowerCase == slugify). A reserved/empty slug throws →
+      // skip-not-fail (leave it in the ledger SoT).
+      const rawOwner = coordinateOwner(canonicalizeCoordinate(sub.coordinate));
+      let owner: string | null = null;
+      if (rawOwner !== null) {
+        try {
+          owner = slugifyHandle(rawOwner);
+        } catch {
+          owner = null;
+        }
+      }
       if (owner === null) {
-        // A live coordinate whose owner segment cannot be parsed cannot be
-        // owner-homed. Leave it in the ledger SoT (skip-not-fail) rather than
+        // A live coordinate whose owner segment cannot be parsed/slugified cannot
+        // be owner-homed. Leave it in the ledger SoT (skip-not-fail) rather than
         // home it into a malformed bucket name.
         skippedUnresolved += 1;
         continue;
@@ -420,10 +459,42 @@ export async function rebuildFederationCacheFlow(
       throw txErr;
     }
 
+    // 3b. VAULT / MESH WRITE-BACK (R1 convergence). The @FED_VAULT / @FED_MESH
+    // folded winners are the git-synced SoT; the registry `vaults` /
+    //    `meshes` tables are a REBUILDABLE LOCAL cache of them. Mirror the folded
+    //    winner's ledger-owned VALUE fields back onto the LOCAL row (keyed by rid)
+    //    so a machine that synced a FOREIGN field-update (a cross-machine rename /
+    //    home-mesh move) converges its registry to the winner. Without this the
+    //    next lifecycle reconcile would see registry(stale) != ledger(fresh) and
+    //    re-author the stale value → the non-terminating cross-machine flip-flop
+    //    (unbounded HLC). This is the SoT→cache reconvergence; the reconcile's
+    //    origin-writer guard is the complementary anti-clobber backstop.
+    //
+    //    SCOPE (deliberate): a foreign-only ledger vault/mesh (no local rid) is
+    //    NOT inserted — the registry cache holds only vaults PRESENT on THIS
+    //    machine (each carries a machine-LOCAL `path` the ledger never conveys), so
+    //    a full DELETE+reINSERT like the subscription/alias/edge caches would
+    //    strand `path` and wipe local-only meshes (bucket meshes). We UPDATE the
+    //    ledger-owned VALUE fields (vault: name + resolvable home_mesh_rid; mesh:
+    //    name) on existing rows and never touch machine-local fields. `home_mesh_rid`
+    //    is mirrored ONLY when the folded home mesh rid resolves to a LOCAL mesh
+    //    (foreign mesh rids diverge per machine until mesh-rid convergence ships);
+    //    the origin-writer guard covers the residual non-mirrorable field so it
+    //    still cannot clobber.
+    const writeBack = await writeBackRegistryFromLedger(db, args.podRoot);
+
     // 4. Regenerate pod.yon downstream of the cache. Non-fatal + skip-if-no-pod
     //    (same posture as the lifecycle regen hooks): a missing federation_state
     //    is a no-op, never an error.
+    //    Inc-2 Phase 0 — reconcile:FALSE. This is the SYNC-RECONSTITUTION path:
+    //    the registry cache above was just rebuilt FROM the ledger, so authoring
+    //    registry→ledger events here would be circular AND (each machine's
+    //    federation_state.fed_rid being independent) would write non-convergent
+    //    per-writer @FED_VAULT/@FED_MESH shards that break the git union's
+    //    byte-identity. A sync is a pure re-FOLD; new manifest events are authored
+    //    only at lifecycle mutation time (init/delete).
     await regeneratePodManifestNonFatal(db, {
+      reconcile: false,
       ...(args.handle !== undefined ? { handle: args.handle } : {}),
       ...(args.nowIso !== undefined ? { nowIso: args.nowIso } : {}),
     });
@@ -439,6 +510,8 @@ export async function rebuildFederationCacheFlow(
       aliasNameCollisionsResolved: 0,
       meshEdgesReconstituted: edgeRows.length,
       meshEdgesSkippedUnresolved,
+      vaultsWrittenBack: writeBack.vaultsWrittenBack,
+      meshesWrittenBack: writeBack.meshesWrittenBack,
       durationMs: Date.now() - startedAt,
     };
   } finally {
@@ -481,22 +554,16 @@ async function buildCoordinateIndex(db: Client): Promise<Map<string, ResolvedVau
   return out;
 }
 
-// (entry_mode, owner) → reserved OWNER-BUCKET mesh name (Phase ). `subscribe`
-// → `subscriptions/{owner}`; `shared` → `shared/{owner}`. Any other entry_mode
-// defaults to the subscriptions prefix (defensive — the write path only ever
-// emits subscribe|shared). The `{owner}` segment is the coordinate owner, so two
-// distinct upstream owners home into distinct bucket meshes.
-function bucketMeshName(entryMode: string, owner: string): string {
-  const prefix = entryMode === "shared" ? SHARED_BUCKET_MESH : SUBSCRIPTION_BUCKET_MESH;
-  return `${prefix}/${owner}`;
-}
-
 // Extract the OWNER segment from a subscription coordinate. The ledger stores
 // the typed id `lyt:vault:<host>/<owner>/<repo>`; the owner is the second
 // path segment after the `lyt:vault:` type prefix. Returns null when the shape
 // is unparseable (defensive — the subscribe path only writes well-formed
 // coordinates derived from gitUrlToCoordinate).
-function coordinateOwner(coordinate: string): string | null {
+// EXPORTED for reuse by flows/mesh-prune.ts's kind-aware ledger-backing guard,
+// which must derive a live subscription's bucket mesh name the IDENTICAL way this
+// flow homes it (coordinate → owner). Sharing this one extractor keeps the two
+// paths' homing rule from drifting (audit-coupled-constant).
+export function coordinateOwner(coordinate: string): string | null {
   const TYPED_PREFIX = "lyt:vault:";
   const bare = coordinate.startsWith(TYPED_PREFIX)
     ? coordinate.slice(TYPED_PREFIX.length)
@@ -506,6 +573,136 @@ function coordinateOwner(coordinate: string): string | null {
   if (segs.length < 3) return null;
   const owner = segs[1]!;
   return owner.length > 0 ? owner : null;
+}
+
+// R1 convergence — write the folded @FED_VAULT / @FED_MESH winners BACK into the
+// LOCAL registry cache (see the step-3b comment at the call site for the full
+// rationale + scope). Idempotent: a row already matching the winner is left
+// untouched (no write, not counted). FK-safe: `home_mesh_rid` is mirrored only
+// when the folded home mesh rid resolves to a locally-registered mesh (else the
+// field is left as-is and the reconcile's origin-writer guard prevents a clobber).
+async function writeBackRegistryFromLedger(
+  db: Client,
+  podRoot: string | undefined,
+): Promise<{ vaultsWrittenBack: number; meshesWrittenBack: number }> {
+  let vaultsWrittenBack = 0;
+  let meshesWrittenBack = 0;
+
+  // ---- VAULT rail ----
+  // Iterate the winning RECORDS (not the value-only fold) so the null-home guard
+  // below can read the winner's ORIGIN writerId. `active` winners only — a
+  // tombstoned winner is not live and never writes back a name/home.
+  const thisWriter = getWriterId();
+  for (const lv of foldFedVaultWinners(readAllFedVaultRecords(podRoot)).values()) {
+    if (lv.state !== "active") continue;
+    let ridBytes: Uint8Array;
+    try {
+      ridBytes = hexToUuid7Bytes(lv.vaultRid);
+    } catch {
+      continue; // malformed rid in the ledger — cannot key a local row
+    }
+    const local = await getVaultByRid(db, ridBytes);
+    if (local === null) continue; // foreign-only (not present locally) — leave in SoT
+
+    // Resolve the ledger-owned home mesh rid to LOCAL bytes only when it names a
+    // locally-registered mesh. `undefined` => do not touch home_mesh_rid.
+    let homeMeshBytes: Uint8Array | null | undefined;
+    let winnerHomeMeshHex: string | null = local.homeMeshRidHex; // default = no change
+    if (lv.homeMeshRidHex === null) {
+      // R2 — null-home clobber guard. A FOREIGN writer's winner that carries a
+      // null `home_mesh_rid` must NOT wipe a valid LOCAL home: reconstitution
+      // still derives `home_mesh_rid` from the writer's own mesh membership, and
+      // a subscriber/peer that never homed the vault legitimately folds null,
+      // which would silently strand this machine's homing. Mirror the reconcile's
+      // origin-writer guard: only APPLY the null when THIS machine authored the
+      // winner (or it is a legacy hlc-less record to heal forward). A foreign
+      // hlc-bearing null → leave `home_mesh_rid` as-is (homeMeshBytes stays
+      // `undefined`).
+      const foreignAuthored = lv.hlc !== null && lv.writerId !== thisWriter;
+      if (!foreignAuthored) {
+        homeMeshBytes = null;
+        winnerHomeMeshHex = null;
+      }
+    } else {
+      try {
+        const mb = hexToUuid7Bytes(lv.homeMeshRidHex);
+        if ((await getMeshByRid(db, mb)) !== null) {
+          homeMeshBytes = mb;
+          winnerHomeMeshHex = lv.homeMeshRidHex;
+        }
+      } catch {
+        // unparseable ledger home mesh rid — leave home_mesh_rid as-is
+      }
+    }
+
+    const nameChanged = local.name !== lv.vaultName;
+    const homeChanged =
+      homeMeshBytes !== undefined && (local.homeMeshRidHex ?? null) !== (winnerHomeMeshHex ?? null);
+    if (!nameChanged && !homeChanged) continue;
+
+    if (homeMeshBytes === undefined) {
+      await db.execute({ sql: "UPDATE vaults SET name = ? WHERE rid = ?", args: [lv.vaultName, ridBytes] });
+    } else {
+      await db.execute({
+        sql: "UPDATE vaults SET name = ?, home_mesh_rid = ? WHERE rid = ?",
+        args: [lv.vaultName, homeMeshBytes, ridBytes],
+      });
+    }
+    vaultsWrittenBack += 1;
+  }
+
+  // ---- MESH rail — restore `name` AND `own_created` from the folded winner ----
+  // #3 (0.12.1) — the write-back previously restored `name` ONLY, so a
+  // reconstituted OWN mesh kept whatever own_created the local insert set
+  // (fail-closed false on a fresh cache) and never healed back to `own` from the
+  // ledger's `role`. Restore own_created = (role === "own"), carrying the SAME
+  // origin-writer / foreign-authored guard the vault rail uses (R2): own_created
+  // is TRUST-BEARING (it gates whether an org push_target may own the user's
+  // repos), so only THIS writer's winner (or a legacy hlc-less record to heal
+  // forward) may re-author it — a FOREIGN hlc-bearing winner must never clobber
+  // this machine's ownership provenance. The display `name` keeps its prior
+  // behavior (any local mesh's name follows the winner). M2's fail-closed `role`
+  // fold backs this: a blank/garbled role folds to `join`, never `own`.
+  for (const lm of foldFedMeshWinners(readAllFedMeshRecords(podRoot)).values()) {
+    if (lm.state !== "active") continue;
+    let ridBytes: Uint8Array;
+    try {
+      ridBytes = hexToUuid7Bytes(lm.meshRid);
+    } catch {
+      continue;
+    }
+    const local = await getMeshByRid(db, ridBytes);
+    if (local === null) continue;
+
+    const foreignAuthored = lm.hlc !== null && lm.writerId !== thisWriter;
+    // R2-Interesting (legacy-role assumption) — the "heal forward" arm
+    // (foreignAuthored=false) trusts `lm.role` for the own_created write. A
+    // legacy hlc-LESS record that also lacks a `role` field folds to `join`
+    // (M2 default), so heal-forward would set own_created=false on it. That
+    // fails SAFE + LOUD, not silently: deriveVaultRepoOwner then declines the
+    // org push_target (falls back to the handle) and a resulting clone-404
+    // surfaces via G1's drop summary — never a silent hijack. Documented so a
+    // future legacy-migration is aware the role field is assumed present here.
+    const desiredOwnCreated = lm.role === "own";
+    const ownChanged = !foreignAuthored && local.ownCreated !== desiredOwnCreated;
+    const nameChanged = local.name !== lm.meshName;
+    if (!nameChanged && !ownChanged) continue;
+
+    if (ownChanged) {
+      await db.execute({
+        sql: "UPDATE meshes SET name = ?, own_created = ? WHERE rid = ?",
+        args: [lm.meshName, desiredOwnCreated ? 1 : 0, ridBytes],
+      });
+    } else {
+      await db.execute({
+        sql: "UPDATE meshes SET name = ? WHERE rid = ?",
+        args: [lm.meshName, ridBytes],
+      });
+    }
+    meshesWrittenBack += 1;
+  }
+
+  return { vaultsWrittenBack, meshesWrittenBack };
 }
 
 // Resolve the reserved bucket mesh by name, creating it locally if absent. The

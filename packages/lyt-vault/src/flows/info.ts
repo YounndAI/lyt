@@ -33,6 +33,7 @@ import {
   type LocalWritability,
   type WritabilityVerdict,
 } from "./writability.js";
+import { reprobeVaultAccessLost } from "./access-reprobe.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 import { detectLicenseFromContent, type DetectedLicense } from "../util/license-detect.js";
 import { ridsEqual } from "../util/uuid7.js";
@@ -116,6 +117,11 @@ export interface InfoVaultFlowOpts {
   // pass a fake GhExecutor; production defaults to spawning the real
   // `gh` CLI via util/gh-discover.ts's default executor.
   gh?: GhExecutor;
+  // A6-1 (0.12.0 Phase D fix-pass) — injectable gh-auth verdict for the access
+  // re-probe. Defaults to the real `gh auth status`; tests inject a deterministic
+  // verdict so a not-found under known-good auth reads as a genuine revoke while a
+  // not-found under unauthed/expired auth stays `unknown` (never `access_lost`).
+  ghAuthOk?: () => boolean | null;
 }
 
 export async function infoVaultFlow(
@@ -157,7 +163,28 @@ export async function infoVaultFlow(
       }
     }
 
-    const ghOpts = opts.gh !== undefined ? { gh: opts.gh } : {};
+    const ghOpts = {
+      ...(opts.gh !== undefined ? { gh: opts.gh } : {}),
+      ...(opts.ghAuthOk !== undefined ? { ghAuthOk: opts.ghAuthOk } : {}),
+    };
+    // A6 (0.12.0 Phase D) — re-probe access. `vault info` does no fetch, so a
+    // revoked share would otherwise report a stale `active`. If the repo now
+    // 404s for this user (revoked or deleted), this flips the registry status to
+    // `access_lost` (persisted) and we surface it below. Runs BEFORE the
+    // writability derive: a lost-access vault is neither writable nor publishable,
+    // and reflecting the lost status is the honest surface.
+    // A6-2 (0.12.0 Phase D fix-pass) — the re-probe now reconciles BOTH
+    // directions: `active → access_lost` on a fresh revoke, and
+    // `access_lost → active` when a re-granted share resolves again. Surface the
+    // reconciled status so `vault info` never reports a stale "no access" for a
+    // vault whose access was restored.
+    const reprobe = await reprobeVaultAccessLost(vault, db, ghOpts);
+    const surfacedStatus: VaultRow["status"] =
+      reprobe === "access-lost"
+        ? "access_lost"
+        : reprobe === "recovered"
+          ? "active"
+          : vault.status;
     // Order matters: deriveVaultWritable runs the V-A-10 git_url self-heal (below);
     // deriveLocalWritable reuses the now-cached verdict for any subscription probe.
     const writability = await deriveVaultWritable(vault, db, ghOpts);
@@ -179,7 +206,7 @@ export async function infoVaultFlow(
         displayName,
         originCoordinate,
         path: vault.path,
-        status: vault.status,
+        status: surfacedStatus,
         tierHint: vault.tierHint,
         parentVault: vault.parentVaultHex,
         memscopeRid: vault.memscopeRidHex,

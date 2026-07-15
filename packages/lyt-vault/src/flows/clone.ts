@@ -27,15 +27,26 @@ import {
   getVaultByName,
   getVaultByPath,
   getVaultByRid,
+  markVaultSourcePreserving,
   setVaultHomeMesh,
+  type ForeignVaultSource,
   type VaultRow,
 } from "../registry/repo.js";
+import { gitUrlToCoordinate, vaultLeaf } from "../registry/vault-addressing.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
-import { newUuidv7Bytes, uuid7BytesToDashedString } from "../util/uuid7.js";
-import { assertSafeCloneName, isSlugSegment, parseVaultRepoName } from "../util/federation-paths.js";
+import { newUuidv7Bytes, ridsEqual, uuid7BytesToDashedString } from "../util/uuid7.js";
+import {
+  assertSafeCloneName,
+  isSlugSegment,
+  parseVaultRepoName,
+  slugifyHandle,
+} from "../util/federation-paths.js";
+import { bucketMeshName, bucketVaultRelDir, entryModeForSource } from "../util/bucket-mesh.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
 import { assertMeshNameNotReserved } from "../util/identity.js";
 import { rmWithRetry } from "../scaffold/delete.js";
+import { stripNestedReparsePoints } from "../util/reparse-safe.js";
+import { reflectInboundIndex } from "./reflect-index.js";
 import { writeScaffoldConformance } from "../scaffold/init.js";
 import { renderVaultYon } from "../yon/vault.js";
 import { parseVaultYon } from "../yon/parse.js";
@@ -94,6 +105,68 @@ export interface CloneOptions {
   // on an unregistered target (Plan-D1 — explicit mesh-init for meshes the
   // user OWNS). subscribeFlow's clone-on-subscribe passes true.
   autoRegisterExternalMesh?: boolean | undefined;
+  // (Phase-0 A2b) — CALLER INTENT, never automatic. When true the clone
+  // KEEPS the source/publisher rid instead of minting a fresh one, and leaves
+  // the committed `.lyt/vault.yon` (+ agents.md/README) BYTE-UNCHANGED, so a
+  // read-only subscriber clone lands with a CLEAN working tree (rid-first
+  // convergence — the Phase-0 ledger keys identity on `vault_rid` alone; a
+  // rewritten-with-fresh-rid tracked file is the dirty-tree precondition that
+  // later wedges the read-only pull). Default (undefined/false) = current
+  // behavior: mint a fresh rid + rewrite vault.yon (+ regen scaffold) — the
+  // standalone `lyt vault clone --to-mesh` graduate-a-template case. Kept
+  // INDEPENDENT of `detachOrigin`: subscribe/adopt pass preserveRid:true +
+  // detachOrigin:false (keep upstream origin AND the publisher rid); the
+  // standalone CLI clone passes neither. subscribeFlow's clone-on-subscribe
+  // and mesh-adopt's member clones pass true.
+  preserveRid?: boolean | undefined;
+  // Inc-2 Phase B / (S1) — ON-DISK SEPARATION. A vault-root-relative
+  // directory (e.g. `subscriptions/{owner}/{leaf}`) under which the clone lands
+  // on disk, DECOUPLED from the registered vault `name`. The subscribe / foreign
+  // clone path passes this so a received foreign vault materializes under the
+  // separated `~/lyt/vaults/subscriptions/…` (or `shared/…`) subtree instead of
+  // commingling into the user's own `~/lyt/vaults/{mesh}/…` tree — while the
+  // registered name STAYS the publisher's canonical `{mesh}/{leaf}` (so the
+  // preserve-rid name==publisher-declared identity guard still holds). Every
+  // `/`-segment is slug-checked (assertSafeCloneName) — a `..`/absolute/empty
+  // segment is refused before it reaches join(parent, subdir)/mkdirSync. Omitted
+  // → the on-disk dir is derived from `name` exactly as before.
+  targetSubdir?: string | undefined;
+  // Inc-2 Phase B / (S1, keystone) — own-vs-clone PROVENANCE intent. When
+  // true the registered vault is positively marked FOREIGN. EXPLICIT, never
+  // inferred (a wrong own-vs-clone signal is L0-adjacent): only the subscribe /
+  // mesh-adopt member clone passes it. Omitted → fail-closed `own`
+  // (standalone/graduate-a-template clone). retained as the boolean
+  // back-compat trigger; when `foreignSource` is ALSO supplied it takes
+  // precedence (and picks shared vs subscribed); a bare `markSubscribed:true`
+  // defaults to `subscribed`.
+  markSubscribed?: boolean | undefined;
+  // Inc-2 Phase B / the resolved FOREIGN provenance (`shared` |
+  // `subscribed`). `shared` = a granted PRIVATE vault (homes into `shared/{owner}`);
+  // `subscribed` = a self-subscribed PUBLIC vault (homes into `subscriptions/{owner}`).
+  // Set by the receive path (subscribe/clone) from the public-vs-private
+  // discriminator. Wins over `markSubscribed`. Omitted (with markSubscribed
+  // false/absent) → fail-closed `own`.
+  foreignSource?: ForeignVaultSource | undefined;
+  // Inc-2 Phase B / (S4) — the STANDALONE `lyt vault clone <url>` CLI intent
+  // to AUTO-ROUTE a FOREIGN vault to the subscribe (bucket-home) path instead of
+  // half-cloning it then refusing with VaultHomeMeshNotRegisteredError + leaving
+  // an orphan. When set (and no explicit --to-mesh is given), the flow resolves
+  // the clone's home mesh from the URL: if it is NOT a locally-OWNED mesh the
+  // clone is routed to `subscriptions/{owner}` (bucket-home + markSubscribed +
+  // separated on-disk), exactly like a subscribe. A locally-owned mesh (a
+  // graduate-a-template / own re-clone) keeps the default behavior. ONLY the CLI
+  // clone verb passes this; library callers (subscribe/adopt) never do.
+  routeForeignToBucket?: boolean | undefined;
+  // Inc-2 Phase B / #2 (0.12.1) — AUTO-INDEX on receive. When true, after a
+  // foreign vault is cloned + registered into its owner-bucket, its machine-local
+  // content caches are REFLECTED from the committed SoT (reflectInboundIndex) so
+  // `lyt search`/`recall`/`primer` hit on arrival — no manual `lyt reindex`. Set
+  // by the receive verbs that OWN their own post-clone step: the standalone
+  // `lyt vault clone <url>` foreign auto-route (resolveEffectiveCloneOptions) and
+  // the `accept-share` flow. Omitted by subscribeFlow's clone-on-subscribe (it
+  // runs its own buildLocalIndex afterward) so the reflect never double-fires.
+  // Best-effort: an index failure logs + returns, never fails the clone.
+  autoIndex?: boolean | undefined;
 }
 
 export interface CloneResult extends JoinResult {
@@ -136,7 +209,257 @@ export class CloneTargetMeshNotFoundError extends Error {
   }
 }
 
-export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
+// (Phase-0 A2b, CRIT-2) — refusal raised when a preserve-rid clone's
+// UNTRUSTED `.lyt/vault.yon` declares a vault NAME that does not match the
+// caller's canonical subscribe/adopt ref. On the preserve path the clone KEEPS
+// the publisher's declared rid AND registers under the publisher's declared
+// name; both come from the cloned (possibly hostile) vault.yon. Without this
+// check a hostile repo could declare name="victim/vault" + the victim's public
+// rid and plant a poisoned registry row that later short-circuits the victim's
+// real subscribe. An honest publisher's vault.yon name equals the ref, so the
+// honest path is unaffected; a mismatch is impersonation-or-misconfig and is
+// refused BEFORE any registry side-effect (no orphan vaults/meshes row). Sibling
+// of repo.ts's VaultRidImpersonationError (the rid-collision defense); this one
+// guards the clone-boundary NAME-vs-ref contract on the preserve path.
+export class VaultIdentityMismatchError extends Error {
+  readonly errorCode = "vault-identity-mismatch";
+  readonly ref: string;
+  readonly declaredName: string;
+  constructor(ref: string, declaredName: string, target: string) {
+    super(
+      `Refusing to register the vault cloned into ${target}: its .lyt/vault.yon ` +
+        `declares the vault name '${declaredName}', which does not match the requested ` +
+        `vault '${ref}'. A subscribe/adopt clone preserves the publisher's identity ` +
+        `(rid + name), so the declared name must equal the vault you asked for. A ` +
+        `mismatch means the published repo is not the vault named by the reference — ` +
+        `a renamed vault (the publisher renamed it after you last referenced it), ` +
+        `a misconfigured publisher, or an impersonation attempt asserting another ` +
+        `vault's identity. If the vault was legitimately renamed, subscribe/adopt ` +
+        `using its CURRENT '${declaredName}' name; otherwise verify the publisher ` +
+        `and the '{mesh}/{vault}' reference, then retry.`,
+    );
+    this.name = "VaultIdentityMismatchError";
+    this.ref = ref;
+    this.declaredName = declaredName;
+  }
+}
+
+// (R3) — refusal raised when a caller passes `preserveRid:true` WITHOUT a
+// target mesh. The preserve-rid invariant (CRIT-2 publisher-identity guard +
+// CRIT-1 local home-mesh rebind) is only DEFINED for the mesh-targeted path:
+// both live inside cloneIntoTargetMesh, reached only when `toMesh` is non-empty.
+// A `preserveRid` clone with no target mesh would otherwise fall through to the
+// default URL-clone path — minting/keeping a rid with NO home-mesh rebind and
+// NO identity guard, silently ignoring the caller's preserve intent. Refuse at
+// the flow boundary so the unsupported combination fails loudly, not silently.
+export class PreserveRidRequiresTargetMeshError extends Error {
+  readonly errorCode = "preserve-rid-requires-target-mesh";
+  constructor() {
+    super(
+      `preserveRid requires --to-mesh / a target mesh: the identity guard + ` +
+        `home-mesh rebind are only defined for the mesh-targeted clone path. ` +
+        `Re-run the subscribe/adopt clone with an explicit target mesh, or drop ` +
+        `preserveRid for a standalone 'lyt vault clone <url>'.`,
+    );
+    this.name = "PreserveRidRequiresTargetMeshError";
+  }
+}
+
+// Inc-2 Phase B / WRITE-PATH SYMLINK GUARD (standing directive: every
+// write to a handler-influenced path lstat-checks the leaf + parent chain and
+// refuses on a symlink; never follows it). Walks from `root` (the vaults root,
+// inclusive) down to the target's parent and refuses if any EXISTING component
+// is a reparse point. A missing ancestor is fine — it will be created fresh by
+// the flow's own mkdir. This is the write-side sibling of the reparse-safe
+// delete guard: a bucket parent (`subscriptions/{owner}`) swapped for a junction
+// pointing outside the vaults root would otherwise let the clone AND its later
+// junction-safe teardown operate outside the root.
+function assertNoSymlinkOnWritePath(root: string, target: string): void {
+  const rootR = resolve(root);
+  const chain: string[] = [];
+  let cur = resolve(dirname(target));
+  // Build the ancestor chain leafParent … rootR (bounded by the fs root).
+  for (;;) {
+    chain.push(cur);
+    if (cur === rootR) break;
+    const up = dirname(cur);
+    if (up === cur) break; // hit the filesystem root without meeting rootR
+    cur = up;
+  }
+  for (const p of chain) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch {
+      continue; // ancestor does not exist yet — created fresh, no reparse risk
+    }
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to clone into ${target}: the write-path component ${JSON.stringify(p)} ` +
+          `is a symlink/junction. A reparse point on the clone's parent chain could redirect ` +
+          `the write (and its later teardown) outside the vaults root. Remove or replace the ` +
+          `link with a real directory and retry.`,
+      );
+    }
+  }
+}
+
+// Inc-2 Phase B / collapse the two foreign-provenance intents into the
+// single resolved value the register path stamps. `foreignSource` wins; a bare
+// `markSubscribed:true` (the boolean, kept for back-compat) maps to
+// `subscribed`; neither → undefined (fail-closed `own`).
+function resolveForeignSourceOpt(opts: CloneOptions): ForeignVaultSource | undefined {
+  if (opts.foreignSource !== undefined) return opts.foreignSource;
+  if (opts.markSubscribed === true) return "subscribed";
+  return undefined;
+}
+
+// Inc-2 Phase B / → (S4) — resolve the EFFECTIVE clone options. Auto-routes
+// a STANDALONE `lyt vault clone <url>` of a FOREIGN vault to the always-separate
+// BUCKET-HOME subscribe path (owner-keyed `subscriptions/{owner}` bucket +
+// separated on-disk subtree + foreignSource + preserve-rid), so it no longer
+// half-clones then refuses with VaultHomeMeshNotRegisteredError and orphans a
+// dir. Gated hard: only when the CLI passed routeForeignToBucket AND no explicit
+// --to-mesh / subscriber intent is present (library subscribe/adopt callers
+// already set those and are never re-routed). "Foreign" = the URL's declared
+// mesh is NOT a locally-OWNED mesh (a registered mesh WITH a main vault); an
+// owned mesh (graduate-a-template / own re-clone) keeps the default path
+// untouched.
+//
+// PROVENANCE: the standalone clone verb has no cheap PRE-clone visibility signal
+// (the repo is not cloned yet), so it defaults to `subscribed` (a self-subscribe)
+// — the safe, least-committal foreign relationship. A privately-granted vault a
+// user clones directly is corrected to `shared` by an explicit graduate, the lazy
+// repair, or the dedicated `accept-share` verb once its visibility is known.
+//
+// Inc-2 Phase B / B2 (0.12.1) — OWNER-DERIVATION is now keyed off the URL's ORIGIN
+// COORDINATE owner (deriveForeignCloneOwner), NOT the mesh segment. The GH owner is
+// WHERE the repo lives; the mesh segment is WHAT the vault is — they diverge
+// whenever an owner hosts another mesh's vault (`realowner/lyt-vault-teammesh--leaf`
+// → mesh 'teammesh', owner 'realowner'). Keying the bucket off the mesh segment
+// (the pre-B2 bug) commingled distinct owners under one bucket + mis-keyed the
+// reconstitution. MASQUERADE GUARD: a locally-OWNED mesh name keeps the default
+// (own) path ONLY when the URL owner MATCHES that mesh's push_target — else a
+// crafted foreign repo embedding one of the user's own mesh names is routed to the
+// foreign owner-bucket, NEVER commingled into the own mesh (mirrors subscribe.ts's
+// repo-name masquerade guard).
+export async function resolveEffectiveCloneOptions(opts: CloneOptions): Promise<CloneOptions> {
+  if (
+    opts.routeForeignToBucket !== true ||
+    opts.toMesh !== undefined ||
+    opts.autoRegisterExternalMesh === true ||
+    opts.preserveRid === true ||
+    opts.markSubscribed === true ||
+    opts.foreignSource !== undefined
+  ) {
+    return opts;
+  }
+  let canonicalName: string;
+  try {
+    canonicalName = opts.name ?? deriveNameFromUrl(opts.url);
+  } catch {
+    return opts; // unparseable URL/name — let the default path refuse actionably
+  }
+  const slash = canonicalName.indexOf("/");
+  if (slash < 0) return opts; // bare name — no mesh segment to classify as foreign
+  const mesh = canonicalName.slice(0, slash);
+
+  // B2 — the owner key is the URL's origin-coordinate owner (falls back to the
+  // mesh segment only for a non-remote/local URL that carries no coordinate).
+  const owner = deriveForeignCloneOwner(opts.url, canonicalName);
+
+  const callerSupplied = opts.registryDb !== undefined;
+  const db = opts.registryDb ?? (await openRegistry());
+  try {
+    const localMesh = await getMeshByName(db, mesh);
+    // The mesh segment names a locally-OWNED mesh (has a main vault). KEEP the
+    // default (own) clone path ONLY when the clone's real owner MATCHES this
+    // mesh's push_target owner — i.e. the user is genuinely re-cloning / graduating
+    // their OWN vault. A MISMATCH (a foreign owner whose crafted repo embeds one of
+    // the user's OWN mesh names — the masquerade) or an unconfirmable owner (a
+    // local-only mesh with no push_target) MUST NOT commingle into the own mesh and
+    // MUST NOT occupy the own namespace as its owner key: fall through to the
+    // owner-bucket under the REAL (foreign) owner below.
+    if (localMesh !== null && localMesh.mainVaultRid !== null) {
+      const meshOwner = localMesh.pushTarget;
+      if (meshOwner !== null && slugifyHandle(meshOwner) === owner) {
+        return opts; // genuine own re-clone / graduate-a-template
+      }
+    }
+  } finally {
+    if (!callerSupplied) await closeRegistry(db);
+  }
+
+  // Foreign → always-separate bucket-home subscribe: auto-register the reserved
+  // owner-bucket mesh (keyed by the REAL owner), land under the separated on-disk
+  // subtree, preserve the publisher rid, mark it `subscribed` (the standalone-clone
+  // default), and auto-index on arrival.
+  const foreignSource: ForeignVaultSource = "subscribed";
+  const bucketMesh = bucketMeshName(entryModeForSource(foreignSource), owner);
+  const targetSubdir = bucketVaultRelDir(foreignSource, owner, vaultLeaf(canonicalName));
+  return {
+    ...opts,
+    name: canonicalName,
+    toMesh: bucketMesh,
+    targetSubdir,
+    foreignSource,
+    autoRegisterExternalMesh: true,
+    preserveRid: true,
+    autoIndex: true,
+  };
+}
+
+// Inc-2 Phase B / B2 (0.12.1) — derive the FOREIGN clone's owner key from the clone
+// URL's ORIGIN COORDINATE (`<host>/<owner>/<repo>` → <owner>), NOT the mesh segment
+// of the vault name. Falls back to the mesh segment ONLY when the URL is not a
+// recognizable remote (a bare local path has no owner coordinate — this preserves
+// the local-path clone behavior the S4 tests exercise). The returned owner is
+// slug-normalized for path/mesh-name safety.
+export function deriveForeignCloneOwner(url: string, canonicalName: string): string {
+  const meshSegment = canonicalName.includes("/")
+    ? canonicalName.slice(0, canonicalName.indexOf("/"))
+    : canonicalName;
+  if (looksLikeRemoteUrl(url)) {
+    const coord = gitUrlToCoordinate(url); // canonical `<host>/<owner>/<repo>`
+    const ownerSeg = coord?.split("/")[1];
+    if (ownerSeg !== undefined && ownerSeg.length > 0) return slugifyHandle(ownerSeg);
+    // a review finding (Phase B release review) — FAIL CLOSED: a remote-SHAPED URL whose
+    // coordinate won't parse must NOT silently fall back to the mesh segment.
+    // The pre-B2 window did exactly that, letting a crafted remote URL key the
+    // foreign clone under the vault name's mesh segment instead of the real
+    // owner. The mesh-segment fallback is for GENUINE LOCAL paths only.
+    throw new Error(
+      `lyt clone: cannot derive owner from remote URL '${url}' — its origin ` +
+        `coordinate (<host>/<owner>/<repo>) did not parse. Refusing to key the ` +
+        `foreign clone by the vault-name mesh segment (a security fallback that ` +
+        `could mis-home the vault). Verify the URL is a valid remote repository.`,
+    );
+  }
+  return slugifyHandle(meshSegment);
+}
+
+// A recognizable remote URL: a `scheme://…` form (https/http/git/ssh) or the
+// `user@host:path` SSH shorthand. A bare local filesystem path (no scheme, no
+// `user@host:`) is NOT a remote and carries no owner coordinate. Mirrors the
+// branch discriminator deriveNameFromUrl uses.
+function looksLikeRemoteUrl(url: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(url) || /^[^@/\\]+@[^:]+:/.test(url);
+}
+
+export async function cloneVaultFlow(rawOpts: CloneOptions): Promise<CloneResult> {
+  // Inc-2 Phase B / (S4) — resolve the effective options FIRST (may re-route
+  // a standalone foreign clone to the bucket-home subscribe path). Everything
+  // below operates on the resolved `opts`.
+  const opts = await resolveEffectiveCloneOptions(rawOpts);
+
+  // (R3) — boundary refusal for the unsupported preserveRid-without-target-
+  // mesh combination, BEFORE any filesystem side-effect (mkdir/clone). See
+  // PreserveRidRequiresTargetMeshError: the preserve-path guards only exist on
+  // the mesh-targeted path.
+  if (opts.preserveRid === true && (opts.toMesh === undefined || opts.toMesh.length === 0)) {
+    throw new PreserveRidRequiresTargetMeshError();
+  }
+
   // fed-v2 Layer-2 P1 — git option-injection guard. A URL beginning
   // with '-' would be consumed by `git clone` as an OPTION (e.g.
   // `--upload-pack=<cmd>` → arbitrary command execution), not a positional URL.
@@ -161,7 +484,22 @@ export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
   const name = opts.name ?? deriveNameFromUrl(opts.url);
   assertSafeCloneName(name);
   const parent = resolve(opts.parentDir ?? getDefaultVaultsRoot());
-  const target = join(parent, name);
+  // Inc-2 Phase B / (S1) — the ON-DISK dir is `targetSubdir` when supplied
+  // (the subscribe/foreign path's `subscriptions/{owner}/{leaf}` separation),
+  // else derived from `name` (unchanged default). Route the subdir through the
+  // SAME clone-name containment allowlist so a crafted `..`/absolute/empty
+  // segment can never escape the vaults root at join(parent, …)/mkdirSync.
+  const onDiskRel = opts.targetSubdir ?? name;
+  if (opts.targetSubdir !== undefined) assertSafeCloneName(opts.targetSubdir);
+  const target = join(parent, onDiskRel);
+
+  // Inc-2 Phase B / WRITE-PATH SYMLINK GUARD (standing directive). Before
+  // materializing the clone dir under a handler-influenced path, lstat every
+  // EXISTING ancestor from the vaults root down to the leaf's parent and refuse
+  // on any symlink/junction — never follow it. A `subscriptions/{owner}` bucket
+  // parent that an attacker replaced with a reparse point would otherwise let
+  // the clone (and its later teardown) escape the vaults root.
+  assertNoSymlinkOnWritePath(parent, target);
 
   // hardening pass release review — claim the target EXCLUSIVELY before cloning
   // (non-recursive mkdir throws EEXIST on a race). git clones happily into an
@@ -211,6 +549,9 @@ export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
         nowIso: opts.nowIso ?? new Date().toISOString(),
         detachOrigin: opts.detachOrigin === true,
         autoRegisterExternalMesh: opts.autoRegisterExternalMesh === true,
+        preserveRid: opts.preserveRid === true,
+        foreignSource: resolveForeignSourceOpt(opts),
+        autoIndex: opts.autoIndex === true,
       });
       return result;
     }
@@ -231,7 +572,11 @@ export async function cloneVaultFlow(opts: CloneOptions): Promise<CloneResult> {
     if (existsSync(defaultYonPath)) {
       parseClonedVaultYonOrRefuse(readFileSync(defaultYonPath, "utf8"), target);
     }
-    const join_ = await joinVaultFlow(target);
+    const defaultForeign = resolveForeignSourceOpt(opts);
+    const join_ = await joinVaultFlow(
+      target,
+      defaultForeign !== undefined ? { source: defaultForeign } : undefined,
+    );
     // UNIT 4 — scaffold conformance on clone. A cloned vault may lack the
     // sentinel-bearing priming seeds (or carry un-flagged ones); bring it to
     // conformance so it does NOT FTS-pollute the primer. Additive + marker-
@@ -302,6 +647,12 @@ async function removeFailedCloneDir(target: string): Promise<void> {
   try {
     if (!existsSync(target)) return;
     if (lstatSync(target).isSymbolicLink()) return;
+    // 🔴 L0 DESTRUCTIVE-SAFETY: a cloned tree CAN contain nested junctions/
+    // symlinks (user globally enabled `core.symlinks`). ENUMERATE + detach every
+    // nested reparse point BEFORE the recursive teardown — not just the
+    // top-level lstat bail above — so rmWithRetry never risks descending an
+    // unenumerated escaper into a source-of-truth outside the clone root.
+    stripNestedReparsePoints(target);
     await rmWithRetry(target);
   } catch {
     // best-effort
@@ -489,6 +840,15 @@ interface CloneIntoTargetMeshArgs {
   nowIso: string;
   detachOrigin: boolean;
   autoRegisterExternalMesh: boolean;
+  preserveRid: boolean;
+  // Inc-2 Phase B / →positively mark the registered vault with its
+  // resolved FOREIGN provenance (`shared` | `subscribed`). EXPLICIT intent from
+  // the subscribe / foreign-clone / mesh-adopt member path; omitted elsewhere
+  // (undefined) → fail-closed 'own'.
+  foreignSource: ForeignVaultSource | undefined;
+  // Inc-2 Phase B / #2 (0.12.1) — reflect the committed SoT into the machine-local
+  // caches after registration so the received vault is searchable on arrival.
+  autoIndex: boolean;
 }
 
 async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<CloneResult> {
@@ -506,6 +866,33 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
     // be blocked.
     if (!args.autoRegisterExternalMesh) {
       assertMeshNameNotReserved(args.toMeshName.split("/")[0]!);
+    }
+
+    // (CRIT-2) — validate the UNTRUSTED publisher identity against the
+    // caller's canonical ref BEFORE any registry side-effect (external-mesh
+    // auto-register, vault upsert) on the preserve-rid path. Refusing here — the
+    // first thing the flow does after opening the registry, and before the
+    // external-mesh insert / origin detach / vault register — guarantees a
+    // mismatch leaves NO orphan row or mesh. Only the preserve path keeps the
+    // publisher's name; the re-mint `lyt vault clone --to-mesh` path deliberately
+    // RENAMES to args.name (graduate-a-template), so it is exempt.
+    if (args.preserveRid) {
+      const guardYonPath = join(args.target, ".lyt", "vault.yon");
+      if (!existsSync(guardYonPath)) {
+        throw new Error(
+          `The cloned repository at ${args.target} is not a Lyt vault ` +
+            `(no .lyt/vault.yon). Only Lyt-published vaults can be subscribed or ` +
+            `adopted; for a plain repo, clone it with git and run ` +
+            `'lyt vault adopt <path>' instead.`,
+        );
+      }
+      const declared = parseClonedVaultYonOrRefuse(
+        readFileSync(guardYonPath, "utf8"),
+        args.target,
+      );
+      if (declared.name !== args.name) {
+        throw new VaultIdentityMismatchError(args.name, declared.name, args.target);
+      }
     }
 
     let meshRow: MeshRow | null = await getMeshByName(db, args.toMeshName);
@@ -611,88 +998,152 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
       }
     }
 
-    // Rewrite the cloned vault.yon: fresh rid + @VAULT_HOME_MESH block.
+    // Read + parse the cloned vault.yon. Both paths need the parsed shape; the
+    // re-mint path also rewrites the file, the preserve-rid path leaves it
+    // byte-unchanged (read only).
     const vaultYonPath = join(args.target, ".lyt", "vault.yon");
     const oldContent = readFileSync(vaultYonPath, "utf8");
     const parsed = parseClonedVaultYonOrRefuse(oldContent, args.target);
 
-    const freshRid = newUuidv7Bytes();
-    const freshRidStr = uuid7BytesToDashedString(freshRid);
-    const oldRidStr = parsed.rid;
+    let join_: JoinResult;
+    let freshRidApplied: boolean;
+    // set on the converge branch (preserved rid already registered
+    // locally). Drives the FIX-3 re-home guard + the orphan-dir sweep below.
+    let converged = false;
 
-    // Replace the rid string verbatim everywhere it appears in the file
-    // (@DOC id=, @VAULT rid=, any other reference). vault.yon emits the
-    // dashed-UUIDv7 form in two places (@DOC.id + @VAULT.rid); a literal
-    // replace is safe because UUIDv7 strings don't appear as substrings of
-    // other content.
-    let rewritten = oldContent.split(oldRidStr).join(freshRidStr);
+    if (args.preserveRid) {
+      // (Phase-0 A2b) — KEEP the publisher rid; leave the tracked
+      // `.lyt/vault.yon` BYTE-UNCHANGED (no fresh mint, no rewrite) and SKIP
+      // the scaffold-conformance regen below, so the read-only subscriber
+      // clone's working tree stays CLEAN. The home-mesh binding is done
+      // registry-side (belt-and-braces below), not via a vault.yon rewrite.
+      freshRidApplied = false;
+      const preservedRid = hexToUuid7Bytes(parsed.rid);
 
-    // Insert/replace the @VAULT_HOME_MESH block. Easiest: re-parse the
-    // rewritten content (with new rid), then re-render via renderVaultYon
-    // using the parsed shape + the new homeMesh.
-    const reparsed = parseVaultYon(rewritten);
-    // Re-render via the canonical writer to get a clean @VAULT_HOME_MESH
-    // block + canonical key order. We need to translate the parsed shape
-    // back to the renderer's input shape; minor reconstruction here.
-    const memscopeBytes = reparsed.memscopeRid ? hexToUuid7Bytes(reparsed.memscopeRid) : undefined;
-    const parentBytes = reparsed.parentVault ? hexToUuid7Bytes(reparsed.parentVault) : undefined;
-    rewritten = renderVaultYon({
-      vault: {
-        rid: freshRid,
-        // v1.B.3 — clone --to-mesh sets vault.yon's @VAULT.name to the
-        // clone-target name (args.name) so the registry's UNIQUE name
-        // constraint doesn't collide with the source vault when both are
-        // registered locally.
-        name: args.name,
-        ...(reparsed.desc !== null ? { desc: reparsed.desc } : {}),
-        ...(parentBytes !== undefined ? { parentVault: parentBytes } : {}),
-        ...(reparsed.tierHint !== null ? { tierHint: reparsed.tierHint } : {}),
-        ...(memscopeBytes !== undefined ? { memscope: memscopeBytes } : {}),
-        createdAt: reparsed.createdAt ?? args.nowIso,
-        version: reparsed.version ?? "0.1",
-      },
-      // F8 — when detaching, never carry the SOURCE vault's gitUrl into the
-      // fresh-rid clone's vault.yon: paired with the origin detach above,
-      // the new vault starts remote-less and earns its own repo at first
-      // publish. Subscribe/adopt clones (detachOrigin:false) keep it — it IS
-      // their upstream.
-      ...(!args.detachOrigin && reparsed.gitUrl !== null ? { gitUrl: reparsed.gitUrl } : {}),
-      primaryOwner: reparsed.primaryOwner ?? "github:unknown",
-      lifecycle:
-        reparsed.lifecycle === "active" ||
-        reparsed.lifecycle === "archived" ||
-        reparsed.lifecycle === "frozen"
-          ? reparsed.lifecycle
-          : "active",
-      topics: reparsed.topics,
-      ...(reparsed.agentTemplateVersion !== null
-        ? { agentTemplateVersion: reparsed.agentTemplateVersion }
-        : {}),
-      // Phase A — preserve scaffold-system version stamps across parse→render.
-      // SEE ALSO: yon/parse.ts ParsedVaultYon + yon/vault.ts renderVaultYon.
-      ...(reparsed.templateVersion !== null
-        ? { templateVersion: reparsed.templateVersion }
-        : {}),
-      ...(reparsed.contractVersion !== null
-        ? { contractVersion: reparsed.contractVersion }
-        : {}),
-      homeMesh: {
-        vaultRid: freshRid,
-        meshRid: meshRow.rid,
-        meshName: meshRow.name,
-        assignedAt: args.nowIso,
-      },
-    });
+      // Rid-already-present guard: with a preserved rid the register/join path
+      // could hit UNIQUE(rid) when the same vault is already registered
+      // locally (a co-located publisher+clone, or a genuine re-subscribe).
+      // CONVERGE on the existing row instead of a blind re-INSERT. The guard is
+      // scoped to a SAME-NAME match: a preserved rid held locally under a
+      // DIFFERENT name is an impersonation hazard, so we fall through to
+      // joinVaultFlow → upsertVault, which surfaces the load-bearing
+      // VaultRidImpersonationError. Full 2-machine converge is Phase B; this is
+      // the minimal Phase-0 guard.
+      const existingByRid = await getVaultByRid(db, preservedRid);
+      if (existingByRid !== null && existingByRid.name === parsed.name) {
+        join_ = {
+          rid: existingByRid.rid,
+          ridHex: existingByRid.ridHex,
+          name: existingByRid.name,
+          path: existingByRid.path,
+          alreadyRegistered: true,
+          patternsLinked: 0,
+        };
+        converged = true;
+      } else {
+        // Pure new subscriber: the preserved rid is not present locally →
+        // joinVaultFlow INSERTs cleanly under the publisher rid + name. The
+        // home-mesh override (CRIT-1) files the vault under the LOCAL target
+        // mesh (meshRow.rid), NOT the publisher's foreign @VAULT_HOME_MESH rid,
+        // while the committed vault.yon stays byte-unchanged. skipPatternRelink
+        // keeps the tracked agents.md byte-unchanged too (clean tree — A2c).
+        join_ = await joinVaultFlow(args.target, {
+          homeMeshRidOverride: meshRow.rid,
+          skipPatternRelink: true,
+          ...(args.foreignSource !== undefined ? { source: args.foreignSource } : {}),
+        });
+      }
+    } else {
+      // Default (standalone `lyt vault clone --to-mesh`): rewrite the cloned
+      // vault.yon with a FRESH rid + @VAULT_HOME_MESH block.
+      freshRidApplied = true;
+      const freshRid = newUuidv7Bytes();
+      const freshRidStr = uuid7BytesToDashedString(freshRid);
+      const oldRidStr = parsed.rid;
 
-    writeFileSync(vaultYonPath, rewritten, "utf8");
+      // Replace the rid string verbatim everywhere it appears in the file
+      // (@DOC id=, @VAULT rid=, any other reference). vault.yon emits the
+      // dashed-UUIDv7 form in two places (@DOC.id + @VAULT.rid); a literal
+      // replace is safe because UUIDv7 strings don't appear as substrings of
+      // other content.
+      let rewritten = oldContent.split(oldRidStr).join(freshRidStr);
 
-    // Now register via join — joinVaultFlow re-reads the rewritten
-    // vault.yon and INSERTs vaults row with the fresh rid + home_mesh_rid
-    // primed via register.ts's @VAULT_HOME_MESH parse path.
-    const join_ = await joinVaultFlow(args.target);
+      // Insert/replace the @VAULT_HOME_MESH block. Easiest: re-parse the
+      // rewritten content (with new rid), then re-render via renderVaultYon
+      // using the parsed shape + the new homeMesh.
+      const reparsed = parseVaultYon(rewritten);
+      // Re-render via the canonical writer to get a clean @VAULT_HOME_MESH
+      // block + canonical key order. We need to translate the parsed shape
+      // back to the renderer's input shape; minor reconstruction here.
+      const memscopeBytes = reparsed.memscopeRid
+        ? hexToUuid7Bytes(reparsed.memscopeRid)
+        : undefined;
+      const parentBytes = reparsed.parentVault ? hexToUuid7Bytes(reparsed.parentVault) : undefined;
+      rewritten = renderVaultYon({
+        vault: {
+          rid: freshRid,
+          // v1.B.3 — clone --to-mesh sets vault.yon's @VAULT.name to the
+          // clone-target name (args.name) so the fresh-rid clone registers under
+          // its own name rather than the source vault's when both are registered
+          // locally. NOTE: `name` is NOT a UNIQUE column post-migration-003; the
+          // load-bearing protections against a colliding/impersonating clone are
+          // the canonical-URL coupling, the clone-boundary name==ref guard
+          // (VaultIdentityMismatchError), and the rid-impersonation defense
+          // (VaultRidImpersonationError) — not a bare UNIQUE(name).
+          name: args.name,
+          ...(reparsed.desc !== null ? { desc: reparsed.desc } : {}),
+          ...(parentBytes !== undefined ? { parentVault: parentBytes } : {}),
+          ...(reparsed.tierHint !== null ? { tierHint: reparsed.tierHint } : {}),
+          ...(memscopeBytes !== undefined ? { memscope: memscopeBytes } : {}),
+          createdAt: reparsed.createdAt ?? args.nowIso,
+          version: reparsed.version ?? "0.1",
+        },
+        // F8 — when detaching, never carry the SOURCE vault's gitUrl into the
+        // fresh-rid clone's vault.yon: paired with the origin detach above,
+        // the new vault starts remote-less and earns its own repo at first
+        // publish. Subscribe/adopt clones (detachOrigin:false) keep it — it IS
+        // their upstream.
+        ...(!args.detachOrigin && reparsed.gitUrl !== null ? { gitUrl: reparsed.gitUrl } : {}),
+        primaryOwner: reparsed.primaryOwner ?? "github:unknown",
+        lifecycle:
+          reparsed.lifecycle === "active" ||
+          reparsed.lifecycle === "archived" ||
+          reparsed.lifecycle === "frozen"
+            ? reparsed.lifecycle
+            : "active",
+        topics: reparsed.topics,
+        ...(reparsed.agentTemplateVersion !== null
+          ? { agentTemplateVersion: reparsed.agentTemplateVersion }
+          : {}),
+        // Phase A — preserve scaffold-system version stamps across parse→render.
+        // SEE ALSO: yon/parse.ts ParsedVaultYon + yon/vault.ts renderVaultYon.
+        ...(reparsed.templateVersion !== null
+          ? { templateVersion: reparsed.templateVersion }
+          : {}),
+        ...(reparsed.contractVersion !== null
+          ? { contractVersion: reparsed.contractVersion }
+          : {}),
+        homeMesh: {
+          vaultRid: freshRid,
+          meshRid: meshRow.rid,
+          meshName: meshRow.name,
+          assignedAt: args.nowIso,
+        },
+      });
 
-    // Belt-and-braces: ensure vaults.home_mesh_rid is set, INSERT
-    // mesh_vaults role='home', append @MESH_HOME to the target mesh's
+      writeFileSync(vaultYonPath, rewritten, "utf8");
+
+      // Now register via join — joinVaultFlow re-reads the rewritten
+      // vault.yon and INSERTs vaults row with the fresh rid + home_mesh_rid
+      // primed via register.ts's @VAULT_HOME_MESH parse path.
+      join_ = await joinVaultFlow(
+        args.target,
+        args.foreignSource !== undefined ? { source: args.foreignSource } : undefined,
+      );
+    }
+
+    // Belt-and-braces (fresh-INSERT paths): ensure vaults.home_mesh_rid is set,
+    // INSERT mesh_vaults role='home', append @MESH_HOME to the target mesh's
     // mesh.yon.
     const vaultRow = await getVaultByName(db, join_.name);
     if (vaultRow === null) {
@@ -700,29 +1151,108 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
         `cloneVaultFlow: registered vault '${join_.name}' did not land in the registry (defensive).`,
       );
     }
-    await setVaultHomeMesh(db, vaultRow.rid, meshRow.rid);
-    await addVaultToMesh(db, meshRow.rid, vaultRow.rid, "home");
-    if (mainVault !== null) {
-      appendMeshHomeToFile({
-        mainVaultPath: mainVault.path,
-        meshRid: meshRow.rid,
-        vaultRid: vaultRow.rid,
-        vaultName: join_.name,
-      });
+    // Inc-2 Phase B / → (keystone) — positively mark the received foreign
+    // vault with its resolved provenance. The fresh-INSERT branches already
+    // passed `source` via join, but the CONVERGE branch resolved an EXISTING row
+    // without a fresh insert (source untouched by upsert's preserve-on-conflict
+    // rule). markVaultSourcePreserving applies the monotonic rule there: it
+    // raises an `own` row to the foreign value but NEVER downgrades an existing
+    // `shared` to `subscribed` nor silently re-flips a foreign row — so a
+    // converge onto the user's own co-located vault, or onto an already-`shared`
+    // grant, is left intact. No-op for the insert branches (already foreign).
+    // Only ever runs on explicit foreign intent (foreignSource defined).
+    if (args.foreignSource !== undefined) {
+      await markVaultSourcePreserving(db, vaultRow.rid, args.foreignSource);
+    }
+    // (FIX-3) — do NOT re-home a vault that is ALREADY homed into a
+    // DIFFERENT mesh. On the converge branch the preserved rid resolves to an
+    // existing row whose home mesh may differ; re-issuing setVaultHomeMesh +
+    // addVaultToMesh(role='home') for a second mesh violates the partial unique
+    // index idx_mesh_vaults_home_per_vault (one home mesh per vault) and
+    // clobbers unrelated home state. Skip the home mutation when the existing
+    // home mesh differs; stay idempotent for the same-mesh case (ON CONFLICT
+    // re-writes identical values harmlessly). A fresh INSERT always has
+    // homeMeshRid == meshRow.rid here (register set it), so it proceeds.
+    const alreadyHomedElsewhere =
+      vaultRow.homeMeshRid !== null && !ridsEqual(vaultRow.homeMeshRid, meshRow.rid);
+    if (!alreadyHomedElsewhere) {
+      // Wrap the paired registry mutations in a tx (repair.ts precedent) so
+      // the vault never lands half-homed (home_mesh_rid set without the
+      // mesh_vaults `home` row, or vice-versa) on a mid-write failure. The
+      // mesh.yon @MESH_HOME append stays OUTSIDE the tx (a file write; if it
+      // throws post-commit, `lyt mesh rebuild-registry` re-emits the row).
+      await db.execute("BEGIN");
+      try {
+        await setVaultHomeMesh(db, vaultRow.rid, meshRow.rid);
+        await addVaultToMesh(db, meshRow.rid, vaultRow.rid, "home");
+        await db.execute("COMMIT");
+      } catch (innerErr) {
+        try {
+          await db.execute("ROLLBACK");
+        } catch {
+          /* best-effort */
+        }
+        throw innerErr;
+      }
+      if (mainVault !== null) {
+        appendMeshHomeToFile({
+          mainVaultPath: mainVault.path,
+          meshRid: meshRow.rid,
+          vaultRid: vaultRow.rid,
+          vaultName: join_.name,
+        });
+      }
     }
 
-    // UNIT 4 — scaffold conformance on clone --to-mesh / subscribe-on-clone too:
-    // the freshly-rid'd vault gets sentinel-bearing priming seeds so it does not
+    // (FIX-3) — sweep the orphaned freshly-cloned dir on the converge
+    // short-circuit. The registry converged onto the EXISTING row (join_.path),
+    // so the fresh clone at args.target is a redundant duplicate not referenced
+    // by any registry row; remove it (junction-safe rmWithRetry) so it does not
+    // leak. Guard on a genuine path difference (the fresh clone is always a
+    // distinct new dir, but compare defensively) AND on the existing registered
+    // path being present on disk (m1) — if the converged-onto row's path is gone
+    // (a stale registry pointing at a removed dir), the fresh clone is the ONLY
+    // surviving copy, so do NOT sweep it out from under the user.
+    const convergedElsewhere =
+      converged &&
+      resolve(join_.path) !== resolve(args.target) &&
+      existsSync(join_.path);
+    if (convergedElsewhere) {
+      await removeFailedCloneDir(args.target);
+    }
+    const finalTargetPath = converged ? join_.path : args.target;
+
+    // UNIT 4 — scaffold conformance on clone --to-mesh / subscribe-on-clone: the
+    // freshly-rid'd vault gets sentinel-bearing priming seeds so it does not
     // FTS-pollute. Additive + marker-bounded (never clobbers handler content).
-    writeScaffoldConformance({ vaultPath: args.target, name: join_.name });
+    // SKIP on the preserve-rid path: regenAgentsMd/regenReadme would
+    // rename agents.md/README with the clone name (or otherwise touch the
+    // tracked files) and dirty the subscriber's working tree, which is exactly
+    // what A2b forbids. A published Lyt vault already carries sentinel-bearing
+    // scaffold, so skipping conformance does not FTS-pollute.
+    if (!args.preserveRid) {
+      writeScaffoldConformance({ vaultPath: args.target, name: join_.name });
+    }
+
+    // Inc-2 Phase B / #2 (0.12.1) — AUTO-INDEX on receive. Reflect the committed
+    // SoT of the just-received vault into the machine-local caches so `lyt search`/
+    // `recall`/`primer` hit with NO manual `lyt reindex`. Reflect (not re-cluster)
+    // keeps the tracked tree clean (see reflect-index.ts). Best-effort: never
+    // throws into the clone (the vault on disk is the durable side-effect). Only
+    // the receive verbs that own their own post-clone step set autoIndex;
+    // subscribeFlow leaves it off (it runs its own buildLocalIndex), so the reflect
+    // never double-fires.
+    if (args.autoIndex) {
+      await reflectInboundIndex(join_.name, finalTargetPath);
+    }
 
     return {
       ...join_,
-      cloneTargetPath: args.target,
+      cloneTargetPath: finalTargetPath,
       meshAssignment: {
         meshRidHex: meshRow.ridHex,
         meshName: meshRow.name,
-        freshRidApplied: true,
+        freshRidApplied,
         externalMeshAutoRegistered,
       },
       originDetached,

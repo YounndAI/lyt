@@ -44,6 +44,7 @@ import { renderMeshYon, type MeshDoc } from "../yon/mesh-write.js";
 import { appendMeshEdgeTombstone } from "../yon/mesh-edge-ledger-write.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { renderVaultYon } from "../yon/vault.js";
+import { authorFedVaultMutation } from "../yon/federation-vault-ledger-author.js";
 import { hexToUuid7Bytes, uuid7BytesToDashedString } from "../util/uuid7.js";
 
 // v1.B.3 Commit 2 — `lyt vault move <name> --to-mesh <mesh> [--solo|--branch]`.
@@ -182,6 +183,13 @@ export interface MoveVaultResult {
   targetMeshYonPath: string;
   vaultYonPath: string;
   durationMs: number;
+  // Inc-2 R1 (release review) — was the mesh-hop authored into the @FED_VAULT manifest
+  // ledger? `true` when authorFedVaultMutation returned (including the non-federated
+  // no-op early-return); `false` when it THREW. A `false` is NOT self-healing: on a
+  // non-head machine the next sync's write-back REVERTS the move to the foreign
+  // ledger winner (a silent lost-update). The CLI surfaces the `false` so the user
+  // knows to retry `lyt sync`.
+  fedVaultAuthored: boolean;
   // 0.9.4 (3d) — read-back verdict. `verified` when the post-COMMIT re-read
   // confirms vaults.home_mesh_rid === target; `unverified` otherwise. The CLI
   // appends `unverifiedNote` to the success line on an unverified outcome
@@ -442,6 +450,31 @@ export async function moveVaultFlow(args: MoveVaultArgs): Promise<MoveVaultResul
       }
     }
 
+    // Inc-2 R1 (PROPER FIX) — author the mesh-hop into the @FED_VAULT manifest
+    // ledger. A move re-points the vault's `home_mesh_rid` (a @FED_VAULT VALUE),
+    // so author a fresh `active` at the TARGET mesh, seeded above the observed
+    // head, so a concurrent cross-machine move competes in proper LWW (closes the
+    // non-head-machine starvation the reconcile's origin-writer guard caused).
+    // The registry move is canonical, so an authoring failure is NON-FATAL to the
+    // move — but it does NOT self-heal on the next sync: on a non-head machine a
+    // missing author means the next sync's write-back REVERTS this move to the
+    // foreign ledger winner (a silent lost-update). So the degrade is made
+    // OBSERVABLE — logged here and surfaced as `fedVaultAuthored: false` so the CLI
+    // can tell the user to retry `lyt sync`.
+    let fedVaultAuthored = true;
+    try {
+      authorFedVaultMutation({
+        vaultRidHex: vault.ridHex,
+        vaultName: vault.name,
+        homeMeshRidHex: targetMesh.ridHex,
+      });
+    } catch (err) {
+      fedVaultAuthored = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.error(`@FED_VAULT author skipped non-fatally on move — ${msg}`);
+    }
+
     // 0.9.4 (3d) — read-back guard on top of the transaction. Re-read the row
     // and assert home_mesh_rid actually flipped to the target before claiming
     // success. Closes the "reported success without effect" class (the move-bug symptom).
@@ -475,6 +508,7 @@ export async function moveVaultFlow(args: MoveVaultArgs): Promise<MoveVaultResul
       targetMeshYonPath,
       vaultYonPath,
       durationMs: Date.now() - startedAt,
+      fedVaultAuthored,
       committed: committed.verdict,
       unverifiedNote: committed.unverifiedNote,
     };

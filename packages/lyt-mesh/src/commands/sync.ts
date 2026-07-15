@@ -18,21 +18,55 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 
 import {
+  adoptRemoteRenameAsideFlow,
+  closeRegistry,
   connectPodFlow,
+  openRegistry,
   podNeedsConnect,
   reconcilePublishFlow,
+  reconstructionExitCode,
+  resolveVault,
   syncPodLedgerFlow,
   withSpinner,
+  type AdoptRemoteRenameAsideResult,
   type ConnectPodResult,
   type ReconcilePublishResult,
   type SyncPodLedgerResult,
 } from "@younndai/lyt-vault";
 
 import { syncCheckFlow, type VaultCheckReport } from "../flows/sync-check.js";
-import { syncFlow, type VaultSyncReport } from "../flows/sync.js";
+import { syncFlow, type ConflictResolver, type VaultSyncReport } from "../flows/sync.js";
 import { syncWatchFlow } from "../flows/sync-watch.js";
 
-export function buildSyncCommand(): Command {
+// Injectable seam for the pod-wide federation flows (R7/S3 test seam). Defaults
+// to the real imports; a test overrides them with spies to assert the forge
+// scope guard actually GATES these call sites in the command action (a robust,
+// isolate:false-safe alternative to module mocking). Injection changes NOTHING
+// about the guard logic — the `federationPassAllowed && …` gates below are
+// byte-identical; only which function object is invoked is swapped.
+// Phase C — the handler's choice at the two-pods-with-content guard.
+export type ConnectChoice = "adopt" | "decline" | "defer";
+
+export interface SyncFederationDeps {
+  podNeedsConnect: typeof podNeedsConnect;
+  connectPodFlow: typeof connectPodFlow;
+  syncPodLedgerFlow: typeof syncPodLedgerFlow;
+  reconcilePublishFlow: typeof reconcilePublishFlow;
+  // Phase C — the rename-aside actionable path + its HIL chooser
+  // (injectable so the 3-option menu is unit-testable without a live TTY).
+  adoptRemoteRenameAsideFlow: typeof adoptRemoteRenameAsideFlow;
+  chooseConnectAction: (existingRemote: string) => Promise<ConnectChoice>;
+}
+
+export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Command {
+  // Real flows by default; spies when a test injects them.
+  const podNeedsConnectFn = deps.podNeedsConnect ?? podNeedsConnect;
+  const connectPodFlowFn = deps.connectPodFlow ?? connectPodFlow;
+  const syncPodLedgerFlowFn = deps.syncPodLedgerFlow ?? syncPodLedgerFlow;
+  const reconcilePublishFlowFn = deps.reconcilePublishFlow ?? reconcilePublishFlow;
+  const adoptRemoteRenameAsideFlowFn =
+    deps.adoptRemoteRenameAsideFlow ?? adoptRemoteRenameAsideFlow;
+  const chooseConnectActionFn = deps.chooseConnectAction ?? chooseConnectActionTty;
   const cmd = new Command("sync");
   cmd
     .description(
@@ -58,11 +92,39 @@ export function buildSyncCommand(): Command {
       "--message <msg>",
       "Override the per-vault commit message (e.g. an agent-supplied semantic summary). When omitted, a deterministic metadata-driven message is built from git status + figment titles (no LLM).",
     )
+    .option(
+      "--vault <name>",
+      "Scope the sync to ONE registered vault (by name, mesh-qualified name, origin coordinate, unique leaf, or an @-sigil pod-local alias — a bare name is NOT resolved as an alias). Only that vault is committed/pushed/pulled, and the pod-wide federation/publish pass is skipped so no other vault's repo is created.",
+    )
     .action(async (opts: SyncCliOpts) => {
       if (opts.check === true && opts.watch === true) {
         // eslint-disable-next-line no-console
         console.error("lyt sync: --check and --watch are mutually exclusive.");
         process.exit(1);
+      }
+      // R7/S3 — `--vault` scopes the DEFAULT sync path only. `--check` (read-only
+      // freshness) and `--watch` (the pod-wide daemon) do not carry a scope, so
+      // combining them with `--vault` would SILENTLY ignore the scope. Refuse
+      // loudly instead of pretending the scope took effect.
+      if (opts.vault !== undefined && (opts.check === true || opts.watch === true)) {
+        // eslint-disable-next-line no-console
+        console.error("lyt sync: --vault is not supported with --check or --watch.");
+        process.exit(1);
+      }
+      // R7/S3 — resolve the `--vault` argument to a registered vault through the
+      // shared addressing chokepoint (resolveVault) BEFORE any sync work, so an
+      // unknown or ambiguous name fails fast with a clear message (never a
+      // silent all-vault sync). The canonical stored name feeds syncFlow's
+      // `vaultNames` filter below.
+      let scopedVaultName: string | undefined;
+      if (opts.vault !== undefined) {
+        try {
+          scopedVaultName = await resolveScopedVaultName(opts.vault);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
       }
       if (opts.check === true) {
         const result = await syncCheckFlow();
@@ -110,7 +172,15 @@ export function buildSyncCommand(): Command {
       // "Syncing…" once (zero escape codes).
       const syncArgs = {
         resolveMeshContext: opts.resolveMeshContext === true,
+        // R7/S3 — scope the commit/push/pull loop to the single resolved vault.
+        // syncFlow's existing `vaultNames` filter (flows/sync.ts) is REUSED here —
+        // no parallel scoped-sync path.
+        ...(scopedVaultName !== undefined ? { vaultNames: [scopedVaultName] } : {}),
         ...(opts.message !== undefined ? { message: opts.message } : {}),
+        // 0.12.0 Phase D · A1 — the concurrent-write conflict resolver: a plain
+        // keep-mine/theirs/both choice on a TTY, the safe never-lose `both`
+        // default when non-interactive (no TTY, or --json/--quiet).
+        resolveConflict: makeConflictResolver(opts),
       };
       const result =
         opts.json !== true && opts.quiet !== true
@@ -131,35 +201,108 @@ export function buildSyncCommand(): Command {
       // The D.3-GUARD surfaces an existing-remote collision as an HIL (adopt
       // default) and DOES NOT blind-push (nothing overwritten). gh-unauthed and
       // the guard both DEFER publish (not a failure — a clear next step).
+      // === Forge scope guard (R7 / S3 · SC6) ==============================
+      // DISTINCT from — and co-shipped with, NOT folded into — the
+      // reconcile-into-ledger seam. A `--vault`-scoped `lyt sync` commits +
+      // pushes ONLY the named vault (the syncFlow `vaultNames` filter above,
+      // which targets that vault's own `origin`). The three pod-wide federation
+      // passes below — connect-pod (creates the pod repo), the pod-ledger push,
+      // and reconcile-publish (regen pod.yon + `gh repo create` for every
+      // MISSING vault repo + push the pod) — each enumerate the ENTIRE pod, so
+      // running them under a single-vault scope would FORGE repos for vaults
+      // OTHER than the named one. This guard gates all three off whenever a
+      // vault scope is active. It is kept as its own legible predicate (not
+      // hidden inside any pass) so a reviewer can see the scope guard.
+      const federationPassAllowed = isFederationPassAllowed({
+        publishRequested: opts.publish !== false,
+        vaultScoped: scopedVaultName !== undefined,
+      });
+
       let connectDeferredPublish = false;
-      if (opts.publish !== false && (await podNeedsConnect())) {
-        const connect = await connectPodFlow({
-          confirmAdoptExistingRemote: async ({ existingRemote }) => {
-            // Non-TTY → default adopt (the safe, non-destructive choice).
-            if (process.stdin.isTTY !== true) return true;
-            const rl = createInterface({ input: process.stdin, output: process.stdout });
-            try {
-              const ans = (
-                await rl.question(
-                  `\nYou already have a pod on GitHub (${existingRemote}). Adopt it? ` +
-                    `Your local notes are preserved on disk (nothing is overwritten). [Y/n]: `,
-                )
-              )
-                .trim()
-                .toLowerCase();
-              return ans === "" || ans === "y" || ans === "yes";
-            } finally {
-              rl.close();
-            }
-          },
-        });
+      if (federationPassAllowed && (await podNeedsConnectFn())) {
+        const connect = await connectPodFlowFn({});
         if (opts.json !== true && opts.quiet !== true) {
-          printConnectHuman(connect);
+          // C-4(b) — suppress the passive guard message when the interactive
+          // 3-option menu (TTY) is about to explain the same thing.
+          printConnectHuman(connect, { suppressMessageForMenu: process.stdin.isTTY === true });
         }
-        // reconciled → fall through to publish the now-connected pod. Any other
-        // status (gh-unauthed, guard-existing-remote, no-pod, invalid handle)
-        // defers the outward publish this run — no clobber, clear next step.
-        if (connect.status !== "reconciled") connectDeferredPublish = true;
+
+        if (connect.status === "guard-existing-remote") {
+          // Phase C (B4) — the two-pods case, and (per amendment-5) the
+          // remote genuinely has a pod WITH CONTENT, so this is a real collision.
+          // Offer the 3-option menu (handler-confirmed): back up & adopt / don't
+          // connect / keep working locally. Non-TTY → the safe defer default —
+          // NEVER a silent destructive rename-aside.
+          const choice = await chooseConnectActionFn(connect.existingRemote ?? "your existing pod");
+          if (choice === "adopt") {
+            // Back up the whole LYT_HOME aside, L0-strip the backup's junctions,
+            // adopt the remote fresh, hand off the merge to the import funnel.
+            // connectPodFlow's registry is already closed (its own finally), so
+            // the whole-home rename runs with no open DB handle under ~/lyt/.
+            //
+            // C-2 — defensive backstop. The dance's own guarded try restores the
+            // backup on ANY post-rename failure (mkdir/adopt throw →
+            // restoreFromBackup) and returns a result rather than throwing. Wrap
+            // the call anyway so an UNEXPECTED throw can NEVER escape the command
+            // and strand the home without a recovery pointer + the "your notes
+            // are backed up" handoff.
+            try {
+              const dance = await adoptRemoteRenameAsideFlowFn({
+                realHandle: connect.realHandle ?? "",
+                existingRemote: connect.existingRemote ?? "",
+              });
+              if (opts.json !== true && opts.quiet !== true) {
+                printRenameAsideHuman(dance);
+              }
+              // G1 parity (a review finding) — a fresh adopt that DROPPED vaults is an
+              // INCOMPLETE reconstruction: exit nonzero with the bug(12)/state(11)
+              // granularity so the connect path never reports clean success while
+              // vaults are missing (mirrors the wizard `lyt init` path).
+              if (dance.manifestDrops.length > 0) {
+                process.exitCode = reconstructionExitCode({ drops: dance.manifestDrops });
+                if (opts.json !== true && opts.quiet !== true) {
+                  // eslint-disable-next-line no-console
+                  console.error(
+                    `lyt sync (connect): reconstruction INCOMPLETE — dropped ` +
+                      `${dance.manifestDrops.length} vault(s): ` +
+                      `${dance.manifestDrops.map((d) => d.vaultName).join(", ")}. ` +
+                      `Re-run after resolving the cause.`,
+                  );
+                }
+              }
+            } catch {
+              if (opts.json !== true && opts.quiet !== true) {
+                // eslint-disable-next-line no-console
+                console.error(
+                  `lyt sync (connect): connecting to your existing pod hit an unexpected problem. ` +
+                    `Your notes were NOT deleted — if your Lyt folder looks empty, a backup copy named ` +
+                    `"<your-lyt-folder>-backup-…" sits right next to it. Run \`lyt doctor\` to check and put it back.`,
+                );
+              }
+            }
+            // A successful dance leaves the pod freshly adopted + connected (the
+            // clone is already in sync); a restored/aborted dance left the local
+            // pod as-is. Either way, skip THIS run's outward publish.
+            connectDeferredPublish = true;
+          } else if (choice === "decline") {
+            // Hard fail-closed — do NOT connect; the local pod is untouched.
+            if (opts.json !== true && opts.quiet !== true) {
+              // eslint-disable-next-line no-console
+              console.log(
+                `lyt sync (connect): not connecting. Your local pod is untouched — nothing was uploaded or overwritten.`,
+              );
+            }
+            connectDeferredPublish = true;
+          } else {
+            // defer — keep working locally, decide later (the shipped 3rd option).
+            connectDeferredPublish = true;
+          }
+        } else if (connect.status !== "reconciled") {
+          // reconciled → fall through to publish the now-connected pod. Any other
+          // status (gh-unauthed, no-pod, invalid handle) defers the outward
+          // publish this run — no clobber, clear next step.
+          connectDeferredPublish = true;
+        }
       }
 
       // Fed-v2 Layer-1 (Phase D1d) — the POD-REPO LEDGER sync leg. Pulls/commits/
@@ -182,8 +325,8 @@ export function buildSyncCommand(): Command {
       // remains the SOLE committer of `pod.yon` — disjoint pathspecs, just
       // reordered.
       let podLedger: SyncPodLedgerResult | undefined;
-      if (opts.publish !== false && !connectDeferredPublish) {
-        podLedger = await syncPodLedgerFlow({ push: true });
+      if (federationPassAllowed && !connectDeferredPublish) {
+        podLedger = await syncPodLedgerFlowFn({ push: true });
         if (opts.json !== true && opts.quiet !== true) {
           printPodLedgerHuman(podLedger);
         }
@@ -197,8 +340,8 @@ export function buildSyncCommand(): Command {
       // pod-ledger leg above so its pod.yon regen sees the reconstituted cache
       // (W4 staleness fix — see the ledger-leg comment).
       let publish: ReconcilePublishResult | undefined;
-      if (opts.publish !== false && !connectDeferredPublish) {
-        publish = await reconcilePublishFlow({ push: true });
+      if (federationPassAllowed && !connectDeferredPublish) {
+        publish = await reconcilePublishFlowFn({ push: true });
         if (opts.json !== true && opts.quiet !== true) {
           printPublishHuman(publish);
         }
@@ -226,6 +369,80 @@ interface SyncCliOpts {
   publish?: boolean;
   // Brief C (F2) — `--message <msg>` per-vault commit-message override.
   message?: string;
+  // R7/S3 — `--vault <name>` scopes the sync to one registered vault.
+  vault?: string;
+}
+
+// === Forge scope guard (R7 / S3 · SC6) ================================
+// The DISTINCT, legible scope-guard predicate. Returns true only when the
+// pod-wide federation/publish passes (connect-pod, pod-ledger push,
+// reconcile-publish = regen pod.yon + create-missing vault repos + push pod)
+// may run. It returns false whenever a single `--vault` scope is active — those
+// passes enumerate the WHOLE pod and would forge repos for vaults OTHER than
+// the named one — and also honours `--no-publish`. Kept as its own exported
+// pure function (co-shipped with, NOT folded into, the reconcile seam) so the
+// scope guard is independently testable and reviewer-visible (SC6).
+export function isFederationPassAllowed(scope: {
+  publishRequested: boolean;
+  vaultScoped: boolean;
+}): boolean {
+  return scope.publishRequested && !scope.vaultScoped;
+}
+
+// R7/S3 — resolve a `--vault` argument to its canonical registered vault name
+// through the shared addressing chokepoint (resolveVault: exact name →
+// mesh-qualified display name → origin coordinate → unique bare leaf). An alias
+// resolves ONLY via its `@`-sigil form (`@ro`); a BARE name is NOT looked up in
+// the alias table (the alias namespace is disjoint from the name/leaf
+// namespace). Throws AmbiguousVaultLeafError on a colliding bare leaf (never
+// tiebreaks) and a plain Error when nothing matches — both surface to the CLI
+// as a clear message + exit 1. Reuses the same resolver the rest of the verb
+// fleet uses; no scoped-sync-specific name matching.
+export async function resolveScopedVaultName(vault: string): Promise<string> {
+  const db = await openRegistry();
+  try {
+    const resolved = await resolveVault(db, vault);
+    if (resolved === null) {
+      throw new Error(
+        `lyt sync: no registered vault matches '${vault}'. Run \`lyt vault list\` to see your vaults.`,
+      );
+    }
+    return resolved.name;
+  } finally {
+    await closeRegistry(db);
+  }
+}
+
+// 0.12.0 Phase D · A1 — build the concurrent-write conflict resolver the sync
+// flow calls when a rebase conflict occurs. Interactive (a real TTY, human
+// output) → prompt the plain keep-mine / keep-online / keep-both choice.
+// Non-interactive (no TTY, or --json/--quiet where a prompt would corrupt the
+// stream / hang a script) → the SAFE never-lose default `both` (nothing is
+// overwritten; the user resolves later). Never surfaces a raw git marker.
+export function makeConflictResolver(opts: SyncCliOpts): ConflictResolver {
+  return async ({ vaultName, conflictPaths }) => {
+    if (process.stdin.isTTY !== true || opts.json === true || opts.quiet === true) {
+      return "both";
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const where = conflictPaths.length > 0 ? conflictPaths.join(", ") : "a note";
+      const ans = (
+        await rl.question(
+          `\nYou and your online copy both changed ${where} in "${vaultName}" at the same time.\n` +
+            `  [1] keep your version   [2] keep the online version   [3] keep both (default)\n` +
+            `Which would you like to keep? [1/2/3]: `,
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (ans === "1" || ans === "mine") return "mine";
+      if (ans === "2" || ans === "theirs" || ans === "online") return "theirs";
+      return "both";
+    } finally {
+      rl.close();
+    }
+  };
 }
 
 function numericOpt(s: string | undefined): number | undefined {
@@ -257,6 +474,9 @@ const SYNC_STATUS_LABEL: Record<string, string> = {
   "skipped-missing": "missing",
   "no-upstream": "local only",
   "not-git-repo": "not set up",
+  // 0.12.0 Phase D · A6 — the online copy is no longer reachable because access
+  // was revoked (or the repo was deleted). Mirrors the `--check` label.
+  "access-lost": "no access",
   error: "problem",
 };
 
@@ -284,11 +504,75 @@ export function printSyncHuman(reports: readonly VaultSyncReport[]): void {
 // Exported (with printPublishHuman / printPodLedgerHuman below) for the
 // firewall-C1 render-boundary test — these three sub-renderers fire on the same
 // `lyt sync` and must also carry zero git plumbing noun / raw stderr.
-export function printConnectHuman(c: ConnectPodResult): void {
+export function printConnectHuman(
+  c: ConnectPodResult,
+  opts: { suppressMessageForMenu?: boolean } = {},
+): void {
   if (c.status === "not-needed" || c.status === "no-pod") return;
-  // eslint-disable-next-line no-console
-  console.log(`lyt sync (connect): ${c.message}`);
+  // C-4(b) — on the interactive guard path the 3-option menu (chooseConnectActionTty)
+  // is about to print its own full explanation, so the connect detector's PASSIVE
+  // "combining isn't automated yet / keep working locally" message would read as a
+  // self-contradiction right before the menu. Suppress ONLY that passive message,
+  // ONLY for the guard status, ONLY when a menu will show (caller passes the TTY
+  // signal). Every other status/path still prints; warnings always print.
+  const suppress = opts.suppressMessageForMenu === true && c.status === "guard-existing-remote";
+  if (!suppress) {
+    // eslint-disable-next-line no-console
+    console.log(`lyt sync (connect): ${c.message}`);
+  }
   for (const w of c.warnings) {
+    // eslint-disable-next-line no-console
+    console.error(`  > ${w}`);
+  }
+}
+
+// Phase C — the DEFAULT 3-option HIL chooser for the two-pods-with-
+// content guard. Non-TTY → "defer" (the safe default; never a silent
+// destructive rename-aside). On a TTY it presents the handler-confirmed menu:
+// [1] back up & adopt / [2] don't connect / [3] keep working locally.
+export async function chooseConnectActionTty(existingRemote: string): Promise<ConnectChoice> {
+  if (process.stdin.isTTY !== true) return "defer";
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    // eslint-disable-next-line no-console
+    console.log(
+      `\nYou already have a pod on GitHub (${existingRemote}) with notes in it, and this computer also has a ` +
+        `separate local pod. Lyt can back up this computer's Lyt folder, switch to your online pod, then help ` +
+        `you import your backed-up notes.\n` +
+        `  1) Back up my Lyt & adopt the online pod (recommended)\n` +
+        `  2) Don't connect\n` +
+        `  3) Keep working locally, decide later`,
+    );
+    const ans = (await rl.question("Choose [1/2/3] (default 3): ")).trim();
+    if (ans === "1") return "adopt";
+    if (ans === "2") return "decline";
+    return "defer";
+  } finally {
+    rl.close();
+  }
+}
+
+// Phase C — human summary after the rename-aside dance. Leads with the
+// outcome + the handoff (import funnel), then surfaces any warnings.
+export function printRenameAsideHuman(r: AdoptRemoteRenameAsideResult): void {
+  if (r.handoffMessage.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`lyt sync (connect): ${r.handoffMessage}`);
+  }
+  if (r.status === "adopted" && r.backupPath !== null) {
+    // eslint-disable-next-line no-console
+    console.log(`  > Your previous notes are backed up at ${r.backupPath}`);
+  }
+  // C-4(a) — an `aborted` result carries NO handoffMessage (the block above is
+  // skipped), so without this the abort was DEAD-SILENT after the user chose
+  // "adopt". Surface `r.error` (backup-collision / validateLytHome-fail /
+  // rename-EPERM) so the failure is never invisible. `aborted` = nothing was
+  // moved (notes untouched); `restored` carries its own handoffMessage above.
+  if (r.status === "aborted" && r.error !== undefined && r.error.length > 0) {
+    // eslint-disable-next-line no-console
+    console.error(`  > ${r.error}`);
+  }
+  for (const w of r.warnings) {
     // eslint-disable-next-line no-console
     console.error(`  > ${w}`);
   }
@@ -376,6 +660,11 @@ export function printPodLedgerHuman(p: SyncPodLedgerResult): void {
 const CHECK_STATUS_LABEL: Record<string, string> = {
   clean: "up to date",
   dirty: "unsaved",
+  // A2a fix — a subscriber that is BOTH dirty AND behind. Primary label is
+  // "unsaved" (the actionable local state); the pending receive count is
+  // surfaced in the per-vault extras (see printCheckHuman) so the "to receive"
+  // signal survives instead of being erased by the bare "dirty" classification.
+  "dirty-behind": "unsaved",
   frozen: "paused",
   diverged: "to send & receive",
   // "local only" mirrors the write-path SYNC_STATUS_LABEL exactly, so `lyt sync`
@@ -394,6 +683,19 @@ const CHECK_STATUS_LABEL: Record<string, string> = {
   tombstoned: "removed",
   access_lost: "no access",
 };
+
+// A status that represents pending sync work (unsaved / to send / to receive).
+// Used to count DISTINCT needs-sync vaults for the summary headline (a vault
+// may span two summary categories, so summing counters would double-count).
+function isNeedsSyncStatus(status: string): boolean {
+  return (
+    status === "dirty" ||
+    status === "dirty-behind" ||
+    status === "diverged" ||
+    /^ahead-\d+$/.test(status) ||
+    /^behind-\d+$/.test(status)
+  );
+}
 
 function checkStatusLabel(status: string): string {
   // ahead-N / behind-N embed a count in the enum — map to plain "N to send" /
@@ -429,7 +731,13 @@ export function printCheckHuman(
     console.log("lyt sync --check: no vaults found in registry.");
     return;
   }
-  const needsSync = summary.dirty + summary.ahead + summary.behind + summary.diverged;
+  // Count DISTINCT vaults that need sync from the reports themselves — a single
+  // vault can now span two summary categories (A2a's `dirty-behind` is counted
+  // under both `dirty` and `behind`), so summing the category counters would
+  // double-count it. For every pre-A2a status this distinct count equals the
+  // former category sum (each vault landed in exactly one category), so the
+  // headline number is unchanged for all existing states.
+  const needsSync = reports.filter((r) => isNeedsSyncStatus(r.status)).length;
   // firewall-C1 completion — plain wording ("unsaved / to send / to receive")
   // instead of the git jargon "dirty / ahead / behind / diverged".
   const summaryLine =
@@ -454,13 +762,17 @@ export function printCheckHuman(
     // no counts, so surface the split here. ahead-/behind- labels already embed
     // their own count (checkStatusLabel), so they need no extra. Reworded from the
     // raw `ahead=/behind=` git-plumbing form.
-    if (r.status === "diverged") {
+    // A2a fix — `dirty-behind` (dirty AND updates to receive) surfaces BOTH the
+    // pending receive/send split AND the unsaved change count, so the "to
+    // receive" signal is no longer erased by the bare "dirty" label.
+    if (r.status === "diverged" || r.status === "dirty-behind") {
       const io: string[] = [];
       if (r.ahead > 0) io.push(`${r.ahead} to send`);
       if (r.behind > 0) io.push(`${r.behind} to receive`);
       if (io.length > 0) extras.push(io.join(" · "));
     }
-    if (r.status === "dirty") extras.push(`${r.dirtyCount} change(s)`);
+    if (r.status === "dirty" || r.status === "dirty-behind")
+      extras.push(`${r.dirtyCount} change(s)`);
     // eslint-disable-next-line no-console
     console.log(
       // padEnd(17) fits the longest label ("to send & receive") so the vault-name

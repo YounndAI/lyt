@@ -24,7 +24,7 @@
 // surfaced warning beats hard-failing a sync.
 
 import type { LaneMemberRecord, LaneRecord, LanesDoc } from "./lanes-write.js";
-import { unescapeQuoted } from "./_helpers.js";
+import { isSafeVaultRelativeFigmentPath, unescapeQuoted } from "./_helpers.js";
 
 export function parseLanesFile(content: string): LanesDoc {
   const vaultName = parseVaultNameFromDoc(content) ?? "";
@@ -81,17 +81,23 @@ function parseLaneBlock(block: string): LaneRecord | null {
   const name = readQuotedField(block, "name");
   const sourceKeywords = readQuotedList(block, "source_keywords");
   const memCount = readIntField(block, "mem_count");
+  // last_built is machine-local derived state and is NOT serialized into
+  // committed lanes.yon (Option A). Tolerate its absence: a freshly
+  // received file (before this machine's first local rebuild) has no
+  // last_built. A legacy file that still carries it is honoured. Only the
+  // content fields are mandatory.
   const lastBuilt = readTimestampField(block, "last_built");
-  if (name === null || sourceKeywords === null || memCount === null || lastBuilt === null) {
+  if (name === null || sourceKeywords === null || memCount === null) {
     return null;
   }
-  return {
+  const record: LaneRecord = {
     ridSlug,
     name,
     sourceKeywords,
     memCount,
-    lastBuilt,
   };
+  if (lastBuilt !== null) record.lastBuilt = lastBuilt;
+  return record;
 }
 
 function parseLaneMemberBlock(block: string): LaneMemberRecord | null {
@@ -99,6 +105,9 @@ function parseLaneMemberBlock(block: string): LaneMemberRecord | null {
   if (!laneRidMatch) return null;
   const figmentPath = readQuotedField(block, "figment_rid");
   if (figmentPath === null) return null;
+  // CRIT-B parse guard: drop a member whose figment_rid escapes the vault
+  // (absolute or `..`-bearing) before it can enter the cache / reach the FS sink.
+  if (!isSafeVaultRelativeFigmentPath(figmentPath)) return null;
   return {
     laneRidSlug: laneRidMatch[1]!,
     figmentPath,

@@ -21,6 +21,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { getKnownPathsFile } from "../registry/known-paths.js";
 import { getDefaultVaultsRoot, getLytHome, validateLytHome } from "../util/paths.js";
 import { getRegistryPath } from "../registry/client.js";
+import { stripNestedReparsePoints } from "../util/reparse-safe.js";
 
 export interface RegistryResetArgs {
   confirmed: boolean;
@@ -84,6 +85,13 @@ export async function registryResetFlow(args: RegistryResetArgs): Promise<Regist
       }
       if (!ls.isDirectory()) continue;
       if (!isUnder(abs, lytHome)) continue;
+      // 🔴 L0 DESTRUCTIVE-SAFETY: the top-level lstat above only guards the
+      // vault-dir root; a reparse point NESTED inside (e.g. a `.lyt/patterns`
+      // junction → the shared pod master, or a `core.symlinks` clone) still
+      // rides the recursive rm. ENUMERATE + detach every nested reparse point
+      // BEFORE rmWithRetry so it never descends an escaper into a SoT outside
+      // this vault dir.
+      stripNestedReparsePoints(abs);
       await rmWithRetry(abs);
       vaultDirsRemoved.push(entry.name);
     }

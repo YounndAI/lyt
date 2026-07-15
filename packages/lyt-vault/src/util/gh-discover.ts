@@ -147,6 +147,56 @@ export async function walkUserRepos(opts: {
   return repos;
 }
 
+// B3c (Inc-2 Phase B slice 2) — walk repos across a SET of owners in a single
+// `/user/repos` fetch. `lyt discover` must surface org-mesh vaults that live
+// under a mesh's `push_target` ORG handle (e.g. `younndai/*`), not only the one
+// federation owner. `/user/repos --paginate` already returns EVERY repo the
+// authenticated user can see (personal + every org they belong to), so one fetch
+// covers all owners — we just widen the owner FILTER from a single login to the
+// set. Repos are de-duped by `owner/name` (lowercased) and returned in a
+// deterministic order (owner ASC, then name ASC) so the caller's clustering
+// stays byte-stable (Lock 0.3). An empty owner set yields no repos.
+export async function walkReposForOwners(opts: {
+  owners: readonly string[];
+  gh?: GhExecutor;
+}): Promise<DiscoveredRepo[]> {
+  const gh = opts.gh ?? defaultGh;
+  const ownerSet = new Set(opts.owners.map((o) => o.toLowerCase()));
+  if (ownerSet.size === 0) return [];
+  const raw = await gh([
+    "api",
+    "/user/repos",
+    "--paginate",
+    "-q",
+    '.[] | {host: "github.com", owner: .owner.login, name: .name, cloneUrl: .clone_url, sshUrl: .ssh_url, isPrivate: .private, topics: (.topics // [])}',
+  ]);
+  const seen = new Set<string>();
+  const repos: DiscoveredRepo[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let parsed: DiscoveredRepo;
+    try {
+      parsed = JSON.parse(trimmed) as DiscoveredRepo;
+    } catch (err) {
+      throw new Error(
+        `Failed to parse gh /user/repos output line as JSON: ${(err as Error).message}\nLine: ${trimmed}`,
+      );
+    }
+    if (!ownerSet.has(parsed.owner.toLowerCase())) continue;
+    const dedupKey = `${parsed.owner.toLowerCase()}/${parsed.name.toLowerCase()}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    repos.push(parsed);
+  }
+  repos.sort((a, b) => {
+    const o = a.owner.toLowerCase().localeCompare(b.owner.toLowerCase());
+    if (o !== 0) return o;
+    return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+  });
+  return repos;
+}
+
 // Fetch `.lyt/vault.yon` content from a GH repo via the Contents API.
 // Returns the raw decoded file content on success; null on 404 (not a
 // Lyt vault). Other errors propagate to the caller.
@@ -232,4 +282,49 @@ export async function checkPushPermission(opts: {
     throw err;
   }
   return PUSH_CAPABLE_PERMISSIONS.has(raw.trim().toUpperCase());
+}
+
+// Inc-2 Phase B / the public-vs-private DISCRIMINATOR probe. Reads a
+// target repo's GitHub visibility via `gh repo view <owner>/<repo> --json
+// visibility --jq .visibility`. Returns `"public"` | `"private"` | `"unknown"`.
+// FAIL-SOFT: any gh failure (repo not found, not authenticated, gh not installed,
+// an unexpected value) resolves to `"unknown"` — it NEVER throws — so the receive
+// path degrades to its fail-closed default (`subscribed`, a self-subscribe)
+// rather than crashing a subscribe. The `gh repo view` visibility field is
+// reported as `public`/`private`/`internal`; `internal` (enterprise) is a
+// non-public grant, so it maps to `"private"` (⇒ shared).
+export async function checkRepoVisibility(opts: {
+  owner: string;
+  repo: string;
+  gh?: GhExecutor;
+}): Promise<"public" | "private" | "unknown"> {
+  const gh = opts.gh ?? defaultGh;
+  let raw: string;
+  try {
+    raw = await gh([
+      "repo",
+      "view",
+      `${opts.owner}/${opts.repo}`,
+      "--json",
+      "visibility",
+      "--jq",
+      ".visibility",
+    ]);
+  } catch (err) {
+    // FAIL-SOFT to "unknown" (never throw) so the receive path degrades to its
+    // fail-closed default rather than crashing a subscribe. But LEAVE A BREADCRUMB:
+    // a blanket-swallowed probe error is the likeliest reason a grant mis-homes
+    // (private→shared silently degrades to subscribed), so surface WHY before
+    // degrading — a bare `catch { return "unknown" }` hides the diagnostic.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `checkRepoVisibility: could not resolve visibility for ${opts.owner}/${opts.repo}; ` +
+        `degrading to "unknown" (⇒ fail-closed subscribed). Cause: ${msg}`,
+    );
+    return "unknown";
+  }
+  const v = raw.trim().toLowerCase();
+  if (v === "public") return "public";
+  if (v === "private" || v === "internal") return "private";
+  return "unknown";
 }

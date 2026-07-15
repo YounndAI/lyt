@@ -51,6 +51,12 @@ export function buildCloneCommand(): Command {
           // F8/a review finding — detach is CLI intent for a standalone --to-mesh clone;
           // library callers (subscribe, adopt) default to keep.
           ...(opts.toMesh !== undefined && opts.keepOrigin !== true ? { detachOrigin: true } : {}),
+          // Inc-2 Phase B / (S4) — a standalone `lyt vault clone <url>` (no
+          // --to-mesh) of a FOREIGN vault auto-routes to the subscribe
+          // (bucket-home) path instead of half-cloning then refusing with
+          // VaultHomeMeshNotRegisteredError + orphaning a dir. A vault whose home
+          // mesh IS one of the user's own meshes keeps the default clone.
+          ...(opts.toMesh === undefined ? { routeForeignToBucket: true } : {}),
         });
 
         if (opts.json === true) {

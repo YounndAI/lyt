@@ -14,18 +14,23 @@
  * limitations under the License.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getMeshByName, getMeshByRid, insertMesh } from "../registry/meshes-repo.js";
 import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getVaultByRid, setVaultHomeMesh } from "../registry/repo.js";
+import { vaultLeaf } from "../registry/vault-addressing.js";
 import { initVaultDbs } from "../registry/vault-db.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
-import { isReservedMeshName } from "../util/identity.js";
-import { ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
+import { assertSafeCloneName, vaultRepoName } from "../util/federation-paths.js";
+import { isReservedMeshName, isValidGhHandle } from "../util/identity.js";
+import { hexToUuid7Bytes, ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
+import { stripNestedReparsePoints } from "../util/reparse-safe.js";
+import { rmWithRetry } from "../scaffold/delete.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
+import { parseVaultYon } from "../yon/parse.js";
 import type { MeshPushKind } from "../yon/mesh-write.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import { realMeshGhClient } from "../util/gh-mesh.js";
@@ -77,10 +82,35 @@ export interface MeshJoinResult {
   };
   homeVaultsRegistered: number;
   homeVaultsDeferred: number;
+  // B2b (Inc-2 Phase B slice 2) — of the members that were NOT already present
+  // locally, how many were freshly cloned + registered under --clone-members.
+  // (homeVaultsRegistered counts these too; this is the cloned-this-run subset.)
+  homeVaultsCloned: number;
 }
 
 export async function meshJoinFlow(opts: MeshJoinOptions): Promise<MeshJoinResult> {
   const ghClient = opts.ghClient ?? realMeshGhClient;
+
+  // C1 (release review, defense-in-depth) — `opts.from` is the CLI-supplied gh
+  // owner/target; it feeds resolveRemoteUrl → a `git clone <url>` spawn (gh-mesh
+  // runs shell:isWindows for .cmd-shim compatibility). Refuse a non-handle
+  // target BEFORE any spawn so a `-`/`/`/metachar value can never reach the
+  // clone URL (parity with vault-publish.ts's isValidGhHandle guard).
+  if (!isValidGhHandle(opts.from)) {
+    throw new Error(
+      `lyt mesh join: --from ${JSON.stringify(opts.from)} is not a valid GitHub owner handle. ` +
+        `Provide a plain owner/org handle (lowercase letters, digits, single interior hyphens).`,
+    );
+  }
+
+  // Defense-in-depth (slice-2 security re-review LOW follow-up, goal:optsname-parity).
+  // `opts.name` is a LOCAL CLI arg (the mesh name the handler chose for this join),
+  // NOT foreign `[lyt.untrusted]` input — so this is containment parity with the
+  // `--clone-members` member path's assertSafeCloneName(relDir), NOT an RCE guard.
+  // It feeds join(getDefaultVaultsRoot(), opts.name, "main") → the clone target dir,
+  // so a `../escape` / absolute / non-slug name must be refused BEFORE it round-trips
+  // into a filesystem path that escapes the vaults root.
+  assertSafeCloneName(opts.name);
 
   // (a) clone the main vault repo. By naming-convention.md, the main vault's
   // repo name is 'main' (lives at github.com/<gh-target>/main). The local
@@ -165,6 +195,11 @@ export async function meshJoinFlow(opts: MeshJoinOptions): Promise<MeshJoinResul
     }
 
     // (e) insert the mesh row (cache; SoT is mesh.yon on disk).
+    // MA — a JOINED mesh is FOREIGN: its push_target comes from an
+    // [lyt.untrusted] foreign mesh.yon, so it is explicitly NOT own-created. This
+    // is what closes the origin-hijack — deriveVaultRepoOwner will refuse to use
+    // this push_target as the owner for the user's own vaults (falls back to the
+    // federation handle).
     await insertMesh(db, {
       rid: parsedMesh.mesh.rid,
       name: parsedMesh.mesh.name,
@@ -172,6 +207,7 @@ export async function meshJoinFlow(opts: MeshJoinOptions): Promise<MeshJoinResul
       pushKind: parsedMesh.mesh.pushKind ?? null,
       mainVaultRid: parsedMesh.mesh.mainVaultRid,
       createdAt: parsedMesh.mesh.createdAt,
+      ownCreated: false,
     });
 
     // (f) home_mesh_rid update + (g) mesh_vaults home row insert.
@@ -180,22 +216,78 @@ export async function meshJoinFlow(opts: MeshJoinOptions): Promise<MeshJoinResul
 
     // (h) for each @MESH_HOME beyond the main vault: insert mesh_vaults
     // role='home' if the vault already exists locally with matching rid;
-    // otherwise count as deferred-clone.
+    // otherwise DEFER — or, under --clone-members (B2b), clone + register it now.
     let homeVaultsRegistered = 1; // the main vault, counted above
     let homeVaultsDeferred = 0;
+    let homeVaultsCloned = 0;
     for (const home of parsedMesh.homeVaults) {
       // Skip the main vault entry (already handled).
       if (ridsEqual(home.vaultRid, registered.rid)) continue;
       const existingVault = await getVaultByRid(db, home.vaultRid);
-      if (existingVault === null) {
-        // Vault not present locally → deferred clone. v1.B.3 wires the
-        // cascading clone path when --clone-members is wired in.
+      if (existingVault !== null) {
+        await setVaultHomeMesh(db, home.vaultRid, parsedMesh.mesh.rid);
+        await addVaultToMesh(db, parsedMesh.mesh.rid, home.vaultRid, "home");
+        homeVaultsRegistered++;
+        continue;
+      }
+      // Vault not present locally.
+      if (opts.cloneMembers !== true) {
+        // Default: DEFER (out of scope unless --clone-members).
         homeVaultsDeferred++;
         continue;
       }
-      await setVaultHomeMesh(db, home.vaultRid, parsedMesh.mesh.rid);
-      await addVaultToMesh(db, parsedMesh.mesh.rid, home.vaultRid, "home");
-      homeVaultsRegistered++;
+      // B2b — cascading member clone. The member repo lives under the SAME gh
+      // owner the main was cloned from (`opts.from`); its repo name follows the
+      // `lyt-vault-<mesh>--<leaf>` convention (only the mesh MAIN vault uses the
+      // bare `main` repo name). UNION-SAFE: any failure (validation/clone/register/
+      // rid-mismatch) DEFERS just this member and the join continues — one bad
+      // member never aborts the whole mesh join.
+      let memberLocal: string | null = null;
+      try {
+        // C1 (SECURITY, mandatory) — `home.vaultName` is [lyt.untrusted] published
+        // mesh.yon input and flows (via vaultRepoName) into the clone URL, then a
+        // `git clone <url>` spawn that runs shell:isWindows. Validate the FULL name
+        // — assertSafeCloneName splits on `/` and slug-checks EVERY segment (mesh
+        // AND leaf) — BEFORE deriving the repo name / touching the filesystem, so a
+        // metachar in EITHER segment is refused here (a leaf-only guard let the
+        // mesh segment through into the spawn = command injection). On refusal the
+        // throw lands in the catch → union-safe defer; cloneRepo is never reached.
+        assertSafeCloneName(home.vaultName);
+        const leaf = vaultLeaf(home.vaultName);
+        const relDir = join(opts.name, leaf);
+        assertSafeCloneName(relDir);
+        memberLocal = resolve(join(getDefaultVaultsRoot(), relDir));
+        const memberRepo = vaultRepoName(home.vaultName);
+        await ghClient.cloneRepo(opts.from, memberRepo, memberLocal);
+        // M2 (release review) — VERIFY-BEFORE-REGISTER. registerVaultFromYon upserts
+        // the row AND homes it from the cloned vault.yon, so it must NOT run for a
+        // repo whose declared rid does not match the mesh.yon @MESH_HOME rid —
+        // otherwise a wrong/impersonating vault is persisted + mis-homed into this
+        // mesh, then `continue`d with no rollback. Read the cloned vault.yon's rid
+        // and compare BEFORE any registry write; on mismatch, defer (+ sweep the
+        // orphan clone dir) without touching the registry.
+        const memberYonPath = join(memberLocal, ".lyt", "vault.yon");
+        const declaredRid = hexToUuid7Bytes(parseVaultYon(readFileSync(memberYonPath, "utf8")).rid);
+        if (!ridsEqual(declaredRid, home.vaultRid)) {
+          homeVaultsDeferred++;
+          await removeMemberCloneDir(memberLocal);
+          continue;
+        }
+        await initVaultDbs(memberLocal);
+        const reg = await registerVaultFromYon(db, { vaultPath: memberLocal });
+        await setVaultHomeMesh(db, reg.rid, parsedMesh.mesh.rid);
+        await addVaultToMesh(db, parsedMesh.mesh.rid, reg.rid, "home");
+        homeVaultsRegistered++;
+        homeVaultsCloned++;
+      } catch {
+        // best-effort per-member — validation/clone/register hiccup DEFERS this
+        // member only. m1 (release review) — sweep the freshly-created clone dir so
+        // it neither orphans nor blocks a later retry (`git clone` fails on a
+        // non-empty dir). memberLocal is null when validation failed before any
+        // mkdir/clone, so there is nothing to remove in that case.
+        homeVaultsDeferred++;
+        if (memberLocal !== null) await removeMemberCloneDir(memberLocal);
+      }
     }
 
     return {
@@ -212,8 +304,31 @@ export async function meshJoinFlow(opts: MeshJoinOptions): Promise<MeshJoinResul
       },
       homeVaultsRegistered,
       homeVaultsDeferred,
+      homeVaultsCloned,
     };
   } finally {
     await closeRegistry(db);
+  }
+}
+
+// m1 (release review) — best-effort junction-safe removal of a member clone dir
+// THIS flow created (via ghClient.cloneRepo → mkdir + git clone) when the member
+// is deferred (rid mismatch / clone-or-register error). Leaving it would orphan
+// the dir AND block a later retry (`git clone` refuses a non-empty target).
+// Mirrors clone.ts removeFailedCloneDir: the 🔴 L0 destructive-delete guarantee
+// is rm-SEMANTICS-based — a cloned tree CAN contain nested junctions/symlinks
+// (user globally enabled core.symlinks), so (1) a top-level lstat bail refuses a
+// symlinked root and (2) stripNestedReparsePoints detaches every nested reparse
+// point BEFORE the recursive rmWithRetry, so teardown never descends a junction
+// into a source-of-truth outside the clone root. Never a shell `rm -rf`.
+async function removeMemberCloneDir(target: string): Promise<void> {
+  try {
+    if (!existsSync(target)) return;
+    if (lstatSync(target).isSymbolicLink()) return;
+    stripNestedReparsePoints(target);
+    await rmWithRetry(target);
+  } catch {
+    // best-effort — a surviving dir degrades to the actionable already-exists
+    // refusal on the next retry; it must never mask the deferral.
   }
 }

@@ -27,10 +27,13 @@ import { GhAccessProvider } from "../../access/gh-access-provider.js";
 import type { GhExecutor } from "../../util/gh-discover.js";
 import { resolveConfig } from "../../util/config.js";
 import {
+  deriveVaultRepoOwner,
   getFederationRepoDir,
   getFederationYonPath,
   vaultRepoName,
 } from "../../util/federation-paths.js";
+import { listMeshes } from "../../registry/meshes-repo.js";
+import { ridsEqual } from "../../util/uuid7.js";
 import {
   realFederationGhClient,
   type FederationGhClient,
@@ -250,6 +253,9 @@ export async function reconcilePublishFlow(
       vaults.push(v);
     }
     const vaultByName = new Map<string, VaultRow>(vaults.map((v) => [v.name, v]));
+    // B2a — mesh snapshot for per-vault repo-owner derivation (org-mesh vaults
+    // publish under the mesh's org push_target, not the personal handle).
+    const meshes = await listMeshes(db);
     const podDir = getFederationRepoDir(handle);
 
     // release review — the per-vault visibility lives in pod.yon (the
@@ -309,8 +315,14 @@ export async function reconcilePublishFlow(
           await markOutboxDone(outbox, "publish-vault", item.target);
           continue;
         }
+        const vaultHomeMesh =
+          vault.homeMeshRid === null
+            ? null
+            : (meshes.find((m) => ridsEqual(m.rid, vault.homeMeshRid)) ?? null);
         const outcome = await publishOneVault(vault, {
           handle,
+          // B2a — org-mesh vaults get the org push_target as their repo owner.
+          repoOwner: deriveVaultRepoOwner(vaultHomeMesh, handle),
           // dup-repo guard — never create a repo under the subscriber's handle
           // for a FOREIGN (subscribed) vault; its repo already lives under the
           // upstream owner (its `origin`). repo-create set = HOME vaults only.
@@ -438,6 +450,8 @@ export async function reconcilePublishFlow(
 
 interface PublishOneVaultOpts {
   handle: string;
+  // B2a — the repo owner (org push_target for an org-mesh vault; else handle).
+  repoOwner: string;
   createRemote: boolean;
   push: boolean;
   pull: boolean;
@@ -467,6 +481,7 @@ async function publishOneVault(
   // pull-rebase.
   const mat = await materializeVaultPublishable(vault, {
     handle: opts.handle,
+    repoOwner: opts.repoOwner,
     createRemoteIfMissing: opts.createRemote,
     push: false,
     visibility: opts.visibility,

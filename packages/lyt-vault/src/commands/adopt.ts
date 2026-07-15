@@ -21,7 +21,9 @@ import { adoptVaultFlow } from "../flows/adopt.js";
 export function buildAdoptCommand(): Command {
   const cmd = new Command("adopt");
   cmd
-    .description("Upgrade an existing Obsidian vault into a Lyt vault (additive; .md untouched)")
+    .description(
+      "Upgrade an existing Obsidian vault into a Lyt vault (additive — adds a .lyt/ folder + a README if you have none; your existing notes are never modified)",
+    )
     .argument("<path>", "Path to the existing vault directory")
     .option(
       "--name <name>",

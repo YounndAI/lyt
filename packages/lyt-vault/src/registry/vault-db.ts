@@ -318,7 +318,14 @@ export async function isLytDbCorrupt(vaultPath: string): Promise<boolean> {
 // ~8.1s observed post-close handle hold for the NOTADB shape (release review
 // a review finding); the copy+truncate fallback covers everything beyond it, so the
 // budget is a preference (rename keeps forensics), not a cliff.
-async function renameWithRetry(from: string, to: string): Promise<boolean> {
+//
+// Phase C (C-2) — EXPORTED for reuse by the rename-aside connect flow
+// (adopt-remote-rename-aside.ts). That flow renames the WHOLE LYT_HOME aside
+// right after connectPodFlow closed the registry; on Windows libSQL holds the
+// registry.db / lyt.db handle briefly post-close, so a bare renameSync can
+// EBUSY. This same 40×250ms=10s win32 budget covers that handle-release window
+// for the load-bearing home-backup + restore renames.
+export async function renameWithRetry(from: string, to: string): Promise<boolean> {
   const attempts = process.platform === "win32" ? 40 : 5;
   for (let i = 0; i < attempts; i++) {
     try {

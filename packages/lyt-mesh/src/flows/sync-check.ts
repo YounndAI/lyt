@@ -18,10 +18,13 @@ import { existsSync } from "node:fs";
 
 import {
   closeRegistry,
+  isAccessRemoved,
   listVaults,
   openRegistry,
   readFrozenLock,
+  realIdentityRunner,
   runGit as defaultRunGit,
+  updateVaultStatus,
   type GitRunOptions,
   type GitRunResult,
   type VaultRow,
@@ -37,6 +40,10 @@ export interface SyncCheckArgs {
   now?: Date;
   // Skip `git fetch` (faster but ahead/behind may be stale).
   noFetch?: boolean;
+  // A6-1 (0.12.0 Phase D fix-pass) — the current gh-auth verdict, consulted ONLY
+  // on a fetch-404, so an unauthed/expired 404 is not mistaken for a revoke.
+  // Defaults to the real `gh auth status`; injectable for deterministic tests.
+  ghAuthOk?: () => boolean | null;
 }
 
 export interface VaultCheckReport {
@@ -72,6 +79,8 @@ export interface SyncCheckResult {
 export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheckResult> {
   const runGit = args.runGit ?? defaultRunGit;
   const now = args.now ?? new Date();
+  // A6-1 (0.12.0 Phase D fix-pass) — gh-auth verdict, consulted only on a fetch-404.
+  const ghAuthOk = args.ghAuthOk ?? (() => realIdentityRunner.ghAuthStatus());
   const db = await openRegistry();
   let candidates: VaultRow[];
   try {
@@ -85,8 +94,35 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
   }
 
   const reports: VaultCheckReport[] = [];
+  // 0.12.0 Phase D · A6 — vaults whose fetch proved access-loss; persisted to the
+  // registry after the loop so `vault info` reflects `access_lost`.
+  const accessLostRids: Uint8Array[] = [];
+  // A6-2 (0.12.0 Phase D fix-pass) — previously-`access_lost` vaults whose fetch
+  // now SUCCEEDS (a re-granted share); recovered to `active` after the loop.
+  const recoveredRids: Uint8Array[] = [];
+  // A6-2 — a `still access_lost` report shape (the vault couldn't be reached to
+  // confirm recovery); mirrors the pre-fix skip report for a non-active vault.
+  const pushStillAccessLost = (v: VaultRow): void => {
+    reports.push({
+      rid: v.ridHex,
+      name: v.name,
+      path: v.path,
+      status: "access_lost",
+      ahead: 0,
+      behind: 0,
+      dirtyCount: 0,
+      hasUpstream: false,
+      frozen: false,
+      frozenUntil: null,
+      remaining: null,
+      vaultStatus: "access_lost",
+    });
+  };
   for (const v of candidates) {
-    if (v.status !== "active") {
+    // A6-2 — an `access_lost` vault is NO LONGER skipped outright: it is re-checked
+    // so a re-granted share can recover to `active`. Other non-active statuses
+    // (disconnected / tombstoned / missing) still skip — nothing to re-check.
+    if (v.status !== "active" && v.status !== "access_lost") {
       reports.push({
         rid: v.ridHex,
         name: v.name,
@@ -146,9 +182,63 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
       allowFailure: true,
     });
     const hasUpstream = upstream.code === 0;
+    // A6-2 — recovery signal: a previously-`access_lost` vault whose fetch now
+    // succeeds. Drives the effective vault status for this report + the post-loop
+    // registry recovery persist.
+    let recovered = false;
     if (hasUpstream && args.noFetch !== true) {
-      await runGit(["fetch", "--quiet"], { cwd: v.path, allowFailure: true });
+      const fetched = await runGit(["fetch", "--quiet"], { cwd: v.path, allowFailure: true });
+      // 0.12.0 Phase D · A6 — a `Repository not found` / 404 on fetch means our
+      // access was revoked (or the repo deleted). `sync --check` is the surface
+      // that previously reported a stale `active`; surface (and persist) the
+      // definite `access_lost` instead. `isAccessRemoved` excludes offline
+      // signals so a disconnected machine is never mis-flagged.
+      //
+      // A6-1 fix-pass — auth-gate the 404: the same not-found under logged-out /
+      // expired / SSO-unauthorized creds is a FIXABLE auth state, not a revoke, so
+      // it must NOT flip a vault to `access_lost`.
+      if (fetched.code !== 0) {
+        if (isAccessRemoved(fetched.stderr, { ghAuthOk: ghAuthOk() })) {
+          if (v.status !== "access_lost") accessLostRids.push(v.rid);
+          reports.push({
+            rid: v.ridHex,
+            name: v.name,
+            path: v.path,
+            status: "access_lost",
+            ahead: 0,
+            behind: 0,
+            dirtyCount: 0,
+            hasUpstream,
+            frozen: isFrozen,
+            frozenUntil: frozen.frozenUntil,
+            remaining: frozen.remaining,
+            vaultStatus: "access_lost",
+          });
+          continue;
+        }
+        // Fetch failed for a non-revoke reason (offline / transient / unauthed
+        // 404). A vault that was already `access_lost` can't be confirmed
+        // recovered here — keep reporting `access_lost` (unchanged). An `active`
+        // vault falls through to the ahead/behind read from cached refs (pre-fix
+        // behaviour).
+        if (v.status === "access_lost") {
+          pushStillAccessLost(v);
+          continue;
+        }
+      } else if (v.status === "access_lost") {
+        // A6-2 — the fetch SUCCEEDED for a previously-lost vault: access recovered.
+        recovered = true;
+        recoveredRids.push(v.rid);
+      }
+    } else if (v.status === "access_lost") {
+      // No fetch was performed (no upstream, or --no-fetch) — recovery can't be
+      // confirmed, so keep reporting the last-known `access_lost`.
+      pushStillAccessLost(v);
+      continue;
     }
+    // A6-2 — a recovered vault reports as `active` from here on; an already-active
+    // vault is unchanged. (A non-recovered `access_lost` vault has `continue`d.)
+    const effectiveVaultStatus: string = recovered ? "active" : v.status;
     let ahead = 0;
     let behind = 0;
     if (hasUpstream) {
@@ -192,8 +282,43 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
       frozen: isFrozen,
       frozenUntil: frozen.frozenUntil,
       remaining: frozen.remaining,
-      vaultStatus: v.status,
+      vaultStatus: effectiveVaultStatus,
     });
+  }
+
+  // 0.12.0 Phase D · A6 — persist detected access-loss (best-effort; a persist
+  // hiccup never fails a read-only check — the report already carries the state).
+  if (accessLostRids.length > 0) {
+    const persistDb = await openRegistry();
+    try {
+      for (const rid of accessLostRids) {
+        try {
+          await updateVaultStatus(persistDb, rid, "access_lost");
+        } catch {
+          // non-fatal
+        }
+      }
+    } finally {
+      await closeRegistry(persistDb);
+    }
+  }
+
+  // A6-2 (0.12.0 Phase D fix-pass) — persist recovery for previously-lost vaults
+  // whose fetch now succeeds, so `vault info` / a follow-up check stop reporting a
+  // stale "no access". Best-effort; a persist hiccup never fails the check.
+  if (recoveredRids.length > 0) {
+    const persistDb = await openRegistry();
+    try {
+      for (const rid of recoveredRids) {
+        try {
+          await updateVaultStatus(persistDb, rid, "active");
+        } catch {
+          // non-fatal
+        }
+      }
+    } finally {
+      await closeRegistry(persistDb);
+    }
   }
 
   const summary = {
@@ -213,7 +338,15 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
     }
     if (r.status === "clean") summary.clean += 1;
     else if (r.status === "dirty") summary.dirty += 1;
-    else if (r.status.startsWith("ahead-")) summary.ahead += 1;
+    else if (r.status === "dirty-behind") {
+      // A2a fix — a dirty+behind subscriber is BOTH unsaved and has updates to
+      // receive, so it counts under both breakdown categories. The `dirty-behind`
+      // status is why `needsSync` (printCheckHuman) counts DISTINCT reports rather
+      // than summing these counters — otherwise this vault would be double-counted
+      // in the headline "N vault(s) need sync".
+      summary.dirty += 1;
+      summary.behind += 1;
+    } else if (r.status.startsWith("ahead-")) summary.ahead += 1;
     else if (r.status.startsWith("behind-")) summary.behind += 1;
     else if (r.status === "diverged") summary.diverged += 1;
     else if (r.status === "frozen") summary.frozen += 1;

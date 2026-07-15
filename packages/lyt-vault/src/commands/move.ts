@@ -27,6 +27,7 @@ import {
   type MoveVaultMode,
 } from "../flows/move.js";
 import { vaultLeaf } from "../registry/vault-addressing.js";
+import { sanitizeForTerminal } from "./mesh-adopt.js";
 
 // v1.B.3 Commit 2 — `lyt vault move <name> --to-mesh <mesh> [--solo|--branch] [--json]`.
 //
@@ -120,6 +121,15 @@ export function buildMoveCommand(): Command {
           // eslint-disable-next-line no-console
           console.warn(
             `  warn:    dropped ${result.childEdgesDropped.length} child edge${result.childEdgesDropped.length === 1 ? "" : "s"} (--solo)`,
+          );
+        }
+        // Inc-2 R1 (release review) — a non-fatal @FED_VAULT authoring failure is NOT
+        // self-healing: on another machine the next sync's write-back can REVERT
+        // this move to the foreign ledger winner. Warn the user to retry sync.
+        if (result.fedVaultAuthored === false) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `  warn:    move recorded LOCALLY but NOT propagated to the pod ledger (vault '${sanitizeForTerminal(displayName)}'); on another machine the next sync could revert it — retry 'lyt sync' to propagate.`,
           );
         }
       } catch (err) {

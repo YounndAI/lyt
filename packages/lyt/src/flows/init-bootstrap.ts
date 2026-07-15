@@ -144,6 +144,14 @@ export interface InitBootstrapAdopt {
   vaultsRecoveredFromManifest: number;
   vaultsAcquired: number;
   manifestSkipped: { vaultName: string; reason: string }[];
+  // FIX G2 (A2-R3 MAJOR-1 caller completeness) — the recover-pod SEMANTIC-REFUSAL
+  // signal, threaded up from adoptAndPrimeFlow (mirrors the wizard/adopt-and-prime
+  // shape). True ⇒ the cloned pod.yon was parseable-but-incoherent, so adopt FAILED
+  // CLOSED EARLY (no gh-walk, no scaffold). The command layer surfaces this as a
+  // NON-ZERO / refused outcome (distinct exit 13), never a completed adopt. A
+  // legitimately-empty COHERENT pod never sets this (it completes normally).
+  manifestRefused?: boolean;
+  manifestRefusedReason?: string;
   firstVaultCreated: boolean;
   primaryVaultPath: string | null;
   primaryMeshName: string | null;
@@ -507,6 +515,12 @@ async function doAdoptBranch(
       vaultsRecoveredFromManifest: adopt.vaultsRecoveredFromManifest,
       vaultsAcquired: adopt.vaultsAcquired,
       manifestSkipped: adopt.manifestSkipped,
+      // FIX G2 — thread the semantic-refusal signal up so the command layer can
+      // report a non-zero / refused outcome instead of a completed adopt.
+      ...(adopt.manifestRefused === true ? { manifestRefused: true } : {}),
+      ...(adopt.manifestRefusedReason !== undefined
+        ? { manifestRefusedReason: adopt.manifestRefusedReason }
+        : {}),
       firstVaultCreated: adopt.firstVaultCreated,
       primaryVaultPath: adopt.primaryVaultPath,
       primaryMeshName: adopt.primaryMeshName,

@@ -132,6 +132,31 @@ export function parseHlc(raw: string): Hlc | null {
   return { wallMs, counter };
 }
 
+// G4 (0.12.1 identity-safety, design §6.1 G4) — forged-future-HLC DETECTION.
+//
+// The HLC-LWW registers (fed-mesh / fed-vault / alias) resolve same-rid divergent
+// content by the MAX (hlc, writerId, seq) total order. That is safe against
+// honest skew (nextHlc's counter branch), but a MALICIOUS or badly-broken writer
+// could stamp a wall-clock component FAR in the future and thereby win LWW
+// INDEFINITELY (its record dominates every honest later write) — the M-cell
+// sibling of M1 (RW-peer poisoning). 0.12.1 does NOT reject such a record
+// (rejection / clamping is the 0.12.x hardening lane); it DETECTS + FLAGS it so
+// the divergence is surfaced rather than silent.
+//
+// A default skew tolerance of 24h keeps normal cross-machine clock drift (seconds
+// to minutes) well clear of the flag; only an implausibly-ahead wall clock trips.
+export const DEFAULT_FORGED_FUTURE_HLC_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+
+// True when `hlc`'s wall-clock component is implausibly ahead of `nowMs` (beyond
+// `toleranceMs`). Pure — `nowMs` is injected so callers/tests are deterministic.
+export function isForgedFutureHlc(
+  hlc: Hlc,
+  nowMs: number,
+  toleranceMs: number = DEFAULT_FORGED_FUTURE_HLC_TOLERANCE_MS,
+): boolean {
+  return hlc.wallMs > nowMs + toleranceMs;
+}
+
 // ---- Monotonic per-writer persistence (the anti-skew guard across restarts) ----
 //
 // The writer keeps a SINGLE last-emitted HLC, persisted machine-locally next to

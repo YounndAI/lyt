@@ -213,55 +213,88 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       warnings.push(`Lyt couldn't check whether you already have a pod online — you may be offline or signed out.`);
     }
     if (remoteExists) {
-      const existingRemote = federationRepoFullName(realHandle);
-      const adopt = args.confirmAdoptExistingRemote
-        ? await args.confirmAdoptExistingRemote({ existingRemote, localHandle: provisionalHandle })
-        : true; // default: adopt the remote (non-destructive — local is preserved)
-      return {
-        ...base,
-        status: "guard-existing-remote",
-        provisionalHandle,
-        realHandle,
-        existingRemote,
-        adoptRemoteChosen: adopt,
-        // firewall-C1 fix-pass — "uploaded" instead of the plumbing noun "pushed";
-        // "GitHub" stays as the destination service name.
-        message: adopt
-          ? `You already have a pod on GitHub (${existingRemote}). Your local notes are safe on this machine — ` +
-            `nothing was uploaded or overwritten. Combining your local notes into the existing pod isn't automated ` +
-            `yet; for now, keep working locally and Lyt will bring them together safely later.`
-          : `Keeping your local pod as-is. An existing pod (${existingRemote}) is on GitHub but was NOT touched; ` +
-            `nothing was uploaded or overwritten.`,
-      };
+      // Phase C amendment-5 — the remote repo EXISTS, but is it a GENUINE
+      // populated pod (→ the two-pods rename-aside dance, surfaced as the guard)
+      // or an empty / partial pre-created `lyt-pod` (→ NOT a collision; just
+      // connect + push)? Probe the remote `pod.yon` WITHOUT cloning. FAIL SAFE:
+      // an unprobable / unparseable remote is treated as HAVING content (guard/
+      // defer), never as empty — we never let an unverified remote skip the guard.
+      const remoteHasContent = await probeRemoteHasContent(gh, realHandle, warnings);
+      // C-1 — even when there is NO pod.yon, a remote that ALREADY has commits (a
+      // README-initialized repo) carries UNRELATED history. A local-first pod was
+      // FORGED locally (its own root commit, never cloned from this remote), so
+      // the caller's publish push into it would be non-ff. If we flipped identity
+      // to gh BEFORE that push (as the empty-remote fall-through did), the push
+      // would fail and the pod would be STRANDED — "reconciled" but unpushable,
+      // and podNeedsConnect (keyed on identity) would never re-enter connect.
+      // Route such a remote to the guard instead of the identity-flip. Only a
+      // truly-empty pre-created repo (no pod.yon AND no commits) is safe to push
+      // into and falls through to reconcile.
+      const routeToGuard =
+        remoteHasContent || (await probeRemoteHasUnrelatedHistory(gh, realHandle, warnings));
+      if (routeToGuard) {
+        const existingRemote = federationRepoFullName(realHandle);
+        const adopt = args.confirmAdoptExistingRemote
+          ? await args.confirmAdoptExistingRemote({ existingRemote, localHandle: provisionalHandle })
+          : true; // default: adopt the remote (non-destructive — local is preserved)
+        return {
+          ...base,
+          status: "guard-existing-remote",
+          provisionalHandle,
+          realHandle,
+          existingRemote,
+          adoptRemoteChosen: adopt,
+          // firewall-C1 fix-pass — "uploaded" instead of the plumbing noun "pushed";
+          // "GitHub" stays as the destination service name. The SYNC-COMMAND fold
+          // turns this guard into the actionable 3-option menu; the message
+          // here is the pure-detector fallback (non-TTY / no menu).
+          message: adopt
+            ? `You already have a pod on GitHub (${existingRemote}). Your local notes are safe on this machine — ` +
+              `nothing was uploaded or overwritten. Combining your local notes into the existing pod isn't automated ` +
+              `yet; for now, keep working locally and Lyt will bring them together safely later.`
+            : `Keeping your local pod as-is. An existing pod (${existingRemote}) is on GitHub but was NOT touched; ` +
+              `nothing was uploaded or overwritten.`,
+        };
+      }
+      // Truly-empty pre-created remote (no pod.yon AND no commits) → NOT a
+      // two-pods collision and no unrelated history, so DON'T force the
+      // rename-aside dance. Fall through: skip the `createRepo` below (the repo
+      // already exists) and reconcile + wire origin so the caller's publish pass
+      // pushes the local pod INTO the empty remote (a clean ff push).
     }
 
-    // 6. Create the pod gh repo FIRST (the GUARD above just confirmed it's
-    // absent). release review fix-pass: a create FAILURE (offline/transient)
-    // must NOT flip the identity to gh-cli — otherwise podNeedsConnect would
-    // return false forever and the pod would be permanently "connected but
-    // un-backed-up" with no retry. On failure we leave EVERYTHING provisional
-    // (state + identity untouched) and return a deferred status so the next
-    // `lyt sync` retries cleanly.
-    const visibility = resolveConfig().defaultRepoVisibility;
-    try {
-      await gh.createRepo(realHandle, federationRepoName(), visibility, POD_REPO_DESCRIPTION);
-    } catch (err) {
-      return {
-        ...base,
-        status: "pod-create-deferred",
-        provisionalHandle,
-        realHandle,
-        // firewall-C1 fix-pass — drop the raw error text; keep "GitHub" (service).
-        message:
-          "Lyt couldn't set up your pod on GitHub yet. " +
-          "Nothing was changed — your pod stays on this machine. Re-run `lyt sync` to retry.",
-      };
-    }
-    let podRepoCreated = true;
-    try {
-      await gh.setRepoTopics(realHandle, federationRepoName(), POD_TOPICS);
-    } catch (err) {
-      warnings.push(`Your pod is set up online, but Lyt couldn't finish labeling it (this is harmless).`);
+    // 6. Create the pod gh repo (only when it is genuinely ABSENT — the empty-
+    // remote amendment-5 branch above already has a repo to push into). release
+    // review fix-pass: a create FAILURE (offline/transient) must NOT flip the
+    // identity to gh-cli — otherwise podNeedsConnect would return false forever
+    // and the pod would be permanently "connected but un-backed-up" with no
+    // retry. On failure we leave EVERYTHING provisional (state + identity
+    // untouched) and return a deferred status so the next `lyt sync` retries.
+    let podRepoCreated = false;
+    if (!remoteExists) {
+      const visibility = resolveConfig().defaultRepoVisibility;
+      try {
+        await gh.createRepo(realHandle, federationRepoName(), visibility, POD_REPO_DESCRIPTION);
+      } catch (err) {
+        return {
+          ...base,
+          status: "pod-create-deferred",
+          provisionalHandle,
+          realHandle,
+          // firewall-C1 fix-pass — drop the raw error text; keep "GitHub" (service).
+          message:
+            "Lyt couldn't set up your pod on GitHub yet. " +
+            "Nothing was changed — your pod stays on this machine. Re-run `lyt sync` to retry.",
+        };
+      }
+      podRepoCreated = true;
+      try {
+        await gh.setRepoTopics(realHandle, federationRepoName(), POD_TOPICS);
+      } catch (err) {
+        warnings.push(
+          `Your pod is set up online, but Lyt couldn't finish labeling it (this is harmless).`,
+        );
+      }
     }
 
     // 7. The pod repo exists now → reconcile (auto-adopt the real handle).
@@ -317,6 +350,67 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
     };
   } finally {
     if (ownDb) await closeRegistry(db);
+  }
+}
+
+// Phase C amendment-5 + C-1 — does the EXISTING remote have a committed
+// `pod.yon` at all? A present pod.yon (raw !== null) is a GENUINE remote pod (→
+// the two-pods collision that warrants the guard), even if it declares ZERO
+// vaults yet (C-1 (b) — a real-but-vault-less pod must NOT be mistaken for an
+// empty repo). Reads the remote `pod.yon` WITHOUT cloning.
+//
+// FAIL-SAFE by construction — every uncertain outcome resolves to `true` (has
+// content → guard/defer), so we NEVER let an unverified remote skip the guard
+// and slide into the destructive rename-aside dance:
+//  - no probe method on the client → assume content.
+//  - probe throws (auth / network / 5xx) → assume content.
+// The ONLY `false` (empty/partial → eligible to just push, subject to the
+// caller's unrelated-history check): the remote has NO pod.yon (404 → null).
+async function probeRemoteHasContent(
+  gh: FederationGhClient,
+  realHandle: string,
+  warnings: string[],
+): Promise<boolean> {
+  if (gh.fetchRemotePodManifest === undefined) return true;
+  let raw: string | null;
+  try {
+    raw = await gh.fetchRemotePodManifest(realHandle, federationRepoName());
+  } catch {
+    warnings.push(
+      `Lyt couldn't fully check your existing online pod — treating it as active to keep your notes safe.`,
+    );
+    return true;
+  }
+  // C-1 (b) — a COMMITTED pod.yon (raw !== null) is a REAL remote pod, even if it
+  // declares ZERO vaults yet. Keying "has content" on `doc.vaults.length > 0`
+  // wrongly routed a real-but-vault-less remote to the empty-push reconcile
+  // (identity-flip-then-strand). Key on presence instead: any pod.yon → guard;
+  // only its genuine ABSENCE (404 → null) is the empty / partial pre-created repo
+  // that may reconcile (subject to the unrelated-history check in the caller).
+  return raw !== null;
+}
+
+// Phase C (C-1) — does the remote repo carry UNRELATED history (≥1 commit) that
+// would make the caller's publish push non-ff? Used only on the "remote exists,
+// no pod.yon" fall-through to tell a truly-empty pre-created repo (safe to push
+// into) from a README-initialized one (unrelated history → guard). FAIL-SAFE: a
+// throwing probe resolves to `true` (→ guard), never the identity-flip path. An
+// ABSENT method (alternate/older client) → `false` (assume empty), preserving
+// the legitimate empty-pre-created-repo reconcile for clients without the probe;
+// the real gh client always implements it, so production gets the full guard.
+async function probeRemoteHasUnrelatedHistory(
+  gh: FederationGhClient,
+  realHandle: string,
+  warnings: string[],
+): Promise<boolean> {
+  if (gh.remoteHasCommits === undefined) return false;
+  try {
+    return await gh.remoteHasCommits(realHandle, federationRepoName());
+  } catch {
+    warnings.push(
+      `Lyt couldn't fully check your existing online repo — treating it as active to keep your notes safe.`,
+    );
+    return true;
   }
 }
 

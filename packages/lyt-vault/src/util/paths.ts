@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -133,6 +134,32 @@ export function validateLytHome(home: string): void {
       `Refusing destructive op against non-lyt-shaped lyt home (lyt home: ${resolved}). ` +
         `Basename "${base}" does not match /^(lyt|\\.lyt|lyt-.+)$/i. ` +
         `Set LYT_HOME to a path whose basename is "lyt", ".lyt", or "lyt-*".`,
+    );
+  }
+  // 🔴 L0 DESTRUCTIVE-DELETE — refuse a lyt home that IS a reparse point (a
+  // Windows directory junction or POSIX symlink; lstat().isSymbolicLink() is true
+  // for junctions too). The rename-aside flow's load-bearing safety assertion
+  // (reparse-safe.ts) FALSE-PASSES on a reparse-point ROOT: listNestedReparsePoints
+  // /stripNestedReparsePoints both BAIL (return nothing) when the root is a
+  // reparse point, so a junction home would be renamed aside into a junction
+  // BACKUP whose inner junctions are never enumerated or stripped — the
+  // enumerate-first L0 pre-check silently sees []. Rejecting here at the safety
+  // floor makes the false-pass impossible: a destructive op never operates on a
+  // home it cannot atomically rename or safely enumerate. The whole-tree teardown
+  // logic assumes a REAL directory it owns. Non-existent home → nothing to guard
+  // (lstat ENOENT is not a reparse point); a genuine directory passes.
+  let homeStat;
+  try {
+    homeStat = lstatSync(resolved);
+  } catch {
+    return; // missing / unreadable — nothing destructive to guard against yet.
+  }
+  if (homeStat.isSymbolicLink()) {
+    throw new Error(
+      `Refusing destructive op against a lyt home that is a junction/symlink (lyt home: ${resolved}). ` +
+        `A reparse-point home cannot be safely enumerated or renamed aside (the reparse-safe ` +
+        `enumeration bails on a reparse-point root, which would false-pass the strip assertion). ` +
+        `Point LYT_HOME at a REAL directory (resolve the junction), then retry.`,
     );
   }
 }

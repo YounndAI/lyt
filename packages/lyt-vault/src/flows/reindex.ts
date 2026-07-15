@@ -39,6 +39,7 @@ import {
   type EmbeddingsBuildProgress,
   type RebuildVaultResult,
 } from "./rebuild-vault.js";
+import { repairForeignHomingFlow } from "./repair-foreign-homing.js";
 
 export type ReindexScope = "all" | "mesh" | "vault";
 
@@ -82,6 +83,32 @@ export async function reindexFlow(args: ReindexArgs): Promise<ReindexResult> {
   const callerSupplied = args.registryDb !== undefined;
   const registryDb = args.registryDb ?? (await openRegistry());
   try {
+    // Inc-2 Phase B / LAZY REPAIR hook. On a pod-wide reindex, relocate
+    // any already-commingled foreign vault (source ∈ {shared,subscribed}) sitting
+    // in the wrong on-disk tree into its owner-keyed bucket home before the
+    // rebuild loop. Best-effort + idempotent (own vaults are a no-op); a repair
+    // failure must never fail the reindex. Scoped to `all` so a single-vault /
+    // single-mesh reindex stays narrow.
+    if (args.scope === "all") {
+      try {
+        await repairForeignHomingFlow({ registryDb });
+      } catch {
+        // best-effort — the reindex proceeds even if the homing repair could not run.
+        // TXN-STATE SAFETY: the repair shares THIS connection and runs a per-vault
+        // BEGIN/COMMIT internally. If it threw mid-txn AND its own best-effort
+        // ROLLBACK also failed, an OPEN transaction could still be dangling on
+        // `registryDb` — and the rebuild loop below would then unknowingly run
+        // inside it (or its next BEGIN would throw "cannot start a transaction
+        // within a transaction"). Defensively clear any dangling txn so the reindex
+        // never continues on a dangling-txn connection. A no-op ROLLBACK (no active
+        // txn) throws harmlessly and is ignored.
+        try {
+          await registryDb.execute("ROLLBACK");
+        } catch {
+          /* no active transaction to clear — expected on a clean connection */
+        }
+      }
+    }
     const targets = await resolveScopeVaults(registryDb, args.scope, args.target);
     const vaults: RebuildVaultResult[] = [];
     const vaultsSkippedFrozen: { name: string; frozenUntil: string | null }[] = [];

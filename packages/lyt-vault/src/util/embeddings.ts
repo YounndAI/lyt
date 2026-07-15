@@ -39,6 +39,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { fetchModel } from "./fetch-model.js";
+import { probeNativeEmbeddings } from "./embeddings-probe.js";
 
 // The dense model: bge-small-en-v1.5, 384-dim, int8-quantized ONNX.
 export const EMBEDDING_DIM = 384;
@@ -377,6 +378,29 @@ export function loadEmbedder(opts: LoadEmbedderOpts = {}): Promise<EmbedderLoad>
           // mapper can honestly label a stall as `timed-out` (not `offline-deferred`).
           classification: fetched.classification,
         };
+      }
+    }
+    // Wall-3 native-crash containment. The `import("fastembed")` + `FlagEmbedding.init`
+    // below load onnxruntime IN-PROCESS with NO isolation — a hard native SIGSEGV
+    // (bad platform: missing AVX / VC++ redist / glibc, corrupt DLL, or an
+    // onnxruntime/OOM fault) bypasses this try/catch + withTimeout entirely and
+    // KILLS the whole CLI/MCP process. Before the FIRST in-process native load in
+    // this session, run a ONE-TIME out-of-process capability probe (a child doing
+    // the SAME native init + a 1-token embed). If that child crashes / times out /
+    // can't spawn, we degrade to lexical HERE instead of loading native and
+    // crashing — the same `{ available:false }` contract as offline/absent. The
+    // probe is gated on modelCachePresent(): by the time control reaches this
+    // in-process init the model is ALWAYS cached (read path returns early when
+    // absent; build path only continues past a successful fetch), so the probe
+    // child never triggers a download; if the cache is somehow absent we skip the
+    // probe and proceed as before rather than risk the child fetching. The probe
+    // outcome is memoized per-process (spawns at most once).
+    if (modelCachePresent()) {
+      const probe = await probeNativeEmbeddings(
+        opts.signal !== undefined ? { signal: opts.signal } : {},
+      );
+      if (!probe.available) {
+        return { available: false, reason: `native embeddings unavailable: ${probe.reason}` };
       }
     }
     let mod: unknown;

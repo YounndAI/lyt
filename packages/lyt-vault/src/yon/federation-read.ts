@@ -82,11 +82,12 @@ export function parseFederationYon(content: string): FederationDoc {
   };
 }
 
+// Inc-2 Phase 0 (ratified) — `tombstoned` DROPPED: status is
+// reachability-only; retraction moved to the @FED_VAULT ledger `state` channel.
 const VALID_VAULT_STATUS: ReadonlySet<string> = new Set([
   "active",
   "disconnected",
   "missing",
-  "tombstoned",
   "access_lost",
 ]);
 
@@ -151,7 +152,13 @@ function parseFedMeshes(content: string): FedMeshRecord[] {
       continue;
     }
     const pushKind: FedMeshPushKind = pushKindRaw === "org" ? "org" : "handle";
-    const role: FedMeshRole = roleRaw === "join" ? "join" : "own";
+    // M2 (0.12.1 identity-safety) — FAIL-CLOSED on the ownership-restore path.
+    // The parsed `role` feeds recover-pod's ownCreated restore + deriveVaultRepoOwner;
+    // a blank/garbled/absent role must NEVER default to `own` (that would confer
+    // ownership on corruption). Only an explicit `role=="own"` is trusted; every
+    // other value folds to `join`. The writer always emits `own`|`join` literally,
+    // so a well-formed round-trip is unchanged.
+    const role: FedMeshRole = roleRaw === "own" ? "own" : "join";
 
     out.push({
       fedRidHex: fedRidMatch[1]!,

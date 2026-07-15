@@ -68,6 +68,24 @@ export interface UpsertArcsCacheOpts {
   // the caller's lyt.db client and does NOT close it. When omitted, the
   // flow opens + closes its own.
   lytDb?: Client;
+  // Machine-local `last_touched` stamp for the cache rows (Option A).
+  // The committed arcs.yon no longer carries last_touched, so the cache
+  // (arcs.last_touched is TEXT NOT NULL) is stamped at upsert time. When a
+  // parsed arc still carries last_touched (a legacy file), that value wins.
+  // The rebuild flow threads its own build timestamp here; the sync
+  // post-pull caller omits it and the receiver stamps its own local build
+  // time. Defaults to now.
+  nowIso?: string;
+  // M1 (residual sweep): per-arc `last_touched` override, keyed by rid
+  // slug. The committed arcs.yon is content-only (last_touched omitted), so a
+  // re-read of the SoT loses the genuine per-arc max(member mtime) the rebuild
+  // computed → every arc would collapse to one identical cacheStamp and the
+  // primer's `lastTouched DESC` sort degrades to alphabetical. The rebuild
+  // threads its computed map here so each cache row keeps its real recency.
+  // The RECEIVE path (sync post-pull, no local rebuild) omits it and falls
+  // back to cacheStamp — acceptable, the receiver rebuilds locally.
+  // Precedence: override > legacy-file value > cacheStamp.
+  lastTouchedBySlug?: Map<string, string>;
 }
 
 export async function upsertArcsCache(
@@ -88,6 +106,7 @@ export async function upsertArcsCache(
 
   const content = readFileSync(arcsYonPath, "utf8");
   const doc = parseArcsFile(content);
+  const cacheStamp = opts.nowIso ?? new Date().toISOString();
 
   const callerSupplied = opts.lytDb !== undefined;
   const db = opts.lytDb ?? (await openLytDb(vaultPath));
@@ -107,7 +126,10 @@ export async function upsertArcsCache(
         ridSlug: arc.ridSlug,
         name: arc.name,
         category: arc.category,
-        lastTouched: arc.lastTouched,
+        // Content-only committed YON omits last_touched. Precedence (M1):
+        // rebuild-supplied per-arc override (real max(member mtime)) → legacy
+        // file value → machine-local cacheStamp fallback.
+        lastTouched: opts.lastTouchedBySlug?.get(arc.ridSlug) ?? arc.lastTouched ?? cacheStamp,
       });
       slugToRid.set(arc.ridSlug, rid);
       arcsUpserted += 1;

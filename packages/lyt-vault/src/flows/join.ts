@@ -18,7 +18,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { getVaultByPath } from "../registry/repo.js";
+import { getVaultByPath, type VaultSource } from "../registry/repo.js";
 import { initVaultDbs } from "../registry/vault-db.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { relinkAllPatternsForVault } from "./pattern-relink-vault.js";
@@ -29,7 +29,33 @@ export interface JoinResult extends RegisteredVault {
   patternsLinked: number;
 }
 
-export async function joinVaultFlow(vaultPath: string): Promise<JoinResult> {
+export async function joinVaultFlow(
+  vaultPath: string,
+  // (CRIT-1) — optional registry-side home-mesh rebind, threaded straight
+  // to registerVaultFromYon. The preserve-rid subscribe/adopt clone passes the
+  // LOCAL target mesh rid so the vault is homed locally without rewriting its
+  // (byte-frozen) committed vault.yon. Omitted on every other caller (default
+  // clone, `lyt vault join`), which register using the vault.yon's own binding.
+  //
+  // `skipPatternRelink` keeps a read-only subscriber/adopt MIRROR's
+  // working tree CLEAN. relinkAllPatternsForVault regenerates the TRACKED
+  // `.lyt/agents.md` pattern block to match the LOCAL machine's installed
+  // patterns; on a preserve-rid clone the committed agents.md is the publisher's
+  // and must stay byte-unchanged (the same A2c clean-tree reason the preserve
+  // path already skips writeScaffoldConformance — a dirty tracked file wedges
+  // the no-autostash read-only pull). The junction relink is machine-local
+  // convenience the subscriber can run on demand; the read-only mirror does not
+  // commit it. Omitted (relink runs) on every OTHER caller.
+  // Inc-2 Phase B / `source` threads the own-vs-clone provenance to
+  // registerVaultFromYon's fresh-INSERT arm. The foreign clone-on-subscribe /
+  // mesh-adopt member paths pass 'subscribed'; omitted everywhere else →
+  // fail-closed 'own'.
+  opts?: {
+    homeMeshRidOverride?: Uint8Array | undefined;
+    skipPatternRelink?: boolean | undefined;
+    source?: VaultSource | undefined;
+  },
+): Promise<JoinResult> {
   const abs = resolve(vaultPath);
   if (!existsSync(abs) || !statSync(abs).isDirectory()) {
     throw new Error(`Not a directory: ${abs}`);
@@ -55,7 +81,13 @@ export async function joinVaultFlow(vaultPath: string): Promise<JoinResult> {
       };
       alreadyRegistered = true;
     } else {
-      registered = await registerVaultFromYon(db, { vaultPath: abs });
+      registered = await registerVaultFromYon(db, {
+        vaultPath: abs,
+        ...(opts?.homeMeshRidOverride !== undefined
+          ? { homeMeshRidOverride: opts.homeMeshRidOverride }
+          : {}),
+        ...(opts?.source !== undefined ? { source: opts.source } : {}),
+      });
     }
   } finally {
     await closeRegistry(db);
@@ -75,7 +107,11 @@ export async function joinVaultFlow(vaultPath: string): Promise<JoinResult> {
   await initVaultDbs(abs);
   // Auto-link installed patterns (best-effort) on every join — even already-registered
   // vaults benefit from a re-link (the user may have installed new patterns since the
-  // vault was first registered).
+  // vault was first registered). SKIPPED on a preserve-rid subscriber/adopt
+  // mirror so the tracked agents.md stays byte-unchanged (clean tree).
+  if (opts?.skipPatternRelink === true) {
+    return { ...registered, alreadyRegistered, patternsLinked: 0 };
+  }
   const parsed = parseVaultYon(readFileSync(yonPath, "utf8"));
   const links = await relinkAllPatternsForVault(parsed.name);
   return { ...registered, alreadyRegistered, patternsLinked: links.length };

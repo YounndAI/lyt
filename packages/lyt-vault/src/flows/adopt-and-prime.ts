@@ -25,7 +25,11 @@ import type { GhExecutor } from "../util/gh-discover.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import { federationInitFlow, type FederationInitBranch } from "./federation/init.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
-import { recoverVaultsFromPodManifest, type VaultCloneFn } from "./federation/recover-pod.js";
+import {
+  recoverVaultsFromPodManifest,
+  type RecoverDrop,
+  type VaultCloneFn,
+} from "./federation/recover-pod.js";
 import {
   computeAutoDecisions,
   discoverFlow,
@@ -113,6 +117,19 @@ export interface AdoptAndPrimeResult {
   // (recovery never runs). The honest "expected" denominator is recovered + the
   // failure-reason skips — computed at the command layer, not a raw manifest total.
   manifestSkipped: { vaultName: string; reason: string }[];
+  // G1 (0.12.1) — vaults the reconstruction clone-walk DROPPED (classified:
+  // owner-misresolved vs repo-moved). Non-empty ⇒ the reconstruction is
+  // INCOMPLETE; the command/wizard layer surfaces it loudly + exits nonzero
+  // (reconstructionExitCode). Optional: absent on a fresh pod / non-adopt paths.
+  manifestDrops?: RecoverDrop[];
+  // FIX A (A2-R3 MAJOR-1) — the recover-pod SEMANTIC-REFUSAL signal, threaded up.
+  // True ⇒ the cloned pod.yon was parseable-but-incoherent, so the flow FAILED
+  // CLOSED EARLY: it did NOT run the step-3b gh-discovery walk and did NOT
+  // scaffold. The wizard/command layer surfaces this as a FAILURE (distinct exit
+  // 13 via reconstructionExitCode), NOT "adopted successfully". A legitimately-empty
+  // COHERENT pod never sets this (it flows on to the normal scaffold/success path).
+  manifestRefused?: boolean;
+  manifestRefusedReason?: string;
   clusterOutcomes: ClusterOutcome[];
   // True when no vaults were acquirable and personal/main was scaffolded.
   firstVaultCreated: boolean;
@@ -161,6 +178,11 @@ export async function adoptAndPrimeFlow(
     // MF4 — raw skipped[] threaded up for recovered-of-expected honesty (the
     // command layer classifies failure-reason skips → loud partial-restore line).
     let manifestSkipped: { vaultName: string; reason: string }[] = [];
+    // G1 — classified clone-walk DROPS threaded up for the nonzero-exit surface.
+    let manifestDrops: RecoverDrop[] = [];
+    // FIX A — the semantic-refusal signal from recover-pod.
+    let manifestRefused = false;
+    let manifestRefusedReason: string | undefined;
     if (fed.branch === "adopted") {
       try {
         const recovered = await recoverVaultsFromPodManifest({
@@ -170,6 +192,9 @@ export async function adoptAndPrimeFlow(
         });
         vaultsRecoveredFromManifest = recovered.vaultsRecovered.length;
         manifestSkipped = recovered.skipped;
+        manifestDrops = recovered.drops;
+        manifestRefused = recovered.refused === true;
+        manifestRefusedReason = recovered.refusedReason;
         for (const w of recovered.warnings) {
           // eslint-disable-next-line no-console
           console.error(`lyt adopt: pod.yon recovery — ${w}`);
@@ -179,6 +204,39 @@ export async function adoptAndPrimeFlow(
         // eslint-disable-next-line no-console
         console.error(`lyt adopt: pod.yon-driven recovery failed non-fatally — ${msg}`);
       }
+    }
+
+    // FIX A (A2-R3 MAJOR-1) — a SEMANTIC REFUSAL is fail-closed-EARLY: the cloned
+    // pod.yon is parseable-but-incoherent, so STOP before the step-3b gh-discovery
+    // walk (which clones repos) and before any personal/main scaffold. Return an
+    // INCOMPLETE result that surfaces the refusal so the wizard/command layer
+    // reports FAILURE (distinct nonzero exit) rather than "Adopted successfully".
+    // A legitimately-empty COHERENT pod NEVER sets `refused`, so this does not fire
+    // for it — it flows on to the normal scaffold/success path below (PRESERVED).
+    if (manifestRefused) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `lyt adopt: reconstruction REFUSED (pod.yon semantically incoherent) — stopping ` +
+          `before vault discovery/scaffold. ${manifestRefusedReason ?? ""}`.trimEnd(),
+      );
+      return {
+        podBranch: fed.branch,
+        podLocalPath: fed.localPath,
+        podHandle: handle,
+        vaultsAcquired: 0,
+        vaultsRecoveredFromManifest,
+        manifestSkipped,
+        manifestDrops,
+        manifestRefused: true,
+        ...(manifestRefusedReason !== undefined
+          ? { manifestRefusedReason }
+          : {}),
+        clusterOutcomes: [],
+        firstVaultCreated: false,
+        primaryVaultPath: null,
+        primaryMeshName: null,
+        reconciledVaultPaths: [],
+      };
     }
 
     // 3b. Acquire the user's OWN vaults from gh (discover → auto-adopt only).
@@ -358,6 +416,7 @@ export async function adoptAndPrimeFlow(
       vaultsAcquired,
       vaultsRecoveredFromManifest,
       manifestSkipped,
+      manifestDrops,
       clusterOutcomes,
       firstVaultCreated,
       primaryVaultPath,

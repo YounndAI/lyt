@@ -185,6 +185,10 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
       pushKind: pushPlan.kind,
       mainVaultRid: null,
       createdAt,
+      // MA — this pod is CREATING the mesh, so its org push_target is trusted as
+      // the repo owner for its leaf vaults (the legit B2a case). A joined mesh
+      // (mesh-join) leaves this false.
+      ownCreated: true,
     });
 
     // (d) scaffold the main vault via the existing initVault helper. The

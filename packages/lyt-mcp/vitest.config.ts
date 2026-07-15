@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
     environment: "node",
+    env: { LYT_IDENTITY_OVERRIDE: "github:test-fixture" },
     pool: "forks",
     isolate: false,
     // Hardening note (2026-06-10): `forks: { singleFork: true }` was dead config in

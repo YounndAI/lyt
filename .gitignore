@@ -56,5 +56,6 @@ tmp/
 scripts/public-release/.tmp-packed-proof/
 scripts/public-release/.tmp-tarball-scan/
 scripts/public-release/.staging-younndai-lyt/
+.release-gate/
 .test-gate.log
 .test-gate.exit

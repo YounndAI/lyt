@@ -18,6 +18,9 @@ import { closeRegistry, openRegistry } from "../registry/client.js";
 import { removeKnownPath } from "../registry/known-paths.js";
 import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
+import { vaultRepoName } from "../util/federation-paths.js";
+import { appendFedVaultTombstone } from "../yon/federation-vault-ledger-write.js";
+import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
@@ -80,6 +83,26 @@ export async function forgetVaultFlow(
     // existing removeAliasFlow / appendAliasTombstone path. Reuses the open db.
     if (orphanedAliases.length > 0) {
       await dropAliasesForTargetRid(vault.ridHex, db);
+    }
+    // Inc-2 Phase 0 — the CRDT delete channel (see flows/delete.ts for
+    // the full rationale). forget is a manifest retraction too: append an
+    // explicit `state=tombstoned` @FED_VAULT event on this writer's own shard so
+    // the removed vault drops out of the folded pod.yon and stays dropped
+    // cross-machine. Non-fatal.
+    try {
+      appendFedVaultTombstone({
+        vaultRid: vault.ridHex,
+        vaultName: vault.name,
+        homeMeshRidHex: vault.homeMeshRidHex,
+        repo: vaultRepoName(vault.name),
+        visibility: "private",
+        status: "active",
+        observedMaxHlc: observedMaxFedVaultHlc(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.error(`@FED_VAULT tombstone skipped non-fatally on forget — ${msg}`);
     }
     // (Brief A) — forget mutates the registry's vault set; regenerate the
     // derived pod manifest so the removed vault drops out of pod.yon. Non-fatal;

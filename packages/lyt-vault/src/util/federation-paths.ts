@@ -101,6 +101,25 @@ export function federationRepoFullName(handle: string): string {
   return `${handle}/${federationRepoName()}`;
 }
 
+// G3 (0.12.1 identity-safety invariant, design §6.1 G3) — the federation MANIFEST
+// repos are UN-SHAREABLE + UN-SUBSCRIBABLE. `{handle}/lyt-pod` exposes every
+// push_target, every vault rid, and the whole federation map; `{handle}/lyt-pod-map`
+// is its human-readable projection (same identity-exposure class). Sharing or
+// subscribing either would leak the entire pod topology, so both are reserved: a
+// user vault repo can never be one of these (a genuine vault repo always follows
+// the `lyt-vault-<mesh>--<leaf>` convention, so no legit vault collides).
+export const RESERVED_FEDERATION_REPO_NAMES = [federationRepoName(), "lyt-pod-map"] as const;
+
+// True when `candidate` names one of the reserved federation manifest repos.
+// Normalizes case-insensitively (GitHub repo lookup is case-insensitive) and
+// strips a trailing `.git` so a raw clone/remote URL basename also matches.
+export function isReservedFederationRepoName(candidate: string): boolean {
+  const normalized = candidate.trim().toLowerCase().replace(/\.git$/, "");
+  return (RESERVED_FEDERATION_REPO_NAMES as readonly string[]).some(
+    (r) => r.toLowerCase() === normalized,
+  );
+}
+
 // Brief B (resolved scheme D via /insight-explore →
 // /insight-critique → /insight-assess, 2026-06-04). The GitHub repo name for a
 // single vault. Parallels federationRepoName() ({handle}/lyt-pod) and the
@@ -145,6 +164,45 @@ export function vaultRepoName(vaultName: string): string {
 
 export function vaultRepoFullName(handle: string, vaultName: string): string {
   return `${handle}/${vaultRepoName(vaultName)}`;
+}
+
+// B2a (Inc-2 Phase B slice 2) — derive the GitHub OWNER a vault's repo lives
+// under. A vault homed in an ORG mesh (`push_kind === 'org'`) publishes under
+// that mesh's `push_target` ORG handle, NOT the user's personal federation
+// handle. Every OTHER case (personal `handle` push_kind, an org mesh with an
+// empty push_target, or no home mesh at all) falls back to the federation
+// handle — the historic behavior, so a personal mesh is byte-identical. The
+// mesh's `push_target`/`push_kind` are the SAME fields mesh-init already uses
+// for the MAIN vault's origin (flows/mesh-init.ts:355 `resolveRemoteUrl(pushTarget,
+// 'main')`); this brings the mesh's LEAF vaults into parity with its main. Pure;
+// takes only the structural mesh fields so it stays import-cycle-free.
+//
+// MA (origin-hijack close) — the org `push_target` is trusted as the repo owner
+// ONLY when the mesh is OWN-CREATED (`ownCreated === true`, set by `lyt mesh
+// init`). A FOREIGN-JOINED org mesh (`lyt mesh join`) carries an UNTRUSTED
+// push_target from a foreign mesh.yon; using it as the owner for the user's OWN
+// vaults would repoint/leak the user's repos to that foreign org. FAIL-CLOSED:
+// when ownCreated is not exactly true (joined, unknown, undefined, or a
+// pre-migration-010 row), fall back to the federation handle — the pre-B2a
+// behavior. `ownCreated` is optional so a caller passing the bare structural
+// shape (no provenance) also fails closed.
+export function deriveVaultRepoOwner(
+  homeMesh:
+    | { pushKind: string | null; pushTarget: string | null; ownCreated?: boolean }
+    | null
+    | undefined,
+  federationHandle: string,
+): string {
+  if (
+    homeMesh != null &&
+    homeMesh.ownCreated === true &&
+    homeMesh.pushKind === "org" &&
+    homeMesh.pushTarget != null &&
+    homeMesh.pushTarget.length > 0
+  ) {
+    return homeMesh.pushTarget;
+  }
+  return federationHandle;
 }
 
 // hardening fix-pass release review — segment charset gate. Mesh/vault

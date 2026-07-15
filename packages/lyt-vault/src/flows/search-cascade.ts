@@ -70,8 +70,8 @@
 // deterministically from the index, so the same query against the same
 // vault set → byte-identical JSON.
 
-import { readFileSync, statSync } from "node:fs";
-import { join, posix, sep } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { posix, resolve, sep } from "node:path";
 
 import type { Client } from "@libsql/client";
 
@@ -1267,6 +1267,9 @@ async function getMeshByRidOrNull(db: Client, rid: Uint8Array): Promise<MeshRow 
     mainVaultRid: null,
     mainVaultRidHex: null,
     createdAt: String(r["created_at"]),
+    // MA — project the provenance flag (fail-closed: a pre-migration-010 row
+    // with no column reads as NOT own-created).
+    ownCreated: Number(r["own_created"] ?? 0) === 1,
   };
 }
 
@@ -1455,9 +1458,50 @@ function hexLowerToBytes(hex: string): Uint8Array {
 // Snippet derivation for tier 0/1 (default — first 96 chars of body)
 // ---------------------------------------------------------------------------
 
+// CRIT-B (residual sweep): cluster YON (lanes.yon / arcs.yon) now travels
+// cross-machine, so a peer-authored `figment_rid` reaches this FS sink. An
+// unguarded `figment_rid` containing dot-dot segments would escape
+// the vault root and surface arbitrary local-file bytes in a search snippet
+// (arbitrary-read / exfil). Every read of a figment path derived from cluster
+// YON MUST pass through this containment gate first. This is the primary layer
+// (covers BOTH tier-0 arcs and tier-1 lanes — both reach readSnippetFromDisk);
+// the parse-side guard in lanes-read.ts / arcs-read.ts is defense-in-depth.
+//
+// Returns the resolved absolute path ONLY when it is provably contained within
+// the vault root (lexical check), AND — when the target exists — its realpath
+// (symlink-resolved) is still contained (symlink-escape defense). Otherwise
+// null. A non-existent-but-lexically-contained path returns the abs path (the
+// caller's readFileSync then throws → ""), preserving prior "missing file → """
+// semantics.
+function resolveContainedVaultPath(vaultPath: string, figmentPath: string): string | null {
+  // figmentPath is vault-relative POSIX; convert to native separators. resolve()
+  // collapses any `..` segments and, if figmentPath is absolute, discards
+  // vaultPath entirely (→ fails the containment check below).
+  const nativeRel = figmentPath.split(posix.sep).join(sep);
+  const root = resolve(vaultPath);
+  const abs = resolve(vaultPath, nativeRel);
+  if (abs !== root && !abs.startsWith(root + sep)) return null;
+  // Symlink-escape defense: a contained path that is (or traverses) a symlink
+  // pointing outside the vault must not be read. realpath both sides and
+  // re-check. Only when the target exists — a non-existent contained path is
+  // fine (readFileSync will throw → "").
+  try {
+    if (existsSync(abs)) {
+      const realAbs = realpathSync(abs);
+      const realRoot = realpathSync(root);
+      if (realAbs !== realRoot && !realAbs.startsWith(realRoot + sep)) return null;
+    }
+  } catch {
+    return null;
+  }
+  return abs;
+}
+
 function readSnippetFromDisk(vaultPath: string, figmentPath: string): string {
-  // figmentPath is vault-relative POSIX; on Windows join with native sep.
-  const abs = join(vaultPath, figmentPath.split(posix.sep).join(sep));
+  // figmentPath is vault-relative POSIX from cluster YON — containment-gate it
+  // before any FS read (CRIT-B path-traversal). null → outside the vault → "".
+  const abs = resolveContainedVaultPath(vaultPath, figmentPath);
+  if (abs === null) return "";
   let raw: string;
   try {
     raw = readFileSync(abs, "utf8");

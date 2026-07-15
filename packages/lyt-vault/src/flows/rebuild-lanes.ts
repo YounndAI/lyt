@@ -183,7 +183,11 @@ export async function rebuildLanesFlow(args: RebuildLanesArgs): Promise<RebuildL
   // `lyt search` query. The lyt-mesh sync post-pull caller wraps THIS
   // flow in its own best-effort try/catch when it calls upsertLanesCache
   // directly without writing SoT.
-  const cacheRes = await upsertLanesCache(vaultPath);
+  // Thread this rebuild's build timestamp so the machine-local cache row
+  // (lanes.last_built) reflects THIS rebuild. The committed lanes.yon is
+  // content-only (last_built omitted — / Option A), so the cache is
+  // the only place the stamp lives.
+  const cacheRes = await upsertLanesCache(vaultPath, { nowIso: lastBuilt });
 
   return {
     vaultName,

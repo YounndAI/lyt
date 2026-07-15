@@ -17,10 +17,11 @@
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { getVaultByName } from "../registry/repo.js";
+import { getVaultByName, type VaultRow } from "../registry/repo.js";
 import { GhAccessProvider } from "../access/gh-access-provider.js";
 import type { AccessProvider, Caller } from "../access/access-provider.js";
 import type { GhExecutor } from "../util/gh-discover.js";
+import { isReservedFederationRepoName } from "../util/federation-paths.js";
 
 // keystone Phase C C8 (partial) — the `vault share` + `vault unshare`
 // access verbs. Per the gh-as-sole-SoT design these are THIN wrappers over the
@@ -77,6 +78,37 @@ export interface UnshareVaultResult {
 
 const VALID_LEVELS: readonly ShareLevel[] = ["read", "write"];
 
+// G3 (design §6.1) — the federation manifest repo (`lyt-pod` / `lyt-pod-map`) is
+// UN-SHAREABLE: granting a collaborator on it would expose every push_target,
+// vault rid, and the whole federation map. Refuse on BOTH the bare name argument
+// (e.g. `lyt vault share lyt-pod`) AND the resolved row's repo/origin basename
+// (the precise identity of the manifest repo), with an actionable error. Fires
+// regardless of `--yes` — no confirmation can authorize sharing the pod map.
+function assertNotFederationManifestRepo(requested: string, row?: VaultRow): void {
+  // FIX C (A2-R2 G3-3) — key on the REPO identity, NOT the vault-NAME leaf. The old
+  // `lastSegment` check matched the last `/`-segment of the requested vault NAME, so
+  // a legit vault whose LEAF is `lyt-pod` (shared as `{mesh}/lyt-pod`, real repo
+  // `lyt-vault-<mesh>--lyt-pod`) was wrongly refused. The manifest repo is identified
+  // by (a) the requested string being literally a reserved repo name (a bare
+  // `lyt-pod` typed as the vault ref), or (b) the RESOLVED row's origin basename
+  // being one — the precise repo identity (federation-paths.ts:104-110). A qualified
+  // `{mesh}/lyt-pod` is NOT reserved (it carries a slash) and its origin basename is
+  // `lyt-vault-<mesh>--lyt-pod`, so a legit leaf `lyt-pod` now passes.
+  const originBasename = row?.gitUrl
+    ? (row.gitUrl.split(/[\\/]/).filter((s) => s.length > 0).pop() ?? "")
+    : "";
+  if (
+    isReservedFederationRepoName(requested) ||
+    (originBasename.length > 0 && isReservedFederationRepoName(originBasename))
+  ) {
+    throw new Error(
+      `Refusing to share '${requested}': the federation manifest repo (lyt-pod / lyt-pod-map) ` +
+        `is un-shareable — it exposes every push_target, vault rid, and your whole federation ` +
+        `map. Share individual vaults instead.`,
+    );
+  }
+}
+
 // Grant `withHandle` `level` access on `vaultName`. Refuses without explicit
 // confirmation (the agent-HIL gate). Resolves the vault to a row, constructs/
 // accepts an AccessProvider, and delegates to its `grant` — the gh collaborator
@@ -85,6 +117,10 @@ export async function shareVaultFlow(
   args: ShareVaultArgs,
   opts: ShareVaultFlowOpts = {},
 ): Promise<ShareVaultResult> {
+  // G3 — the manifest repo is un-shareable (fires before the confirmation gate;
+  // no --yes can authorize it). Cheap bare-name check up front; the resolved-row
+  // origin check follows once the vault is looked up.
+  assertNotFederationManifestRepo(args.vaultName);
   if (!args.confirmed) {
     throw new Error(
       `Refusing to share '${args.vaultName}' with '${args.withHandle}' without explicit ` +
@@ -107,6 +143,10 @@ export async function shareVaultFlow(
     if (!row) {
       throw new Error(`No vault registered with name '${args.vaultName}'. Try 'lyt vault list'.`);
     }
+    // G3 — belt-and-suspenders: refuse if the RESOLVED row is actually the
+    // manifest repo (its origin basename is lyt-pod / lyt-pod-map), even when the
+    // requested name did not literally spell it.
+    assertNotFederationManifestRepo(args.vaultName, row);
     const provider = resolveProvider(db, opts);
     await provider.grant(row, grantee, args.level);
     return {

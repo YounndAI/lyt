@@ -20,8 +20,18 @@ import {
   SubscribeMainVaultMissingError,
   SubscribeVaultNotFoundError,
   subscribeFlow,
+  type RepoVisibilityProbe,
   type SubscribeResult,
 } from "../flows/subscribe.js";
+import { checkRepoVisibility } from "../util/gh-discover.js";
+
+// Inc-2 Phase B / the CLI wires the REAL gh visibility probe so a
+// privately-granted vault subscribed via `lyt mesh subscribe` lands as `shared`
+// (homed into `shared/{owner}`) while a public repo lands as `subscribed`. The
+// probe is fail-soft (any gh error → "unknown" → the subscribe default). Library
+// / test callers omit it and stay network-free (default `subscribed`).
+const ghVisibilityProbe: RepoVisibilityProbe = (owner, repoName) =>
+  checkRepoVisibility({ owner, repo: repoName });
 
 // v1.C.2 — `lyt mesh subscribe --vault <name> --from-mesh <name> [--json]`.
 //
@@ -65,6 +75,7 @@ export function buildMeshSubscribeSubcommand(): Command {
         const result = await subscribeFlow({
           subscribedVaultName: opts.vault!,
           fromMeshName: opts.fromMesh!,
+          visibilityProbe: ghVisibilityProbe,
         });
         if (json) {
           // eslint-disable-next-line no-console

@@ -70,7 +70,13 @@ export interface FedMeshRecord {
 // vaults so `pod.yon` reflects the actual pod (dissolving the empty-manifest
 // limitation + the 2-SoT divergence). Built from `registry.db` VaultRow on regen.
 // `homeMeshRidHex` is null for an orphan vault (registered but in no mesh).
-export type FedVaultStatus = "active" | "disconnected" | "missing" | "tombstoned" | "access_lost";
+// Inc-2 Phase 0 (handler-RATIFIED 2026-07-09) — `status` is now
+// REACHABILITY-ONLY. The soft-delete `tombstoned` value was DROPPED: retraction
+// is the CRDT `state: tombstoned` channel on the @FED_VAULT ledger register
+// (federation-vault-ledger-write.ts), not a status value. One retraction
+// channel, not two. (The LOCAL registry's VaultStatus keeps its own
+// `tombstoned` soft-delete — a distinct, unaffected type in registry/repo.ts.)
+export type FedVaultStatus = "active" | "disconnected" | "missing" | "access_lost";
 
 export interface FedVaultRecord {
   vaultRidHex: string;

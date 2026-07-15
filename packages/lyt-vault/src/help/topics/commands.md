@@ -112,6 +112,19 @@ See `lyt help mesh` and `lyt help federation`. In brief:
 
 - `lyt mesh init|join|list|info|subscribe|add-edge|validate|adopt|rebuild-registry`
 - `lyt mesh status|clone-all|rebuild-rollup`
+- `lyt mesh prune <name> --yes` — destructive. Remove an EMPTY / ORPHAN mesh (no
+  homed vaults) from the registry — the lingering empty rows a junction-safe pod
+  cleanup leaves behind. Registry-row-only: no files or directories are touched.
+  Refuses a mesh that still has homed vaults (naming them). Prunes ONLY a pure
+  cache-orphan mesh — one with NO durable ledger backing. A mesh still backed by
+  the ledger is refused (it would reappear on the next sync/rebuild): a bucket
+  mesh (`subscriptions/…`, `shared/…`) backed by a live subscription needs its
+  source removed first (unsubscribe), and an own mesh with a live federation
+  (`@FED_MESH`) entry needs a durable ledger retraction (a mesh tombstone —
+  deferred to a later 0.12.x lane). Pruning an orphan mesh clears its `doctor`
+  structural-invariant warn. Prune acts on your locally-synced view; run `lyt
+  sync` first for an authoritative decision (a peer's un-synced backing can
+  otherwise resurrect a pruned mesh).
 - `lyt federation init|list|rebuild` — Your Pod (`{handle}/lyt-pod`).
 
 ## Patterns, skills, automators

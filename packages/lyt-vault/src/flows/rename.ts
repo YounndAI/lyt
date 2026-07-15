@@ -30,6 +30,7 @@ import { validateVaultName } from "../util/identity.js";
 import { hexToUuid7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { renderVaultYon } from "../yon/vault.js";
+import { authorFedVaultMutation } from "../yon/federation-vault-ledger-author.js";
 
 // v1.B.3 Commit 3 — `lyt vault rename <old> <new> [--mesh <name>]`.
 //
@@ -119,6 +120,13 @@ export interface RenameVaultResult {
   vaultYonRewritten: boolean;
   meshYonUpdated: boolean;
   auditRecorded: boolean;
+  // Inc-2 R1 (release review) — was the rename authored into the @FED_VAULT manifest
+  // ledger? `true` when authorFedVaultMutation returned (including the non-federated
+  // no-op early-return); `false` when it THREW. A `false` is NOT self-healing: on a
+  // non-head machine the next sync's write-back REVERTS the rename to the foreign
+  // ledger winner (a silent lost-update). The CLI surfaces the `false` so the user
+  // knows to retry `lyt sync`.
+  fedVaultAuthored: boolean;
   // 0.9.4 (3d / §4) — read-back verdict. `verified` when the post-UPDATE
   // re-read confirms vaults.name === newName; `unverified` otherwise. The CLI
   // appends `unverifiedNote` to the success line on an unverified outcome
@@ -265,6 +273,30 @@ export async function renameVaultFlow(args: RenameVaultArgs): Promise<RenameVaul
       }
     }
 
+    // 5b. Inc-2 R1 (PROPER FIX) — author the rename into the @FED_VAULT manifest
+    // ledger on THIS writer's shard, seeded above the observed head, so a
+    // concurrent cross-machine rename competes in proper LWW (closes the
+    // non-head-machine starvation where the reconcile's origin-writer guard
+    // silently dropped a non-head rename). The registry rename is canonical, so an
+    // authoring failure is NON-FATAL to the rename — but it does NOT self-heal on
+    // the next sync: on a non-head machine a missing author means the next sync's
+    // write-back REVERTS this rename to the foreign ledger winner (a silent
+    // lost-update). So the degrade is made OBSERVABLE — logged here and surfaced as
+    // `fedVaultAuthored: false` so the CLI can tell the user to retry `lyt sync`.
+    let fedVaultAuthored = true;
+    try {
+      authorFedVaultMutation({
+        vaultRidHex: sourceVault.ridHex,
+        vaultName: args.newName,
+        homeMeshRidHex: sourceVault.homeMeshRidHex,
+      });
+    } catch (err) {
+      fedVaultAuthored = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console
+      console.error(`@FED_VAULT author skipped non-fatally on rename — ${msg}`);
+    }
+
     // 6. @AUDIT record. Goes to the renamed vault's own audit ledger.
     // audit_log.ts column is epoch ms (per v1.A.2 schema), not ISO; the
     // YON @AUDIT.ts string is derived from this number inside recordAudit
@@ -317,6 +349,7 @@ export async function renameVaultFlow(args: RenameVaultArgs): Promise<RenameVaul
       vaultYonRewritten: true,
       meshYonUpdated: meshUpdated,
       auditRecorded,
+      fedVaultAuthored,
       committed: committed.verdict,
       unverifiedNote: committed.unverifiedNote,
     };

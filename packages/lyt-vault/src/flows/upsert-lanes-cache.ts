@@ -59,6 +59,14 @@ export interface UpsertLanesCacheOpts {
   // the caller's lyt.db client and does NOT close it. When omitted, the
   // flow opens + closes its own.
   lytDb?: Client;
+  // Machine-local `last_built` stamp for the cache rows (Option A).
+  // The committed lanes.yon no longer carries last_built, so the cache
+  // (lanes.last_built is TEXT NOT NULL) is stamped at upsert time. When a
+  // parsed lane still carries last_built (a legacy file), that value wins.
+  // The rebuild flow threads its own build timestamp here so the cache
+  // reflects this rebuild; the sync post-pull caller omits it and the
+  // receiver stamps its own local build time. Defaults to now.
+  nowIso?: string;
 }
 
 export async function upsertLanesCache(
@@ -79,6 +87,7 @@ export async function upsertLanesCache(
 
   const content = readFileSync(lanesYonPath, "utf8");
   const doc = parseLanesFile(content);
+  const cacheStamp = opts.nowIso ?? new Date().toISOString();
 
   const callerSupplied = opts.lytDb !== undefined;
   const db = opts.lytDb ?? (await openLytDb(vaultPath));
@@ -99,7 +108,9 @@ export async function upsertLanesCache(
         name: lane.name,
         sourceKeywords: lane.sourceKeywords,
         memCount: lane.memCount,
-        lastBuilt: lane.lastBuilt,
+        // Content-only committed YON omits last_built; stamp the machine-
+        // local build time. A legacy file that still carries it wins.
+        lastBuilt: lane.lastBuilt ?? cacheStamp,
       });
       slugToRid.set(lane.ridSlug, rid);
       lanesUpserted += 1;

@@ -46,6 +46,7 @@ import {
   openRegistry,
   readIdentityCache,
   reconcilePublishFlow,
+  reconstructionExitCode,
   ReadlinePromptHandler,
   renderNextSteps,
   renderPodCard,
@@ -194,7 +195,11 @@ export function buildLytInitCommand(): Command {
           // eslint-disable-next-line no-console
           console.log(summaryLines.join("\n"));
           if (result.status !== "completed") {
-            process.exitCode = 1;
+            // G1 (a review finding) — when the halt was a reconstruction with DROPPED
+            // vaults, surface the classified exit code (11 state-drift · 12
+            // owner-misresolved/bug) to the shell; otherwise a generic 1.
+            const adoptPhase = result.phases.find((ph) => ph.name === "adopt-pod");
+            process.exitCode = adoptPhase?.data?.reconstructExitCode ?? 1;
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -378,6 +383,15 @@ export function buildLytInitCommand(): Command {
         if (result.branch === "adopt" && result.adoptError !== undefined) {
           process.exitCode = 1;
         }
+        // FIX G2 (A2-R3 MAJOR-1 caller completeness) — a SEMANTIC REFUSAL is NOT a
+        // completed adopt. adoptAndPrimeFlow failed closed early (no gh-walk, no
+        // scaffold); surface the distinct refusal exit code 13 (mirrors the wizard),
+        // so `lyt init --auto` over a refused manifest reports a refused/non-zero
+        // outcome rather than "completed". The refusal message was already rendered
+        // by emitHumanResult/emitJsonResult.
+        if (result.branch === "adopt" && result.adopt?.manifestRefused === true) {
+          process.exitCode = reconstructionExitCode({ drops: [], refused: true });
+        }
       } catch (err) {
         // Restore the cursor + clear the spinner line before the error path.
         spinner?.stop();
@@ -516,6 +530,16 @@ export function emitJsonResult(res: InitBootstrapResult): void {
       firstVaultCreated: a.firstVaultCreated,
       partialRestore: failures.length > 0,
       skipped: failures.map((f) => ({ vaultName: f.vaultName, reason: f.reason })),
+      // FIX G2 — surface the semantic-refusal signal so an automation consumer sees
+      // the refused outcome (paired with the distinct exit 13 the main flow set).
+      ...(a.manifestRefused === true
+        ? {
+            manifestRefused: true,
+            ...(a.manifestRefusedReason !== undefined
+              ? { manifestRefusedReason: a.manifestRefusedReason }
+              : {}),
+          }
+        : {}),
       // (reconciledVaultPaths is carried once, at the top level — the cross-branch
       // contract fresh/re-init also use; Phase-D a review finding dropped the nested copy.)
     };
@@ -622,6 +646,20 @@ function emitHumanResult(res: InitBootstrapResult): void {
     }
     const a = res.adopt;
     if (a === undefined) return;
+    // FIX G2 — a SEMANTIC REFUSAL (the cloned pod.yon parsed but is incoherent) is a
+    // FAILURE, not a completed adopt. adoptAndPrimeFlow already failed closed early
+    // (no gh-walk, no scaffold); render it as a refusal (the main flow set exit 13)
+    // and NEVER print the "Adopted pod … restored" success line.
+    if (a.manifestRefused === true) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `Refusing to adopt pod ${a.podHandle}/lyt-pod — the cloned pod.yon parsed but is ` +
+          `semantically INCOHERENT; no vault was cloned.\n` +
+          `  ${a.manifestRefusedReason ?? ""}`.trimEnd() +
+          `\n  • Inspect/repair the pod.yon (or re-clone the pod), then retry: lyt init --auto`,
+      );
+      return;
+    }
     // a review finding — honest "expected" denominator EXCLUDES benign skips; only real clone
     // failures count, so a clean adopt of a pod with tombstoned vaults never reads
     // as a partial restore (shared classifier with the --json emit).

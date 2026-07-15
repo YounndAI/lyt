@@ -345,7 +345,26 @@ export async function rebuildArcsFlow(args: RebuildArcsArgs): Promise<RebuildArc
   // flow in its own best-effort try/catch when it calls upsertArcsCache
   // directly without writing SoT. Mirrors v1.D.1 Commit 2 atomic
   // emission pattern.
-  const cacheRes = await upsertArcsCache(vaultPath);
+  // Thread this rebuild's build timestamp so the machine-local cache row
+  // (arcs.last_touched) reflects THIS rebuild. The committed arcs.yon is
+  // content-only (last_touched omitted — / Option A), so the cache is
+  // the only place the stamp lives.
+  //
+  // M1 (residual sweep): also thread the genuine PER-ARC last_touched
+  // (max(member mtime), computed above) keyed by rid slug. Without this, the
+  // upsert re-reads the stripped SoT, finds no per-arc last_touched, and stamps
+  // every arc with the same `nowIso` → the primer's recency sort collapses to
+  // alphabetical. The map keeps each cache row's real recency; the SoT stays
+  // content-only (no timestamp re-serialized → byte-stability preserved).
+  // Every arc pushed above carries a computed `lastTouched` (string); the
+  // `?? fallbackNow` only satisfies ArcRecord's optional type.
+  const lastTouchedBySlug = new Map<string, string>(
+    arcs.map((a) => [a.ridSlug, a.lastTouched ?? fallbackNow]),
+  );
+  const cacheRes = await upsertArcsCache(vaultPath, {
+    nowIso: fallbackNow,
+    lastTouchedBySlug,
+  });
 
   return {
     vaultName,

@@ -29,6 +29,10 @@ import { closeRegistry, openRegistry } from "../registry/client.js";
 import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getMeshByName, listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { detectMeshLinkDrift, reconcileOneMesh } from "./mesh-link-reconcile.js";
+import {
+  repairVaultOriginOwnerFlow,
+  type GitRunner as OriginGitRunner,
+} from "./repair-vault-origin-owner.js";
 import { isLytDbCorrupt } from "../registry/vault-db.js";
 import { rebuildVaultFlow } from "./rebuild-vault.js";
 import { findLegacyAgentFiles } from "../util/agent-file-paths.js";
@@ -96,7 +100,10 @@ export type RepairActionKind =
   | "reconcile-mesh-link"
   | "rebuild-vault-index"
   // Phase D (SC6) — relocate legacy-root agents.md / lyt-overview.md into `.lyt/`.
-  | "migrate-agent-files";
+  | "migrate-agent-files"
+  // B2a (Inc-2 Phase B slice 2) — re-point a vault `origin` mis-derived from the
+  // personal handle to its home mesh's org push_target (git remote set-url).
+  | "repoint-origin-owner";
 
 export type RepairFindingClass =
   | "broken-mesh-edge"
@@ -105,7 +112,10 @@ export type RepairFindingClass =
   | "mesh-link-drift"
   | "corrupt-vault-index"
   // Phase D (SC6) — a vault still carrying agent-priming files at the legacy root.
-  | "legacy-agent-files";
+  | "legacy-agent-files"
+  // B2a — a vault whose `origin` owner was mis-derived from the personal handle
+  // instead of its home mesh's org push_target.
+  | "mis-owned-origin";
 
 // One row per actionable issue discovered during the walk. `target_id`
 // is a stable per-finding identifier the caller can pass back as
@@ -149,6 +159,10 @@ export interface RepairArgs {
   // Injectable git executor (test seam — mirrors gh-discover's GhExecutor
   // pattern).
   gitExecutor?: GitExecutor | undefined;
+  // B2a (M1) — injectable git RUNNER for the origin-owner repoint step (a
+  // distinct seam from `gitExecutor`, which drives the git-HISTORY restore).
+  // Test-only; defaults to the real runGit.
+  originRunGit?: OriginGitRunner | undefined;
 }
 
 export interface RepairResult {
@@ -356,7 +370,15 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
     // action routes to the quarantine heal (rebuildVaultFlow →
     // healLytDbIfCorrupt + full content rebuild).
     for (const v of allVaults) {
-      if (v.status !== "active") continue;
+      // Probe every ON-DISK, non-tombstoned vault — a corrupt search index is
+      // corrupt regardless of the vault's REMOTE-access status. The prior
+      // `status !== 'active'` skip SILENTLY MISSED a corrupt vault whose status
+      // had drifted to `access_lost` / `disconnected` (an orthogonal remote-axis
+      // signal), so repair reported ZERO findings + exit 0 on a genuinely corrupt
+      // lyt.db (the F15/hardening pass routing gap, symmetric with doctor's index-health
+      // check). `existsSync` below excludes `missing`/gone dirs; `tombstoned`
+      // (deleted) is the only status legitimately out of scope.
+      if (v.status === "tombstoned") continue;
       if (!existsSync(v.path)) continue;
       let corrupt = false;
       try {
@@ -407,6 +429,37 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
           legacy_files: legacy.map((l) => l.filename),
         },
       });
+    }
+
+    // 1f. B2a (M1 release review) — mis-owned vault origins. A vault homed in an ORG
+    // mesh whose `origin` owner was mis-derived from the personal federation
+    // handle (pre-B2a) instead of the mesh's org push_target. Detect via a
+    // DRY-RUN scan of the standalone origin-owner repair flow (verify-before-
+    // rewrite lives inside it); translate each proposed repoint into a
+    // self-targeting finding so `lyt repair --apply` heals it (dry-run default is
+    // preserved — nothing is written in this detect pass).
+    {
+      const scan = await repairVaultOriginOwnerFlow({
+        registryDb: db,
+        mode: "dry-run",
+        ...(args.originRunGit !== undefined ? { runGit: args.originRunGit } : {}),
+      });
+      for (const r of scan.repointed) {
+        findings.push({
+          class: "mis-owned-origin",
+          meshName: "(none)",
+          targetId: `origin-owner:${r.vaultRidHex}`,
+          reason: "origin-owner-mis-derived-from-handle",
+          remediation: `Run: lyt repair --target origin-owner:${r.vaultRidHex} --apply (git remote set-url origin ${r.toUrl})`,
+          details: {
+            vault_rid: r.vaultRidHex,
+            vault_name: r.name,
+            from_url: r.fromUrl,
+            to_url: r.toUrl,
+            derived_owner: r.derivedOwner,
+          },
+        });
+      }
     }
 
     // 2. Filter by --target if given. Try rid-first then name.
@@ -478,7 +531,8 @@ function filterFindingsByTarget(findings: RepairFinding[], target: string): Repa
     (f) =>
       (f.class === "orphan-vault" ||
         f.class === "corrupt-vault-index" ||
-        f.class === "legacy-agent-files") &&
+        f.class === "legacy-agent-files" ||
+        f.class === "mis-owned-origin") &&
       f.details["vault_name"] === target,
   );
   return byVaultName;
@@ -503,6 +557,8 @@ async function applyOne(db: Client, f: RepairFinding, args: RepairArgs): Promise
         return await applyRebuildVaultIndex(f);
       case "legacy-agent-files":
         return await applyMigrateAgentFiles(f);
+      case "mis-owned-origin":
+        return await applyRepointOriginOwner(db, f, args);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -531,7 +587,49 @@ function kindForClass(c: RepairFindingClass): RepairActionKind {
       return "rebuild-vault-index";
     case "legacy-agent-files":
       return "migrate-agent-files";
+    case "mis-owned-origin":
+      return "repoint-origin-owner";
   }
+}
+
+// B2a (M1) apply leg — repoint a single vault's mis-owned `origin` to its home
+// mesh's org push_target. Delegates to the standalone repairVaultOriginOwnerFlow
+// scoped to THIS vault (onlyVaultRidHex), in apply mode. Verify-before-rewrite +
+// idempotence live inside that flow; here we just surface the per-vault outcome.
+async function applyRepointOriginOwner(
+  db: Client,
+  f: RepairFinding,
+  args: RepairArgs,
+): Promise<RepairAction> {
+  const vaultRidHex = String(f.details["vault_rid"] ?? "");
+  const res = await repairVaultOriginOwnerFlow({
+    registryDb: db,
+    mode: "apply",
+    onlyVaultRidHex: vaultRidHex,
+    ...(args.originRunGit !== undefined ? { runGit: args.originRunGit } : {}),
+  });
+  const done = res.repointed.find((r) => r.vaultRidHex === vaultRidHex);
+  if (done !== undefined && done.applied) {
+    return {
+      kind: "repoint-origin-owner",
+      meshName: f.meshName,
+      targetId: f.targetId,
+      status: "applied",
+      message: `repointed origin owner → ${done.toUrl}`,
+      details: { ...f.details, to_url: done.toUrl },
+    };
+  }
+  // Nothing repointed (already-correct, no-origin, custom-remote, etc.) between
+  // the detect scan and this apply — idempotent no-op.
+  const reason = res.skipped.find((s) => s.name === String(f.details["vault_name"] ?? ""));
+  return {
+    kind: "repoint-origin-owner",
+    meshName: f.meshName,
+    targetId: f.targetId,
+    status: "skipped",
+    message: `no repoint applied${reason !== undefined ? ` (${reason.reason})` : ""}`,
+    details: { ...f.details },
+  };
 }
 
 // hardening pass apply leg — route to the F15 quarantine heal. rebuildVaultFlow runs

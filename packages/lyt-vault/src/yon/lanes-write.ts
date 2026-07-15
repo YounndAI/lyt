@@ -23,13 +23,17 @@
 //
 // Determinism contract: identical input → byte-identical output. Required
 // for master-plan §v1.D.1a acceptance "deterministic membership across
-// invocations on same input". The `last_built` stamp is the ONLY field
-// allowed to drift across rebuilds — preserved via the caller-supplied
-// `lastBuiltAt` field rather than computed inline.
+// invocations on same input". Option A : the machine-local
+// `last_built` stamp is NOT serialized into the committed lanes.yon — it
+// lives only in the libSQL cache (see upsert-lanes-cache.ts). Removing it
+// from the on-disk YON makes the committed file content-only and byte-
+// stable across rebuilds, so it travels cross-machine without churning the
+// git tree (the A2b receive-blocker bug). Every field that IS serialized is
+// deterministic in the input.
 //
 // Lane shape:
 // @LANE rid=lane:<slug> | name="..." | source_keywords=["t1","t2"]
-//  | mem_count:int=N | last_built:ts=<iso>
+//  | mem_count:int=N
 // @LANE_MEMBER lane_rid=lane:<slug>
 //  | figment_rid="<vault-relative-posix-path>"
 //
@@ -70,9 +74,12 @@ export interface LaneRecord {
   sourceKeywords: readonly string[];
   // Number of figments that belong to this lane.
   memCount: number;
-  // ISO 8601 timestamp the lane was last rebuilt. Caller-controlled to
-  // preserve byte-stable round-trips in tests.
-  lastBuilt: string;
+  // ISO 8601 timestamp the lane was last rebuilt. Machine-local derived
+  // state (Option A): NOT serialized into the committed lanes.yon —
+  // it is stamped into the libSQL cache at upsert time. Optional here so
+  // the read path can carry it when parsing a legacy file that still has
+  // the field, and omit it for freshly-written content-only files.
+  lastBuilt?: string;
 }
 
 export interface LaneMemberRecord {
@@ -109,7 +116,10 @@ export function renderLanesYon(doc: LanesDoc): string {
     lines.push(`  | name="${escapeQuoted(lane.name)}"`);
     lines.push(`  | source_keywords=[${renderStringList(lane.sourceKeywords)}]`);
     lines.push(`  | mem_count:int=${lane.memCount}`);
-    lines.push(`  | last_built:ts=${lane.lastBuilt}`);
+    // last_built intentionally NOT serialized (Option A): it is
+    // machine-local derived state kept in the libSQL cache, not the
+    // committed content SoT. Emitting it here would reintroduce wall-clock
+    // churn on every rebuild.
     lines.push(``);
   }
 

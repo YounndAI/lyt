@@ -32,8 +32,9 @@ import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { listFederationStates } from "../registry/federation-state.js";
-import { listMeshes } from "../registry/meshes-repo.js";
+import { listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { getVaultByName, getVaultByRid, listVaults, type VaultRow } from "../registry/repo.js";
+import { isForeignBucketMeshName } from "../util/bucket-mesh.js";
 import { getFederationRoot, slugifyHandle } from "../util/federation-paths.js";
 import {
   getInitFailureLogPath,
@@ -1174,6 +1175,28 @@ export async function checkFederationRepoState(db: Client): Promise<CheckResult>
   };
 }
 
+// B3a (Inc-2 Phase B slice 2) — is a mesh a FOREIGN (subscribed/shared) mesh
+// that legitimately has NO main_vault_rid? A foreign mesh is NOT the user's own
+// mesh, so the "mesh has no main_vault_rid (structural invariant)" warn — which
+// exists to catch the OWN-mesh adopt-link drift — must be SUPPRESSED for it.
+//
+// Discriminator: bucket-mesh NAME membership — `subscriptions/{owner}` /
+// `shared/{owner}`. This is the structural signal (matches how the bucket meshes
+// are minted, byte-for-byte via bucketMeshName) and covers EVERY legitimately-
+// foreign mesh — a foreign vault ALWAYS homes into an owner bucket. It decides
+// even with zero homed vault rows, so it resolves the "own-vs-foreign when a mesh
+// has no vaults yet" fork. Fail-closed: anything not a foreign bucket is OWN and
+// keeps warning.
+//
+// m2 (release review): the earlier `all-homed-vaults-are-foreign` source-only branch
+// was DROPPED — it could suppress the warn for a NON-bucket OWN mesh whose vaults
+// all happen to read foreign (e.g. a subscribed vault `move`d into an empty own
+// mesh) and it counted tombstoned rows. isForeignBucketMeshName already covers
+// every real foreign mesh, so the branch only added a hole.
+function meshIsForeign(mesh: MeshRow): boolean {
+  return isForeignBucketMeshName(mesh.name);
+}
+
 // v1.B.5 — per-mesh `parseMeshYon` probe. Iterates every registered mesh;
 // resolves its main vault path; attempts to read + parse `.lyt/mesh.yon`.
 //
@@ -1207,6 +1230,19 @@ export async function checkMeshYonParses(db: Client): Promise<CheckResult[]> {
     const id = `mesh.yon.parses:${m.name}`;
     const label = `mesh.yon parses (${m.name})`;
     if (m.mainVaultRid === null) {
+      // B3a — a FOREIGN (subscribed/shared) mesh correctly has no main vault;
+      // suppress the OWN-mesh structural-invariant warn (emit info, which the
+      // summary counts as neither pass nor warn). Only OWN meshes keep warning.
+      if (meshIsForeign(m)) {
+        out.push({
+          id,
+          group: "mesh",
+          label,
+          status: "info",
+          message: `mesh '${m.name}' is a foreign (subscribed/shared) mesh — no main_vault_rid expected`,
+        });
+        continue;
+      }
       out.push({
         id,
         group: "mesh",
@@ -1457,6 +1493,20 @@ export async function checkMarkersRender(
     const id = `markers.render:${m.name}`;
     const label = `★ marker (${m.name}/main)`;
     if (m.mainVaultRid === null) {
+      // B3a — a FOREIGN mesh has no main vault by design, so the ★ marker is
+      // correctly absent; suppress the OWN-mesh warn (emit info). The `★`
+      // marker is an OWN-mesh affordance — a subscribed/shared bucket never
+      // renders a `{mesh}/main` star, so nothing is broken here.
+      if (meshIsForeign(m)) {
+        out.push({
+          id,
+          group: "mesh",
+          label,
+          status: "info",
+          message: `mesh '${m.name}' is a foreign (subscribed/shared) mesh — no ★ main marker expected`,
+        });
+        continue;
+      }
       out.push({
         id,
         group: "mesh",
@@ -1516,7 +1566,16 @@ async function checkVaultIndexHealth(
   opts: { sampleLimit: number; full: boolean },
 ): Promise<CheckResult[]> {
   const out: CheckResult[] = [];
-  const active = (await listVaults(db)).filter((v) => v.status === "active" && existsSync(v.path));
+  // Probe every ON-DISK, non-tombstoned vault — a corrupt search index is
+  // corrupt regardless of the vault's REMOTE-access status. The prior
+  // `status === 'active'` filter SILENTLY SKIPPED a corrupt vault whose status
+  // had drifted to `access_lost` / `disconnected` (an orthogonal remote-axis
+  // signal), so doctor exited 0 on a genuinely corrupt lyt.db (the F15/hardening pass
+  // routing gap). `existsSync(v.path)` already excludes `missing`/gone dirs;
+  // `tombstoned` (deleted) is the only status legitimately out of scope.
+  const active = (await listVaults(db)).filter(
+    (v) => v.status !== "tombstoned" && existsSync(v.path),
+  );
   const subjects = opts.full ? active : active.slice(0, opts.sampleLimit);
   const sampleLabel = opts.full
     ? `all ${active.length}`

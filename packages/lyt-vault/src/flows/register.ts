@@ -20,8 +20,8 @@ import { join, resolve } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { addKnownPath } from "../registry/known-paths.js";
-import { getMeshByRid } from "../registry/meshes-repo.js";
-import { upsertVault, type VaultStatus } from "../registry/repo.js";
+import { getMeshByName, getMeshByRid } from "../registry/meshes-repo.js";
+import { upsertVault, type VaultSource, type VaultStatus } from "../registry/repo.js";
 import { readGitRemoteOriginUrl } from "../util/git.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
 import { hexToUuid7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
@@ -41,6 +41,24 @@ export interface RegisterVaultArgs {
   // pass. Set true ONLY on the genuine restore axis. NOTE: a no-op today —
   // upsertVault (:267) `void`s the flag; pre-wired for the P5 same-name-arm gate.
   trustedReconstruction?: boolean | undefined;
+  // (Phase-0 A2b, CRIT-1) — registry-side home-mesh REBIND. When set, the
+  // vault is homed into THIS local mesh rid instead of the one its (untrusted,
+  // publisher-authored) `.lyt/vault.yon` @VAULT_HOME_MESH declares. The
+  // preserve-rid subscribe/adopt clone keeps the publisher's committed vault.yon
+  // BYTE-UNCHANGED (its @VAULT_HOME_MESH is the PUBLISHER's view of its own
+  // mesh, whose rid is NOT registered on the subscriber's machine), while the
+  // subscriber's registry legitimately files the vault under the LOCAL target
+  // mesh (the `--to-mesh` target). The FK guard below then checks THIS rid —
+  // which exists locally — instead of the publisher's foreign mesh rid, so
+  // `lyt mesh adopt` no longer hard-breaks with VaultHomeMeshNotRegisteredError.
+  homeMeshRidOverride?: Uint8Array | undefined;
+  // Inc-2 Phase B / own-vs-clone provenance for the FRESH-INSERT arm.
+  // Omitted → fail-closed 'own' (init / adopt / graduate-a-template clone /
+  // `lyt vault join`). The foreign clone-on-subscribe / mesh-adopt member paths
+  // pass 'subscribed' so the received vault is positively marked a clone. On a
+  // re-register (ON CONFLICT) upsertVault PRESERVES the existing provenance —
+  // this only sets it on the first INSERT.
+  source?: VaultSource | undefined;
 }
 
 export interface RegisteredVault {
@@ -106,20 +124,61 @@ export async function registerVaultFromYon(
   // exists; callers (flows/init.ts auto-personal branch, flows/clone.ts
   // --to-mesh, flows/move.ts) ensure the mesh is registered BEFORE this
   // call. Absence (pre-v1.B.3 vault.yons; vaults bound to no mesh) → null.
-  const homeMeshBytes = parsed.homeMesh ? hexToUuid7Bytes(parsed.homeMesh.meshRid) : null;
+  const parsedHomeMeshBytes = parsed.homeMesh ? hexToUuid7Bytes(parsed.homeMesh.meshRid) : null;
 
-  // guard the home-mesh FK BEFORE the insert. Without this,
-  // clone/join on a vault with a foreign (unregistered) home mesh surfaces a
-  // raw SQLITE_CONSTRAINT_FOREIGNKEY to the user.
-  if (homeMeshBytes !== null) {
-    const homeMeshRow = await getMeshByRid(db, homeMeshBytes);
-    if (homeMeshRow === null) {
+  // Resolve the home-mesh rid to file under, guarding the vaults.home_mesh_rid FK
+  // BEFORE the insert. Without this guard, clone/join on a vault with a foreign
+  // (unregistered) home mesh surfaces a raw SQLITE_CONSTRAINT_FOREIGNKEY.
+  //
+  // Precedence : homeMeshRidOverride ?? (rid-match ?? name-fallback).
+  let homeMeshBytes: Uint8Array | null;
+  if (args.homeMeshRidOverride !== undefined) {
+    // (CRIT-1) — a caller-supplied override (the LOCAL `--to-mesh` target,
+    // meshRow.rid) wins over the publisher's declared @VAULT_HOME_MESH rid. The
+    // preserve-rid subscribe/adopt clone passes it so the vault is filed under a
+    // mesh that exists locally, while the committed vault.yon stays byte-unchanged.
+    // The caller GUARANTEES this local mesh exists; guard it directly (no
+    // name-fallback — the caller already resolved the local target).
+    homeMeshBytes = args.homeMeshRidOverride;
+    if ((await getMeshByRid(db, homeMeshBytes)) === null) {
       throw new VaultHomeMeshNotRegisteredError(
         parsed.name,
-        parsed.homeMesh!.meshName,
+        parsed.homeMesh?.meshName ?? "<local-target-mesh>",
         uuid7BytesToHex(homeMeshBytes),
       );
     }
+  } else if (parsedHomeMeshBytes !== null) {
+    // (R1) — from-disk re-registration (`lyt registry rebuild`,
+    // recover-pod, a cold `lyt vault join`) re-registers a vault from its
+    // FROZEN, committed `.lyt/vault.yon` with NO override. A preserve-rid
+    // subscribe/adopt clone kept the PUBLISHER's committed @VAULT_HOME_MESH
+    // (byte-unchanged on ingest), whose mesh rid is the publisher's — NOT
+    // registered on this machine. The rid lookup misses, and (since rebuild has
+    // already deleteAllVaults'd) the member would be DROPPED. FALL BACK to
+    // resolving the home mesh by NAME: if a local same-named mesh exists, home
+    // into THAT local mesh's rid. This resolves to an ALREADY-LOCAL mesh
+    // (trusted reconstruction from the user's own disk) and does NOT weaken the
+    // subscribe/adopt-time identity guard (that guard lives in clone.ts and
+    // still runs on the ingest path). Only if NEITHER the rid NOR the name
+    // resolves locally do we throw.
+    if ((await getMeshByRid(db, parsedHomeMeshBytes)) !== null) {
+      homeMeshBytes = parsedHomeMeshBytes;
+    } else {
+      const byName = parsed.homeMesh
+        ? await getMeshByName(db, parsed.homeMesh.meshName)
+        : null;
+      if (byName !== null) {
+        homeMeshBytes = byName.rid;
+      } else {
+        throw new VaultHomeMeshNotRegisteredError(
+          parsed.name,
+          parsed.homeMesh?.meshName ?? "<local-target-mesh>",
+          uuid7BytesToHex(parsedHomeMeshBytes),
+        );
+      }
+    }
+  } else {
+    homeMeshBytes = null;
   }
 
   await upsertVault(
@@ -133,6 +192,7 @@ export async function registerVaultFromYon(
       homeMeshRid: homeMeshBytes,
       tierHint: parsed.tierHint,
       status: args.status ?? "active",
+      ...(args.source !== undefined ? { source: args.source } : {}),
       gitUrl,
       createdAt: parsed.createdAt,
     },

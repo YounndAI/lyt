@@ -91,7 +91,9 @@ export function buildMeshAdoptSubcommand(): Command {
     });
 }
 
-function toJsonShape(r: AdoptClusterResult): Record<string, unknown> {
+// Exported for the command/render unit test (release review #1/#3). Pure
+// projection — no side effects.
+export function toJsonShape(r: AdoptClusterResult): Record<string, unknown> {
   return {
     cluster_name: r.clusterName,
     owner: r.owner,
@@ -106,12 +108,33 @@ function toJsonShape(r: AdoptClusterResult): Record<string, unknown> {
       vault_rid: `vault:${m.vaultRidHex}`,
       vault_rid_hex: m.vaultRidHex,
     })),
+    // Release review fix #1 — surface the B′ skipped-member arrays structurally so
+    // a `--json` consumer can read who was refused (unsafe name, security) vs.
+    // failed transiently (retryable), never only in the human prose. JSON is
+    // serialization-safe, so no terminal-sanitization is needed here (that guard
+    // is only for the human terminal renderer in emitHuman).
+    members_refused: r.membersRefused.map((m) => ({ name: m.name, reason: m.reason })),
+    members_failed: r.membersFailed.map((m) => ({ name: m.name, reason: m.reason })),
     pushed: r.pushed,
     duration_ms: r.durationMs,
   };
 }
 
-function emitHuman(r: AdoptClusterResult): void {
+// Release review fix #1 (TERMINAL-SAFE) — a skipped member's `name` (and its
+// `reason`, which may echo the name) is ATTACKER-CONTROLLED: it originates from
+// a foreign cluster's mesh.yon-declared member name, which a hostile publisher
+// can craft. Before it is written to the HUMAN terminal, strip every C0 control
+// char + DEL (`\x00-\x1F\x7F`) — that range covers ESC (0x1B), CR/LF, BEL, and
+// the other bytes a crafted name could use to inject ANSI escape sequences or
+// otherwise corrupt the terminal. Removed bytes are replaced with U+FFFD so the
+// redaction is visible rather than silently collapsing distinct names. (JSON
+// output does not need this — serialization already neutralizes control chars.)
+export function sanitizeForTerminal(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1F\x7F]/g, "�");
+}
+
+export function emitHuman(r: AdoptClusterResult): void {
   // eslint-disable-next-line no-console
   console.log(`Adopted cluster '${r.clusterName}' (owner=${r.owner})`);
   // eslint-disable-next-line no-console
@@ -126,6 +149,23 @@ function emitHuman(r: AdoptClusterResult): void {
     // eslint-disable-next-line no-console
     console.log(`    - ${m.vaultName} (vault:${m.vaultRidHex})`);
   }
+  // Release review fix #1 — make the B′ skipped-member report LOUD: a summary line
+  // + per-member `- <name> (<reason>)` lines mirroring the adopted loop, with
+  // attacker-controlled name/reason sanitized for the terminal.
+  if (r.membersRefused.length > 0 || r.membersFailed.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `  skipped:    ${r.membersRefused.length} refused · ${r.membersFailed.length} failed`,
+    );
+    for (const m of r.membersRefused) {
+      // eslint-disable-next-line no-console
+      console.log(`    - ${sanitizeForTerminal(m.name)} (refused: ${sanitizeForTerminal(m.reason)})`);
+    }
+    for (const m of r.membersFailed) {
+      // eslint-disable-next-line no-console
+      console.log(`    - ${sanitizeForTerminal(m.name)} (failed: ${sanitizeForTerminal(m.reason)})`);
+    }
+  }
 }
 
 function mapErrorToExitCode(err: unknown): number | null {
@@ -136,7 +176,7 @@ function mapErrorToExitCode(err: unknown): number | null {
   return null;
 }
 
-function errorToJsonBody(err: unknown): Record<string, unknown> {
+export function errorToJsonBody(err: unknown): Record<string, unknown> {
   if (err instanceof DiscoverGhUnavailableError) {
     return { error: err.errorCode, message: err.message };
   }
@@ -152,7 +192,15 @@ function errorToJsonBody(err: unknown): Record<string, unknown> {
     };
   }
   if (err instanceof ClusterAlreadyRegisteredError) {
-    return { error: err.errorCode, cluster_name: err.clusterName, message: err.message };
+    // Release review fix #3 — expose the still-missing members structurally so a
+    // `--json` consumer can read them programmatically, not only parse them out
+    // of the message prose.
+    return {
+      error: err.errorCode,
+      cluster_name: err.clusterName,
+      missing_members: err.missingMembers,
+      message: err.message,
+    };
   }
   return { error: "unknown", message: err instanceof Error ? err.message : String(err) };
 }

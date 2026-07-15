@@ -26,7 +26,7 @@
 
 `@younndai/lyt` is the **meta package and unified CLI** for [Lyt™](https://github.com/YounndAI/lyt) — *Link Your Think*: federated markdown vaults, the storage architecture for AI-native knowledge work. Lyt turns a folder of markdown notes into a Git-native vault that can join a **mesh** of other vaults across people and organizations — **mint vaults you own, weave meshes you share, forge Your Pod.**
 
-Lyt is **AI-first by design**: an AI agent is a first-class operator of your knowledge, not a bolted-on feature. Every vault and mesh speaks [YON](https://yon.younndai.com) — structured records any agent reads directly — and the same operation set is exposed to humans via the CLI and to agents via harness skills and an MCP server. Lyt is the reference implementation of the AI-first standard we're defining.
+Lyt is **AI-first by design**: an AI agent is a first-class operator of your knowledge, not a bolted-on feature. Every vault and mesh speaks [YON](https://yon.younndai.com) — structured records any agent reads directly — and the same operation set is exposed to humans via the CLI and to agents via harness skills and an MCP server. Lyt is the reference implementation of an AI-first approach we're working out in the open.
 
 You keep the markdown. Lyt is the thin federation layer over it: each vault is one Git repo, the mesh is the graph of declared edges between vaults, and a small libSQL index sits beside the markdown for fast reads. It never asks you to move your notes into a database or a proprietary format, works with any markdown editor (Obsidian, VS Code, your terminal), and never phones home.
 

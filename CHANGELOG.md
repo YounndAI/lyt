@@ -7,6 +7,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.12.1] — 2026-07-14
+
+Reliability follow-up for multi-machine and team use. This release preserves pod ownership during reconstruction, gives received vaults a clean home, and adds stricter identity checks before remote state is adopted.
+
+### Added
+- **`lyt vault accept-share`.** Accept a GitHub vault invitation, place the received vault under `shared/{owner}`, and index it immediately. Read-write receives retain the same junction-safety boundary as the rest of the pod.
+- **`lyt mesh prune`.** Remove empty or orphan mesh records only when the durable ledger and registered foreign-vault state prove that a rebuild will not recreate them; otherwise the command refuses and explains why.
+
+### Fixed
+- **Ownership-preserving reconstruction.** `lyt init` and `recover-pod` restore owned meshes and vaults from the manifest instead of reclassifying them as joined state, and clone owned vaults from the recorded push target. Ambiguous ownership fails closed and write-back cannot let a foreign winner overwrite the owner record.
+- **Received-vault routing.** Shared and subscribed vaults derive their owner bucket from the origin coordinate, reject masquerading origins, and reuse one indexing path after receive.
+- **Manifest identity safety.** Remote pod manifests are semantically validated before adoption, `push_target` handles are shape-checked, and the pod repository itself cannot be shared, subscribed, or accepted as a vault. A refused manifest now stops every init/adopt caller cleanly and restores a rename-aside local pod.
+- **Clock-skew visibility.** Implausibly future-dated federation records are surfaced for diagnosis while normal last-writer-wins convergence remains available.
+
+---
+
+## [0.12.0] — 2026-07-13
+
+Reliability for multi-machine and team use — the integrity and receive floor. How you write and search is unchanged; this makes a pod converge correctly across machines and receive shared/subscribed vaults cleanly, ahead of open testing.
+
+### Added
+- **Cross-machine convergence.** A vault's federation state is now a per-writer, time-ordered (HLC) record set that converges by last-writer-wins. Renames and moves author their own records, so edits made on different machines reconcile deterministically instead of flip-flopping — and the git-tracked state, not a local cache, is the source of truth.
+- **Receive & scoped sync.** Clean receive of shared and subscribed vaults into their own homes, `lyt sync` scoped to a single vault, and a reparse-safe `leave` that never follows a junction out of your pod.
+- **Actionable connect.** Connecting a local pod to an existing remote renames your local home aside, adopts the remote fresh, and funnels your notes back in through the import flow — fail-closed, nothing deleted.
+- **Clear conflict & access handling.** A concurrent-write conflict offers plain keep-mine / keep-theirs / keep-both; a revoked subscription says "access removed" in plain language and recovers automatically when access returns.
+
+### Fixed
+- **Crash containment on unsupported machines.** A native embeddings crash is now contained by a one-time out-of-process capability probe — search falls back to lexical cleanly instead of taking the process down.
+- **Data-safety hardening.** Corrupt-database detection in `lyt doctor`/`repair`, migration replay safety, and a guard against clobbering a vault with no resolvable home.
+
+---
 ## [0.11.0] — 2026-07-07
 
 Reliability-floor release — a safe-write spine plus a deliberately smaller, unopinionated surface. How search and federation behave is unchanged; this hardens the write path and trims Lyt down to focused primitives.

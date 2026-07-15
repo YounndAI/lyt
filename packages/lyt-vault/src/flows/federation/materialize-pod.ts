@@ -17,8 +17,10 @@
 import type { Client } from "@libsql/client";
 
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
+import { listMeshes } from "../../registry/meshes-repo.js";
 import { listVaults } from "../../registry/repo.js";
-import { getFederationRepoDir } from "../../util/federation-paths.js";
+import { deriveVaultRepoOwner, getFederationRepoDir } from "../../util/federation-paths.js";
+import { ridsEqual } from "../../util/uuid7.js";
 import type { FederationGhClient } from "../../util/gh-federation.js";
 import {
   commitPodRepo,
@@ -84,10 +86,17 @@ export async function materializePodLocal(
   if (state === null) return { ...empty, reason: "no-federation-state" };
 
   const vaults = (await listVaults(db)).filter((v) => v.status !== "tombstoned");
+  // B2a — resolve each vault's repo OWNER from its home mesh. A vault homed in
+  // an ORG mesh publishes under the org push_target, not the personal handle.
+  const meshes = await listMeshes(db);
   const vaultResults: MaterializeVaultResult[] = [];
   for (const v of vaults) {
+    const homeMesh =
+      v.homeMeshRid === null ? null : (meshes.find((m) => ridsEqual(m.rid, v.homeMeshRid)) ?? null);
+    const repoOwner = deriveVaultRepoOwner(homeMesh, handle);
     const r = await materializeVaultPublishable(v, {
       handle,
+      repoOwner,
       createRemoteIfMissing: opts.createRemoteIfMissing ?? false,
       push: opts.push ?? false,
       setRemote: opts.setRemote ?? true,

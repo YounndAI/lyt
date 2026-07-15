@@ -32,7 +32,7 @@
 // lanes-read's tolerance of unknown record types.
 
 import type { ArcMemberRecord, ArcRecord, ArcsDoc } from "./arcs-write.js";
-import { unescapeQuoted } from "./_helpers.js";
+import { isSafeVaultRelativeFigmentPath, unescapeQuoted } from "./_helpers.js";
 
 export function parseArcsFile(content: string): ArcsDoc {
   const vaultName = parseVaultNameFromDoc(content) ?? "";
@@ -102,16 +102,22 @@ function parseArcBlock(block: string): ArcRecord | null {
   const ridSlug = ridMatch[1]!;
   const name = readQuotedField(block, "name");
   const category = readQuotedField(block, "category");
+  // last_touched is machine-local derived state and is NOT serialized into
+  // committed arcs.yon (Option A). Tolerate its absence: a freshly
+  // received file (before this machine's first local rebuild) has no
+  // last_touched. A legacy file that still carries it is honoured. Only the
+  // content fields are mandatory.
   const lastTouched = readTimestampField(block, "last_touched");
-  if (name === null || category === null || lastTouched === null) {
+  if (name === null || category === null) {
     return null;
   }
-  return {
+  const record: ArcRecord = {
     ridSlug,
     name,
     category,
-    lastTouched,
   };
+  if (lastTouched !== null) record.lastTouched = lastTouched;
+  return record;
 }
 
 function parseArcMemberBlock(block: string): ArcMemberRecord | null {
@@ -120,6 +126,9 @@ function parseArcMemberBlock(block: string): ArcMemberRecord | null {
   const figmentPath = readQuotedField(block, "figment_rid");
   const position = readIntField(block, "position");
   if (figmentPath === null || position === null) return null;
+  // CRIT-B parse guard: drop a member whose figment_rid escapes the vault
+  // (absolute or `..`-bearing) before it can enter the cache / reach the FS sink.
+  if (!isSafeVaultRelativeFigmentPath(figmentPath)) return null;
   return {
     arcRidSlug: arcRidMatch[1]!,
     figmentPath,

@@ -21,6 +21,32 @@ import { canonicalizeVaultPath } from "../util/paths.js";
 
 export type VaultStatus = "active" | "disconnected" | "missing" | "tombstoned" | "access_lost";
 
+// Inc-2 Phase B / →foreign-vault PROVENANCE = the ENTRY RELATIONSHIP.
+//   own        = the user's own vault (init/adopt/graduate-a-template clone)
+//   shared     = a DIFFERENT owner's PRIVATE vault GRANTED to the handler
+//                (affiliation; renders RO or RW) — homed into `shared/{owner}`
+//   subscribed = a DIFFERENT owner's PUBLIC vault the handler self-subscribed to
+//                (no grant; always RO) — homed into `subscriptions/{owner}`
+// Orthogonal to `status` AND to `writable` (writability is DERIVED from the gh
+// push verdict, never stored). The registry default is fail-closed `own`
+// (migration 008) — a vault is `shared`/`subscribed` ONLY when a foreign-inbound
+// path positively marks it. See migrations.ts migration008.
+export type VaultSource = "own" | "shared" | "subscribed";
+
+// the two FOREIGN provenances (everything that is not the user's own).
+// A helper the receive paths + the lazy repair use to reason about foreignness
+// without repeating the set. `own` is intentionally excluded.
+export type ForeignVaultSource = "shared" | "subscribed";
+
+// the fail-closed reader normalization: only the two exact foreign tokens
+// resolve to their foreign value; ANY other value (null / absent / illegal /
+// legacy) degrades to `own`. Centralized so the row reader and any future reader
+// share ONE rule (a wrong own-vs-foreign signal is L0-adjacent — an ambiguous
+// row must never read as a deletable foreign clone).
+export function normalizeVaultSource(raw: unknown): VaultSource {
+  return raw === "shared" ? "shared" : raw === "subscribed" ? "subscribed" : "own";
+}
+
 // v1.A.1b — vaults.rid + memscope_rid + parent_vault + home_mesh_rid are
 // all BLOB UUIDv7 in libSQL. Typed surface here exposes BOTH the raw 16-byte
 // Uint8Array (for SQL args + byte equality via ridsEqual) AND a `*Hex`
@@ -43,6 +69,8 @@ export interface VaultRow {
   homeMeshRidHex: string | null;
   tierHint: string | null;
   status: VaultStatus;
+  // Inc-2 Phase B / own-vs-clone provenance (fail-closed 'own').
+  source: VaultSource;
   gitUrl: string | null;
   createdAt: string | null;
   registeredAt: string;
@@ -76,6 +104,10 @@ export interface InsertVaultArgs {
   homeMeshRid?: Uint8Array | null;
   tierHint?: string | null;
   status?: VaultStatus;
+  // Inc-2 Phase B / own-vs-clone provenance. Omitted → fail-closed 'own'
+  // (an insert without an explicit source is an OWN vault; only the foreign
+  // clone/subscribe paths pass 'subscribed').
+  source?: VaultSource;
   gitUrl?: string | null;
   createdAt?: string | null;
 }
@@ -175,6 +207,14 @@ function rowToVault(row: Record<string, unknown>): VaultRow {
     homeMeshRidHex: homeMesh ? uuid7BytesToHex(homeMesh) : null,
     tierHint: row["tier_hint"] == null ? null : String(row["tier_hint"]),
     status: String(row["status"]) as VaultStatus,
+    // Inc-2 Phase B / →BACK-COMPAT, FAIL-CLOSED READER. A null/absent
+    // `source` (a pre-migration-008 shape, or a NULL that somehow slipped in)
+    // resolves to 'own' — never a foreign value. A downstream orphan-clone-dir
+    // sweep keys on `source !== 'own'`, so defaulting the unknown case to 'own'
+    // guarantees an ambiguous row is treated as the user's own data (never
+    // deletable as a "confirmed clone"). Only the two exact foreign tokens
+    // ('shared','subscribed') read through; any other value degrades to 'own'.
+    source: normalizeVaultSource(row["source"]),
     gitUrl: row["git_url"] == null ? null : String(row["git_url"]),
     createdAt: row["created_at"] == null ? null : String(row["created_at"]),
     registeredAt: String(row["registered_at"]),
@@ -211,8 +251,8 @@ export async function insertVault(db: Client, args: InsertVaultArgs): Promise<vo
   }
   await db.execute({
     sql: `INSERT INTO vaults
- (rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint, status, git_url, created_at, registered_at, last_verified_at, verify_fail_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)`,
+ (rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint, status, source, git_url, created_at, registered_at, last_verified_at, verify_fail_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)`,
     args: [
       args.rid,
       args.name,
@@ -222,6 +262,7 @@ export async function insertVault(db: Client, args: InsertVaultArgs): Promise<vo
       args.homeMeshRid ?? null,
       args.tierHint ?? null,
       args.status ?? "active",
+      args.source ?? "own",
       args.gitUrl ?? null,
       args.createdAt ?? null,
       new Date().toISOString(),
@@ -274,10 +315,19 @@ export async function upsertVault(
     void opts.trustedReconstruction;
   }
 
+  // Inc-2 Phase B / →`source` is set on the fresh INSERT arm ONLY and
+  // is deliberately ABSENT from the ON CONFLICT DO UPDATE SET clause: a
+  // re-register NEVER flips a row's provenance (own↔foreign) NOR downgrades it
+  // (shared→subscribed). This is the fail-closed choice against the L0-adjacent
+  // delete hazard — an upsert of an own vault (which passes no source → 'own')
+  // can never silently mark an existing foreign row 'own' (nor vice-versa), and
+  // a foreign re-receive can never demote a 'shared' row. A deliberate
+  // provenance change goes through the explicit setVaultSource /
+  // markVaultSourcePreserving helpers, never a bare upsert.
   await db.execute({
     sql: `INSERT INTO vaults
- (rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint, status, git_url, created_at, registered_at, last_verified_at, verify_fail_count)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
+ (rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint, status, source, git_url, created_at, registered_at, last_verified_at, verify_fail_count)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
  ON CONFLICT(rid) DO UPDATE SET
  name=excluded.name,
  path=excluded.path,
@@ -297,11 +347,58 @@ export async function upsertVault(
       args.homeMeshRid ?? null,
       args.tierHint ?? null,
       args.status ?? "active",
+      args.source ?? "own",
       args.gitUrl ?? null,
       args.createdAt ?? null,
       new Date().toISOString(),
     ],
   });
+}
+
+// Inc-2 Phase B / the EXPLICIT provenance mutation surface. The only way
+// to change a vault's foreign-vs-own marker after registration (an upsert never
+// flips it — see upsertVault). Used by the lazy repair + the deliberate
+// graduate/upgrade movers. UNGUARDED: it writes exactly what it is given (the
+// caller owns the policy). For the receive-path convergence case use
+// markVaultSourcePreserving, which enforces the monotonic rule.
+export async function setVaultSource(
+  db: Client,
+  rid: Uint8Array,
+  source: VaultSource,
+): Promise<void> {
+  await db.execute({
+    sql: "UPDATE vaults SET source = ? WHERE rid = ?",
+    args: [source, rid],
+  });
+}
+
+// the PRESERVE-AWARE foreign mark used by the receive-path converge
+// branch. Applies the ratified monotonic rule so a re-register/re-receive can
+// NEVER silently corrupt provenance:
+//   - own → foreign      : ALLOWED (first positive foreign mark of a row that
+//                          somehow lacked it; the birth-INSERT normally sets it).
+//   - shared → subscribed: REFUSED (a downgrade — a granted PRIVATE vault must
+//                          not be demoted to a self-subscribe by a passive
+//                          re-receive). Keeps 'shared'.
+//   - subscribed → shared: NOT wired here (the relationship-UPGRADE mover is a
+//                          separate slice); left 'subscribed'. This helper only
+//                          ever RAISES to 'shared' from 'own'.
+//   - X → X              : no-op.
+// The subscribed→shared upgrade is deliberately OUT OF SCOPE — only setVaultSource
+// (the explicit mover) may perform it. Returns the source the row now holds.
+export async function markVaultSourcePreserving(
+  db: Client,
+  rid: Uint8Array,
+  incoming: ForeignVaultSource,
+): Promise<VaultSource> {
+  const existing = await getVaultByRid(db, rid);
+  const current: VaultSource = existing?.source ?? "own";
+  // Only a row that is still 'own' may be raised to a foreign value here; any
+  // existing foreign value is PRESERVED (no downgrade shared→subscribed, and the
+  // subscribed→shared upgrade is not wired on this passive path).
+  if (current !== "own") return current;
+  await setVaultSource(db, rid, incoming);
+  return incoming;
 }
 
 // 0.9.4 (G — the single resolver chokepoint). `getVaultByName` is the
@@ -425,6 +522,23 @@ export async function setVaultHomeMesh(
     sql: "UPDATE vaults SET home_mesh_rid = ? WHERE rid = ?",
     args: [meshRid ?? null, vaultRid],
   });
+}
+
+// Inc-2 Phase C #6 (release review R2) — every ACTIVE vault whose `home_mesh_rid`
+// pointer targets `meshRid`. The `vaults.home_mesh_rid → meshes(rid)` FK is
+// `ON DELETE SET NULL`, so deleting a mesh silently un-homes any vault pointing
+// at it via this pointer (independent of a mesh_vaults `home` row). `lyt mesh
+// prune` uses this to refuse when a live vault would be un-homed. Scoped to
+// `status = 'active'` — a disconnected/missing/tombstoned row is not a live home.
+export async function listActiveVaultsByHomeMesh(
+  db: Client,
+  meshRid: Uint8Array,
+): Promise<VaultRow[]> {
+  const r = await db.execute({
+    sql: "SELECT * FROM vaults WHERE home_mesh_rid = ? AND status = 'active'",
+    args: [meshRid],
+  });
+  return r.rows.map((row) => rowToVault(row as unknown as Record<string, unknown>));
 }
 
 export async function updateLastVerified(db: Client, rid: Uint8Array): Promise<void> {

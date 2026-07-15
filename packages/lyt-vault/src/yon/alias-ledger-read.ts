@@ -172,6 +172,16 @@ function compareAliasRecords(a: AliasRecord, b: AliasRecord): number {
 // The name-keyed HLC-LWW register fold. Consolidates all shards → the
 // deterministic live alias set, sorted by name.
 //
+// G4 (0.12.1 identity-safety, design §6.1 G4) — SAME-KEY DIVERGENT-VALUE RULE,
+// named. This is a `name`-keyed register: when two writers point the SAME alias
+// name at DIVERGENT target_rids, they are NEVER co-live and per-shard APPEND
+// ORDER is NEVER the authority — the single winner is the record with the maximum
+// (hlc, writerId, seq) total order (last-writer-wins by the HLC merge key). The
+// forged-future-HLC guard (util/hlc.isForgedFutureHlc) is the M-cell sibling of
+// M1 for this rule; the fed-mesh / fed-vault registers wire the runtime flag
+// (their winners carry ownership authority), the alias register names the rule
+// here.
+//
 // Algorithm:
 //  1. Group ALL records by `name` (the register key — target_rid is NOT part
 //     of the key; it is the value the winning record carries).
