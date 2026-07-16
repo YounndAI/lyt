@@ -10,8 +10,9 @@ lyt sync                              # commit + pull --rebase + push every acti
 lyt sync --check                      # read-only: report per-vault freshness, no writes
 lyt sync --check --json               # machine-readable freshness report
 lyt sync --check --quiet              # exit code only (0 clean, 1 needs-sync)
+lyt sync --vault personal/notes --json # scoped sync + scoped-publication receipt
 lyt sync --watch                      # foreground daemon: watch + auto-commit + incremental search reindex
-lyt sync --no-publish                 # local vault sync only; skip the pod publish pass
+lyt sync --no-publish                 # local sync only; hold scoped and pod-wide publication
 lyt sync --message "<summary>"        # override the inferred per-vault commit message
 ```
 
@@ -41,6 +42,9 @@ vault repos, and pushes Your Pod — running `lyt sync` is itself the consent fo
 this outward step. If your pod is still local-only, `lyt sync` self-heals the
 connection to your GitHub handle first (adopting an existing pod repo
 non-destructively on prompt). `--no-publish` skips the publish pass entirely.
+For `--vault`, it also holds the targeted first-publish pass. Normal scoped
+`--json` returns the per-vault reports, a `scopedPublish` receipt, and top-level
+`ok`; deferred publication or an origin mismatch exits nonzero even with `--quiet`.
 
 ## Conflicts
 

@@ -18,7 +18,9 @@ import { renderTemplate } from "./render.js";
 
 export type TemplateName = "empty" | "obsidian-default";
 
-export const DEFAULT_TEMPLATE: TemplateName = "obsidian-default";
+// Lyt is editor-neutral by default. Obsidian configuration remains available
+// as an explicit `--template obsidian-default` opt-in.
+export const DEFAULT_TEMPLATE: TemplateName = "empty";
 
 export interface ObsidianScaffold {
   workspaceJson: string;

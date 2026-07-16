@@ -18,7 +18,7 @@ federation primer — is derived state that can be regenerated.
 ```text
 <mesh-main-vault>/
 ├── .git/
-├── .obsidian/
+├── .obsidian/          ← optional; only with --template obsidian-default
 ├── .lyt/
 │   ├── agents.md       ← AI-agent priming (under .lyt/)
 │   ├── lyt-overview.md ← your identity page

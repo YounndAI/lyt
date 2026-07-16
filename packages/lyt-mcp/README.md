@@ -9,7 +9,7 @@
 <p align="center">
   <strong>@younndai/lyt-mcp</strong><br />
   The MCP server — your markdown vaults and meshes as Model Context Protocol tools, local and typed.<br />
-  <em>Part of the Lyt™ toolchain — federated markdown vaults you own, made legible to AI.</em>
+  <em>Part of the Lyt (Link Your Think™) toolchain — federated markdown vaults you own, made legible to AI.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that exposes the [Lyt™](https://github.com/YounndAI/lyt) vault and mesh operation set as **typed MCP tools**. Any MCP-compatible client — Claude Desktop, Claude Code, Codex, or your own agent runtime — can search, read, and operate your markdown vaults **locally**, over stdio, with no separate CLI subprocess per call and no cloud middleman. Your knowledge never leaves your machine; the agent comes to the data.
+`@younndai/lyt-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that exposes the [Lyt](https://github.com/YounndAI/lyt) vault and mesh operation set as **typed MCP tools**. Any MCP-compatible client — Claude Desktop, Claude Code, Codex, or your own agent runtime — can search, read, and operate your markdown vaults **locally**, over stdio, with no separate CLI subprocess per call and no cloud middleman. Your knowledge never leaves your machine; the agent comes to the data.
 
 This is Lyt's **AI-first** contract made protocol-native: the same governed operations available as `lyt vault ...` / `lyt mesh ...` on the command line are surfaced as MCP tools with [Zod](https://zod.dev)-validated schemas, so agents get accurate parameter validation and structured errors instead of scraping CLI text. One operation set, three transports — CLI for you, MCP for your agents, harness skills for agent runtimes without MCP.
 

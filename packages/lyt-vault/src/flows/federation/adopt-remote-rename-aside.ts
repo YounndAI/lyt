@@ -280,17 +280,11 @@ export async function adoptRemoteRenameAsideFlow(
     return await restoreFromBackup(lytHome, backupPath, reparsePointsBeforeRename, junctionsStripped, warnings, errMsg(err));
   }
 
-  // FIX G1 (A2-R3 MAJOR-1 caller completeness) — a SEMANTIC REFUSAL is a RETURN
-  // flag, NOT a throw, so the catch above never fires for it. Without this guard
-  // the flow would sail past to the "Connected to your team pod" success message
-  // with the user's local pod STRANDED as a `lyt-backup-*` folder and the remote
-  // NOT adopted. adoptAndPrimeFlow already failed closed EARLY on refusal (no
-  // gh-walk, no scaffold, empty fresh home). Roll the rename-aside BACK via the
-  // exact same restoreFromBackup path the catch uses so the local pod is restored
-  // intact, and return its FAILURE result — never report success.
+  // A structured recovery refusal is a failed adopt, not success. Restore the
+  // renamed local pod and relay the source-generated, kind-specific remedy.
   if (adopt.manifestRefused === true) {
     const refusedReason =
-      `pod.yon semantically INCOHERENT — reconstruction refused; no vault cloned. ` +
+      `Pod reconstruction refused; no vault cloned. ` +
       `${adopt.manifestRefusedReason ?? ""}`.trimEnd();
     return await restoreFromBackup(
       lytHome,

@@ -9,7 +9,7 @@
 <p align="center">
   <strong>@younndai/lyt-llm</strong><br />
   The LLM gateway — multi-provider routing for AI-assisted vault operations, with hard cost budgets, on your terms.<br />
-  <em>Part of the Lyt™ toolchain — federated markdown vaults you own, made legible to AI.</em>
+  <em>Part of the Lyt (Link Your Think™) toolchain — federated markdown vaults you own, made legible to AI.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt-llm` is the **LLM gateway** of [Lyt™](https://github.com/YounndAI/lyt) — multi-source LLM routing for AI-assisted vault operations, designed around one principle: **you choose where intelligence runs.** Local model via Ollama, your own provider keys, your existing Claude Code / Codex subscription, or external providers through a relay — the gateway composes four adapters behind a single `createLlmGateway()` surface, and your knowledge only goes where you point it.
+`@younndai/lyt-llm` is the **LLM gateway** of [Lyt](https://github.com/YounndAI/lyt) — multi-source LLM routing for AI-assisted vault operations, designed around one principle: **you choose where intelligence runs.** Local model via Ollama, your own provider keys, your existing Claude Code / Codex subscription, or external providers through a relay — the gateway composes four adapters behind a single `createLlmGateway()` surface, and your knowledge only goes where you point it.
 
 This keeps Lyt's **AI-first** posture honest on the model side too: automations that need an LLM step declare a *source preference*, not a hard-wired vendor, and a per-run **cost-budget hard-stop** guarantees a runaway automation can't burn through an API budget. No hidden defaults, no silent cloud calls — the gateway is configuration you can read.
 

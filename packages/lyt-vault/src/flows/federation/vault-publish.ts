@@ -88,6 +88,8 @@ export interface MaterializeVaultResult {
   remoteSet: boolean; // added `origin` (was absent)
   repoCreated: boolean; // created the gh repo (createRemoteIfMissing path)
   pushed: boolean;
+  /** Validated existing/installed origin coordinate used for the receipt. */
+  remoteCoordinate: string | null;
   // Non-fatal degradations (gh offline / auth / push reject). Empty = fully
   // materialized to the requested level.
   warnings: string[];
@@ -129,6 +131,7 @@ export async function materializeVaultPublishable(
     remoteSet: false,
     repoCreated: false,
     pushed: false,
+    remoteCoordinate: null,
     warnings,
     skipped: false,
   };
@@ -156,6 +159,30 @@ export async function materializeVaultPublishable(
   }
   if (!existsSync(vault.path)) {
     return { ...result, skipped: true, skippedReason: "path-missing" };
+  }
+
+  const expectedCoordinate = `${repoOwner}/${repoName}`;
+  // Shared-boundary guard: every caller (scoped or pod-wide) passes through
+  // this materializer. Validate an existing origin before any GitHub action or
+  // remote mutation, so a vault accidentally wired to another repository can
+  // never create/push to the mesh-derived target or have its remote clobbered.
+  const initialOrigin = await git(["remote", "get-url", "origin"], {
+    cwd: vault.path,
+    allowFailure: true,
+  });
+  if (initialOrigin.code === 0) {
+    const actual = normalizeGitHubRepoCoordinate(initialOrigin.stdout);
+    if (actual === null || !sameRepoCoordinate(actual, expectedCoordinate)) {
+      return {
+        ...result,
+        skipped: true,
+        skippedReason: "origin-mismatch",
+        warnings: [
+          `origin mismatch: expected ${expectedCoordinate}, found ${actual ?? (initialOrigin.stdout.trim() || "unrecognized origin")}`,
+        ],
+      };
+    }
+    result.remoteCoordinate = actual;
   }
 
   // 1. Ensure a git repo + a pinned local identity. The fresh-machine guard
@@ -190,7 +217,31 @@ export async function materializeVaultPublishable(
     result.committed = true;
   }
 
-  // 3. Ensure the gh repo exists (OUTWARD — only when createRemoteIfMissing).
+  // 3. Ensure `origin` points at the vault repo. Missing is safe to install;
+  // an existing origin was validated above and is never mutated. Read back the
+  // installed value so subsequent outward actions and receipts use evidence,
+  // not a merely intended URL.
+  if (setRemote && initialOrigin.code !== 0) {
+    const originUrl = resolveRemoteUrl(repoOwner, repoName);
+    await git(["remote", "add", "origin", originUrl], { cwd: vault.path });
+    result.remoteSet = true;
+    const installed = await git(["remote", "get-url", "origin"], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    const actual = installed.code === 0 ? normalizeGitHubRepoCoordinate(installed.stdout) : null;
+    if (actual === null || !sameRepoCoordinate(actual, expectedCoordinate)) {
+      return {
+        ...result,
+        skipped: true,
+        skippedReason: "origin-mismatch",
+        warnings: [`origin validation failed after install; expected ${expectedCoordinate}`],
+      };
+    }
+    result.remoteCoordinate = actual;
+  }
+
+  // 4. Ensure the gh repo exists (OUTWARD — only when createRemoteIfMissing).
   // Non-fatal on gh-offline/auth: record + continue; the next `lyt sync`
   // retries (B.2 create-if-missing is the durable path via outbox).
   if (createRemote) {
@@ -212,28 +263,28 @@ export async function materializeVaultPublishable(
     }
   }
 
-  // 4. Ensure `origin` points at the vault repo. This is a LOCAL git config
-  // write (not outward) — safe at init even before the repo exists, so the
-  // remote is wired the moment the handler consents to publish. Never clobber
-  // an existing origin (a handler may have set a custom remote).
-  // a no-gh LOCAL init passes setRemote=false so the provisional handle
-  // never lands in a remote URL; connect re-materializes with setRemote=true.
-  if (setRemote) {
-    // B2a — wire `origin` under `repoOwner` (org for an org-mesh vault).
-    const originUrl = resolveRemoteUrl(repoOwner, repoName);
-    const origin = await git(["remote", "get-url", "origin"], {
+  // 5. Push (OUTWARD — only when push). Revalidate immediately before spawn so
+  // a caller cannot bypass the origin guard between create and push.
+  // and surfaced; the outbox (B.2) is the resumable retry path.
+  if (push) {
+    const currentOrigin = await git(["remote", "get-url", "origin"], {
       cwd: vault.path,
       allowFailure: true,
     });
-    if (origin.code !== 0) {
-      await git(["remote", "add", "origin", originUrl], { cwd: vault.path });
-      result.remoteSet = true;
+    const currentCoordinate =
+      currentOrigin.code === 0 ? normalizeGitHubRepoCoordinate(currentOrigin.stdout) : null;
+    if (
+      currentCoordinate === null ||
+      !sameRepoCoordinate(currentCoordinate, expectedCoordinate)
+    ) {
+      return {
+        ...result,
+        skipped: true,
+        skippedReason: "origin-mismatch",
+        warnings: [`origin changed before push; expected ${expectedCoordinate}`],
+      };
     }
-  }
-
-  // 5. Push (OUTWARD — only when push). Non-fatal: a push failure is recorded
-  // and surfaced; the outbox (B.2) is the resumable retry path.
-  if (push) {
+    result.remoteCoordinate = currentCoordinate;
     const pushed = await git(["push", "-u", "origin", "main"], {
       cwd: vault.path,
       allowFailure: true,
@@ -246,6 +297,20 @@ export async function materializeVaultPublishable(
   }
 
   return result;
+}
+
+/** Normalize supported GitHub HTTPS/SSH/git URL forms to owner/repo. */
+export function normalizeGitHubRepoCoordinate(url: string): string | null {
+  const value = url.trim().replace(/[\\/]+$/, "").replace(/\.git$/i, "");
+  const match =
+    /^(?:https?|git):\/\/github\.com\/([^/]+)\/([^/]+)$/i.exec(value) ??
+    /^ssh:\/\/(?:git@)?github\.com\/([^/]+)\/([^/]+)$/i.exec(value) ??
+    /^(?:git@)?github\.com:([^/]+)\/([^/]+)$/i.exec(value);
+  return match === null ? null : `${match[1]}/${match[2]}`;
+}
+
+function sameRepoCoordinate(actual: string, expected: string): boolean {
+  return actual.toLowerCase() === expected.toLowerCase();
 }
 
 export interface CommitPodRepoOptions {

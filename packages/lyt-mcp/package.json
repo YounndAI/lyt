@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-mcp",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Lyt MCP server — exposes the lyt-vault + lyt-mesh operation set as typed Model Context Protocol tools so AI agents (Claude Desktop, Claude Code, Codex, any MCP client) can drive Lyt locally.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -39,10 +39,12 @@
     "dist",
     "README.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "CONTRIBUTING.md",
+    "SECURITY.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node ../../scripts/public-release/stamp-dist-license-headers.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
@@ -50,8 +52,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@younndai/lyt-mesh": "^0.12.1",
-    "@younndai/lyt-vault": "^0.12.1",
+    "@younndai/lyt-mesh": "^0.12.2",
+    "@younndai/lyt-vault": "^0.12.2",
     "commander": "^12.1.0",
     "zod": "^3.25.0"
   },

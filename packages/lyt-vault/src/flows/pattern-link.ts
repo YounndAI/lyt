@@ -25,6 +25,7 @@ import { regenAgentsMd } from "./agents-md-regen.js";
 export interface PatternLinkArgs {
   patternName: string;
   vaultName: string;
+  regenerateAgentsMd?: boolean | undefined;
 }
 
 export interface PatternLinkResult {
@@ -85,13 +86,16 @@ export async function patternLinkFlow(args: PatternLinkArgs): Promise<PatternLin
     status = "copied-fallback";
   }
 
-  // Regenerate agents.md's installed-patterns section.
+  // Regenerate agents.md's installed-patterns section unless the caller is
+  // restoring machine-local links for an already-published clean checkout.
   let agentsMdRegenerated = false;
-  try {
-    const r = regenAgentsMd(vaultPath, args.vaultName);
-    agentsMdRegenerated = r.written;
-  } catch {
-    // best-effort
+  if (args.regenerateAgentsMd !== false) {
+    try {
+      const r = regenAgentsMd(vaultPath, args.vaultName);
+      agentsMdRegenerated = r.written;
+    } catch {
+      // best-effort
+    }
   }
 
   return {

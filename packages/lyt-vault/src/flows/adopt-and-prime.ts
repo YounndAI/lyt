@@ -28,6 +28,7 @@ import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import {
   recoverVaultsFromPodManifest,
   type RecoverDrop,
+  type RecoverPodResult,
   type VaultCloneFn,
 } from "./federation/recover-pod.js";
 import {
@@ -122,13 +123,11 @@ export interface AdoptAndPrimeResult {
   // INCOMPLETE; the command/wizard layer surfaces it loudly + exits nonzero
   // (reconstructionExitCode). Optional: absent on a fresh pod / non-adopt paths.
   manifestDrops?: RecoverDrop[];
-  // FIX A (A2-R3 MAJOR-1) — the recover-pod SEMANTIC-REFUSAL signal, threaded up.
-  // True ⇒ the cloned pod.yon was parseable-but-incoherent, so the flow FAILED
-  // CLOSED EARLY: it did NOT run the step-3b gh-discovery walk and did NOT
-  // scaffold. The wizard/command layer surfaces this as a FAILURE (distinct exit
-  // 13 via reconstructionExitCode), NOT "adopted successfully". A legitimately-empty
-  // COHERENT pod never sets this (it flows on to the normal scaffold/success path).
+  // Fail-closed refusal from recover-pod. The kind distinguishes manifest
+  // incoherence from failed ownership authentication; the reason already
+  // carries the correct remedy for callers to relay verbatim.
   manifestRefused?: boolean;
+  manifestRefusedKind?: RecoverPodResult["refusedKind"];
   manifestRefusedReason?: string;
   clusterOutcomes: ClusterOutcome[];
   // True when no vaults were acquirable and personal/main was scaffolded.
@@ -180,8 +179,9 @@ export async function adoptAndPrimeFlow(
     let manifestSkipped: { vaultName: string; reason: string }[] = [];
     // G1 — classified clone-walk DROPS threaded up for the nonzero-exit surface.
     let manifestDrops: RecoverDrop[] = [];
-    // FIX A — the semantic-refusal signal from recover-pod.
+    // Fail-closed refusal signal from recover-pod.
     let manifestRefused = false;
+    let manifestRefusedKind: RecoverPodResult["refusedKind"];
     let manifestRefusedReason: string | undefined;
     if (fed.branch === "adopted") {
       try {
@@ -189,11 +189,13 @@ export async function adoptAndPrimeFlow(
           handle,
           registryDb: db,
           ...(args.vaultCloneFn !== undefined ? { cloneFn: args.vaultCloneFn } : {}),
+          ...(args.ghExecutor !== undefined ? { ghExecutor: args.ghExecutor } : {}),
         });
         vaultsRecoveredFromManifest = recovered.vaultsRecovered.length;
         manifestSkipped = recovered.skipped;
         manifestDrops = recovered.drops;
         manifestRefused = recovered.refused === true;
+        manifestRefusedKind = recovered.refusedKind;
         manifestRefusedReason = recovered.refusedReason;
         for (const w of recovered.warnings) {
           // eslint-disable-next-line no-console
@@ -206,18 +208,14 @@ export async function adoptAndPrimeFlow(
       }
     }
 
-    // FIX A (A2-R3 MAJOR-1) — a SEMANTIC REFUSAL is fail-closed-EARLY: the cloned
-    // pod.yon is parseable-but-incoherent, so STOP before the step-3b gh-discovery
-    // walk (which clones repos) and before any personal/main scaffold. Return an
-    // INCOMPLETE result that surfaces the refusal so the wizard/command layer
-    // reports FAILURE (distinct nonzero exit) rather than "Adopted successfully".
-    // A legitimately-empty COHERENT pod NEVER sets `refused`, so this does not fire
-    // for it — it flows on to the normal scaffold/success path below (PRESERVED).
+    // Any recover-pod refusal is fail-closed before discovery/scaffold. The
+    // source-generated reason differentiates manifest repair from GitHub
+    // authentication/permission, so do not reinterpret it here.
     if (manifestRefused) {
       // eslint-disable-next-line no-console
       console.error(
-        `lyt adopt: reconstruction REFUSED (pod.yon semantically incoherent) — stopping ` +
-          `before vault discovery/scaffold. ${manifestRefusedReason ?? ""}`.trimEnd(),
+        `lyt adopt: reconstruction REFUSED — stopping before vault discovery/scaffold. ` +
+          `${manifestRefusedReason ?? ""}`.trimEnd(),
       );
       return {
         podBranch: fed.branch,
@@ -228,6 +226,7 @@ export async function adoptAndPrimeFlow(
         manifestSkipped,
         manifestDrops,
         manifestRefused: true,
+        ...(manifestRefusedKind !== undefined ? { manifestRefusedKind } : {}),
         ...(manifestRefusedReason !== undefined
           ? { manifestRefusedReason }
           : {}),

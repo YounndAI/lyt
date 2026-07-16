@@ -35,6 +35,7 @@ import {
   listVaults,
   narrate,
   narrateAccessRemoved,
+  normalizeGitHubRepoCoordinate,
   openRegistry,
   readFigmentTitle,
   readFrozenLock,
@@ -87,6 +88,7 @@ export type VaultSyncStatus =
   // `error` (couldn't reach) — this is a definite access-loss, persisted to the
   // registry as `access_lost` so `vault info` reflects it.
   | "access-lost"
+  | "origin-mismatch"
   | "error";
 
 // 0.12.0 Phase D · A1 — concurrent-write conflict resolution choice. A 2-machine/
@@ -211,19 +213,28 @@ export interface SyncFlowArgs {
   // reach failure (never `access_lost`). Defaults to the real `gh auth status`;
   // injectable for deterministic tests.
   ghAuthOk?: () => boolean | null;
+  /** local-only saves writable local work and never touches a network seam. */
+  networkMode?: "online" | "local-only";
+  /** Expected GitHub owner/repo for guarded online syncs, keyed by canonical vault name. */
+  expectedOriginByVault?: Readonly<Record<string, string>>;
 }
 
 const MESH_CONTEXT_PATH = ".lyt/mesh-context.md";
 
 export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult> {
   const runGit = args.runGit ?? defaultRunGit;
+  const networkMode = args.networkMode ?? "online";
   // Increment 1 · Phase A.4 — the git-remote port. Default wraps the SAME runGit
   // seam, so behavior is unchanged when no fake is injected.
-  const remote = args.remote ?? new GitRemoteProvider(runGit);
+  const remote =
+    networkMode === "online" ? (args.remote ?? new GitRemoteProvider(runGit)) : null;
   const now = args.now ?? new Date();
   // A6-1 (0.12.0 Phase D fix-pass) — the gh-auth verdict, consulted only on a
   // fetch-404 to distinguish a genuine revoke from an unauthed/expired 404.
-  const ghAuthOk = args.ghAuthOk ?? (() => realIdentityRunner.ghAuthStatus());
+  const ghAuthOk =
+    networkMode === "online"
+      ? (args.ghAuthOk ?? (() => realIdentityRunner.ghAuthStatus()))
+      : () => null;
   const db = await openRegistry();
   let candidates: VaultRow[];
   // v1.C.2 — derive the set of subscribed-vault rids across all
@@ -263,10 +274,13 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       }
     }
     for (const v of candidates) {
-      const gate = await deriveWriteGate(v, db, args.gh !== undefined ? { gh: args.gh } : {});
-      if (gate.blocked) {
-        readOnlyRidHexes.add(uuid7BytesToHex(v.rid));
+      const ridHex = uuid7BytesToHex(v.rid);
+      if (networkMode === "local-only") {
+        if (subscribedRidHexes.has(ridHex)) readOnlyRidHexes.add(ridHex);
+        continue;
       }
+      const gate = await deriveWriteGate(v, db, args.gh !== undefined ? { gh: args.gh } : {});
+      if (gate.blocked) readOnlyRidHexes.add(ridHex);
     }
   } finally {
     await closeRegistry(db);
@@ -285,6 +299,8 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       readOnlyRidHexes.has(ridHex),
       args.resolveConflict,
       ghAuthOk,
+      networkMode,
+      args.expectedOriginByVault?.[v.name],
     );
     if (subscribedRidHexes.has(ridHex)) {
       report.subscribed = true;
@@ -325,7 +341,7 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
   // copy cleanly this run (a re-granted share). Without the recovery leg, a vault
   // that syncs fine still reported "no access" on `vault info` / `sync --check`.
   const reconcileTargets: { rid: Uint8Array; status: "access_lost" | "active" }[] = [];
-  for (let i = 0; i < candidates.length; i += 1) {
+  for (let i = 0; networkMode === "online" && i < candidates.length; i += 1) {
     const v = candidates[i];
     const r = reports[i];
     if (v === undefined || r === undefined) continue;
@@ -351,7 +367,11 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     }
   }
   const ok = reports.every(
-    (r) => r.status !== "conflict" && r.status !== "error" && r.status !== "access-lost",
+    (r) =>
+      r.status !== "conflict" &&
+      r.status !== "error" &&
+      r.status !== "access-lost" &&
+      r.status !== "origin-mismatch",
   );
   return { reports, ok, frictionHints: deriveFrictionHints(reports) };
 }
@@ -480,7 +500,7 @@ function deriveFrictionHints(reports: readonly VaultSyncReport[]): SyncFrictionH
         category: "sync.conflict",
         message: `Log this as friction with: lyt friction note --category=sync.conflict "${r.name}: ${r.message.replace(/"/g, '\\"').slice(0, 200)}"`,
       });
-    } else if (r.status === "error") {
+    } else if (r.status === "error" || r.status === "origin-mismatch") {
       hints.push({
         vaultName: r.name,
         vaultStatus: r.status,
@@ -495,13 +515,15 @@ function deriveFrictionHints(reports: readonly VaultSyncReport[]): SyncFrictionH
 async function syncOneVault(
   vault: VaultRow,
   runGit: GitRunner,
-  remote: RemoteProvider,
+  remote: RemoteProvider | null,
   now: Date,
   resolveMeshContext: boolean,
   messageOverride?: string,
   readOnly = false,
   resolveConflict?: ConflictResolver,
   ghAuthOk: () => boolean | null = () => realIdentityRunner.ghAuthStatus(),
+  networkMode: "online" | "local-only" = "online",
+  expectedOrigin?: string,
 ): Promise<VaultSyncReport> {
   const base: VaultSyncReport = {
     name: vault.name,
@@ -533,6 +555,66 @@ async function syncOneVault(
   const gitDir = await runGit(["rev-parse", "--git-dir"], { cwd: vault.path, allowFailure: true });
   if (gitDir.code !== 0) {
     return { ...base, status: "not-git-repo", message: "This vault isn't set up for syncing yet." };
+  }
+
+  if (networkMode === "local-only") {
+    const status = await runGit(["status", "--porcelain"], { cwd: vault.path });
+    const statusLines = status.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0);
+    const dirtyCount = statusLines.length;
+    if (readOnly) {
+      await reconcileVaultCaches(vault.path, vault.name, { skipGitignoreMigration: true });
+      return {
+        ...base,
+        status: "skipped-readonly",
+        dirtyCount,
+        message:
+          "This is a read-only shared vault; local-only sync made no Git changes and contacted no online service.",
+      };
+    }
+    let committed = false;
+    const paths = statusLines
+      .map((line) => parsePorcelainPath(line))
+      .filter((path): path is string => path !== null);
+    if (paths.length > 0) {
+      await runGit(["add", "--", ...paths], { cwd: vault.path });
+      const commitMsg = messageOverride ?? buildSyncCommitMessage(vault, statusLines, now);
+      const commitRes = await runGit(["commit", "-m", commitMsg], {
+        cwd: vault.path,
+        allowFailure: true,
+      });
+      committed = commitRes.code === 0;
+    }
+    await reconcileVaultCaches(vault.path, vault.name);
+    return {
+      ...base,
+      status: committed ? "committed" : "clean",
+      dirtyCount,
+      message: committed
+        ? `Saved ${dirtyCount} change(s) locally; no online service was contacted.`
+        : "Up to date locally; no online service was contacted.",
+    };
+  }
+
+  if (remote === null) throw new Error("online sync requires a remote provider");
+
+  if (expectedOrigin !== undefined) {
+    const origin = await runGit(["remote", "get-url", "origin"], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    if (origin.code === 0) {
+      const actual = normalizeGitHubRepoCoordinate(origin.stdout);
+      if (actual === null || actual.toLowerCase() !== expectedOrigin.toLowerCase()) {
+        return {
+          ...base,
+          status: "origin-mismatch",
+          message: `Online sync refused: expected ${expectedOrigin}, found ${actual ?? (origin.stdout.trim() || "an unrecognized origin")}.`,
+        };
+      }
+    }
   }
 
   // Fetch first so ahead/behind reflects truth (if upstream is configured).

@@ -312,7 +312,7 @@ function compareFedVaultLedgerRecords(a: FedVaultLedgerRecord, b: FedVaultLedger
 // forward. The sync-reconstitution path's ledger→registry WRITE-BACK
 // (rebuildFederationCacheFlow) converges the local registry to the winner, so on
 // a synced machine a remaining diff on THIS writer's own head is a genuine local
-// mutation — which still authors. (Design-aligned: registry = rebuildable cache of
+// mutation — which still authors. (decision-aligned: registry = rebuildable cache of
 // the git-tracked ledger SoT; the write-back is the cache→SoT reconvergence, the
 // guard is the anti-clobber backstop.)
 function reconcileVaultsIntoLedger(vaults: readonly VaultRow[]): void {

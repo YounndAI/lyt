@@ -1,7 +1,7 @@
 {
   "name": "@younndai/lyt-vault",
-  "version": "0.12.1",
-  "description": "Lyt vault primitive — CLI verbs to create and manage individual Lyt Vaults (folder + .obsidian + .lyt scaffold).",
+  "version": "0.12.2",
+  "description": "Lyt vault primitive — CLI verbs to create and manage editor-neutral markdown vaults with a .lyt scaffold.",
   "homepage": "https://linkyourthink.com",
   "repository": {
     "type": "git",
@@ -42,10 +42,12 @@
     "scripts/postinstall.mjs",
     "README.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "CONTRIBUTING.md",
+    "SECURITY.md"
   ],
   "scripts": {
-    "build": "tsc && node ./scripts/copy-help-topics.mjs && node ./scripts/copy-patterns.mjs && node ./scripts/copy-yon-defaults.mjs",
+    "build": "tsc && node ./scripts/copy-help-topics.mjs && node ./scripts/copy-patterns.mjs && node ./scripts/copy-yon-defaults.mjs && node ../../scripts/public-release/stamp-dist-license-headers.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
@@ -60,7 +62,7 @@
     "commander": "^12.1.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
-    "tar": "^6.2.1",
+    "tar": "^7.5.19",
     "uuid": "^11.0.0",
     "zod": "^3.25.76"
   },

@@ -25,6 +25,7 @@ import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
+import { assertNotMeshMainVault } from "./main-vault-removal-guard.js";
 
 export interface DeleteFlowOptions {
   noTombstone?: boolean;
@@ -58,6 +59,7 @@ export async function deleteVaultFlow(
     if (vault.status === "tombstoned") {
       throw new Error(`Vault '${name}' is already tombstoned.`);
     }
+    await assertNotMeshMainVault(db, vault, "delete");
     await enforceNotFrozen(vault.path, vault.name);
     // Phase E item 1 (#9 — warn-then-drop). Discover the pod-local aliases
     // this delete would ORPHAN (live aliases whose target is this vault's rid)

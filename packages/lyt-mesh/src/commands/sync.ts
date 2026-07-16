@@ -21,21 +21,32 @@ import {
   adoptRemoteRenameAsideFlow,
   closeRegistry,
   connectPodFlow,
+  deriveWriteGate,
+  getHandleFromIdentity,
+  getMeshByRid,
+  materializeVaultPublishable,
   openRegistry,
   podNeedsConnect,
   reconcilePublishFlow,
   reconstructionExitCode,
   resolveVault,
   syncPodLedgerFlow,
+  vaultRepoName,
   withSpinner,
   type AdoptRemoteRenameAsideResult,
   type ConnectPodResult,
   type ReconcilePublishResult,
   type SyncPodLedgerResult,
+  type MaterializeVaultResult,
 } from "@younndai/lyt-vault";
 
 import { syncCheckFlow, type VaultCheckReport } from "../flows/sync-check.js";
-import { syncFlow, type ConflictResolver, type VaultSyncReport } from "../flows/sync.js";
+import {
+  syncFlow,
+  type ConflictResolver,
+  type VaultSyncReport,
+  type VaultSyncStatus,
+} from "../flows/sync.js";
 import { syncWatchFlow } from "../flows/sync-watch.js";
 
 // Injectable seam for the pod-wide federation flows (R7/S3 test seam). Defaults
@@ -48,6 +59,7 @@ import { syncWatchFlow } from "../flows/sync-watch.js";
 export type ConnectChoice = "adopt" | "decline" | "defer";
 
 export interface SyncFederationDeps {
+  syncFlow: typeof syncFlow;
   podNeedsConnect: typeof podNeedsConnect;
   connectPodFlow: typeof connectPodFlow;
   syncPodLedgerFlow: typeof syncPodLedgerFlow;
@@ -56,10 +68,12 @@ export interface SyncFederationDeps {
   // (injectable so the 3-option menu is unit-testable without a live TTY).
   adoptRemoteRenameAsideFlow: typeof adoptRemoteRenameAsideFlow;
   chooseConnectAction: (existingRemote: string) => Promise<ConnectChoice>;
+  materializeScopedVault?: typeof materializeScopedVaultAfterSync;
 }
 
 export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Command {
   // Real flows by default; spies when a test injects them.
+  const syncFlowFn = deps.syncFlow ?? syncFlow;
   const podNeedsConnectFn = deps.podNeedsConnect ?? podNeedsConnect;
   const connectPodFlowFn = deps.connectPodFlow ?? connectPodFlow;
   const syncPodLedgerFlowFn = deps.syncPodLedgerFlow ?? syncPodLedgerFlow;
@@ -67,14 +81,15 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
   const adoptRemoteRenameAsideFlowFn =
     deps.adoptRemoteRenameAsideFlow ?? adoptRemoteRenameAsideFlow;
   const chooseConnectActionFn = deps.chooseConnectAction ?? chooseConnectActionTty;
+  const materializeScopedVaultFn = deps.materializeScopedVault ?? materializeScopedVaultAfterSync;
   const cmd = new Command("sync");
   cmd
     .description(
       "Sync registered active vaults with their remotes (commit + push + pull --rebase). Use --watch for a foreground daemon, --check for read-only freshness reporting.",
     )
     .option("--check", "Report per-vault freshness without writing. Pairs with --json or --quiet.")
-    .option("--json", "With --check, emit JSON instead of human-readable output.")
-    .option("--quiet", "With --check, emit nothing; exit code only (0 clean, 1 needs-sync).")
+    .option("--json", "Emit machine-readable JSON for normal sync or --check.")
+    .option("--quiet", "Emit nothing; preserve the truthful terminal exit code.")
     .option(
       "--watch",
       "Foreground daemon: watch registered active vaults; auto-commit + incremental FTS reconcile (event-driven).",
@@ -86,7 +101,7 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
     .option("--commit-debounce <ms>", "Watch mode: debounce after last change (default 30000)")
     .option(
       "--no-publish",
-      "Skip the federation publish pass (regen pod.yon + create-missing repos + push pod). Local sync only.",
+      "Hold every outward publication action, including scoped first-publish and pod-wide publication. Local sync only.",
     )
     .option(
       "--message <msg>",
@@ -170,8 +185,13 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       // in reconcilePublishFlow below, which runs after this resolves — no
       // nested spinner). --json/--quiet stay spinner-free; non-TTY prints
       // "Syncing…" once (zero escape codes).
+      const expectedScopedOrigin =
+        scopedVaultName !== undefined && opts.publish !== false
+          ? await resolveExpectedScopedOrigin(scopedVaultName)
+          : undefined;
       const syncArgs = {
         resolveMeshContext: opts.resolveMeshContext === true,
+        networkMode: opts.publish === false ? ("local-only" as const) : ("online" as const),
         // R7/S3 — scope the commit/push/pull loop to the single resolved vault.
         // syncFlow's existing `vaultNames` filter (flows/sync.ts) is REUSED here —
         // no parallel scoped-sync path.
@@ -181,12 +201,32 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
         // keep-mine/theirs/both choice on a TTY, the safe never-lose `both`
         // default when non-interactive (no TTY, or --json/--quiet).
         resolveConflict: makeConflictResolver(opts),
+        ...(scopedVaultName !== undefined && expectedScopedOrigin !== undefined
+          ? {
+              expectedOriginByVault: {
+                [scopedVaultName]: expectedScopedOrigin,
+              },
+            }
+          : {}),
       };
       const result =
         opts.json !== true && opts.quiet !== true
-          ? await withSpinner("", () => syncFlow(syncArgs), { op: "sync" })
-          : await syncFlow(syncArgs);
-      printSyncHuman(result.reports);
+          ? await withSpinner("", () => syncFlowFn(syncArgs), { op: "sync" })
+          : await syncFlowFn(syncArgs);
+      let scopedPublish: ScopedPublishOutcome | undefined;
+      if (scopedVaultName !== undefined) {
+        const report = result.reports.find((candidate) => candidate.name === scopedVaultName);
+        scopedPublish =
+          opts.publish === false
+            ? scopedPublishHeld(scopedVaultName)
+            : report?.status === "origin-mismatch"
+              ? scopedPublishOriginMismatch(scopedVaultName, report, expectedScopedOrigin)
+              : await materializeScopedVaultFn({ vaultName: scopedVaultName, report });
+      }
+      if (opts.json !== true && opts.quiet !== true) {
+        printSyncHuman(result.reports);
+        if (scopedPublish !== undefined) printScopedPublishHuman(scopedPublish);
+      }
       // The friction-capture nudge is intentionally NOT surfaced to the human
       // in 0.11.0 (the reliability floor stays unopinionated — it does not push
       // a logging ritual). Hints are still derived on `result.frictionHints`
@@ -219,6 +259,7 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       });
 
       let connectDeferredPublish = false;
+      let connectReconstructionExitCode = 0;
       if (federationPassAllowed && (await podNeedsConnectFn())) {
         const connect = await connectPodFlowFn({});
         if (opts.json !== true && opts.quiet !== true) {
@@ -259,7 +300,9 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
               // granularity so the connect path never reports clean success while
               // vaults are missing (mirrors the wizard `lyt init` path).
               if (dance.manifestDrops.length > 0) {
-                process.exitCode = reconstructionExitCode({ drops: dance.manifestDrops });
+                connectReconstructionExitCode = reconstructionExitCode({
+                  drops: dance.manifestDrops,
+                });
                 if (opts.json !== true && opts.quiet !== true) {
                   // eslint-disable-next-line no-console
                   console.error(
@@ -350,12 +393,262 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       const syncOk = result.ok;
       const publishOk = publish === undefined || publish.skipped || publish.ok;
       const podLedgerOk =
-        podLedger === undefined ||
-        podLedger.status === "skipped" ||
-        podLedger.status === "synced";
-      process.exit(syncOk && publishOk && podLedgerOk ? 0 : 1);
+        podLedger === undefined || podLedger.status === "skipped" || podLedger.status === "synced";
+      const scopedPublishOk = scopedPublish === undefined || scopedPublish.ok;
+      const terminalOk =
+        connectReconstructionExitCode === 0 &&
+        syncOk &&
+        publishOk &&
+        podLedgerOk &&
+        scopedPublishOk;
+      if (opts.json === true && scopedVaultName !== undefined) {
+        // eslint-disable-next-line no-console
+        console.log(
+          JSON.stringify(
+            { ok: terminalOk, reports: result.reports, scopedPublish: scopedPublish ?? null },
+            null,
+            2,
+          ),
+        );
+      }
+      process.exit(
+        connectReconstructionExitCode !== 0 ? connectReconstructionExitCode : terminalOk ? 0 : 1,
+      );
     });
   return cmd;
+}
+
+export type ScopedPublishStatus =
+  | "published"
+  | "already-online"
+  | "local-only-no-push-target"
+  | "skipped-readonly"
+  | "publish-held"
+  | "publish-deferred"
+  | "origin-mismatch"
+  | "sync-incomplete";
+
+export interface ScopedPublishOutcome {
+  vaultName: string;
+  status: ScopedPublishStatus;
+  remoteAction: "none" | "targeted";
+  visibility: "private";
+  expectedRepo: string | null;
+  materialized: MaterializeVaultResult | null;
+  syncStatus: VaultSyncStatus | null;
+  ok: boolean;
+  message: string;
+}
+
+function scopedPublishHeld(vaultName: string): ScopedPublishOutcome {
+  return {
+    vaultName,
+    status: "publish-held",
+    remoteAction: "none",
+    visibility: "private",
+    expectedRepo: null,
+    materialized: null,
+    syncStatus: null,
+    ok: true,
+    message: "Saved locally; --no-publish held every online action.",
+  };
+}
+
+function scopedPublishOriginMismatch(
+  vaultName: string,
+  report: VaultSyncReport,
+  expectedRepo: string | undefined,
+): ScopedPublishOutcome {
+  return {
+    vaultName,
+    status: "origin-mismatch",
+    remoteAction: "none",
+    visibility: "private",
+    expectedRepo: expectedRepo ?? null,
+    materialized: null,
+    syncStatus: report.status,
+    ok: false,
+    message: report.message,
+  };
+}
+
+export async function materializeScopedVaultAfterSync(args: {
+  vaultName: string;
+  report: VaultSyncReport | undefined;
+}): Promise<ScopedPublishOutcome> {
+  const db = await openRegistry();
+  try {
+    const vault = await resolveVault(db, args.vaultName);
+    if (vault === null) {
+      return {
+        vaultName: args.vaultName,
+        status: "skipped-readonly",
+        remoteAction: "none",
+        visibility: "private",
+        expectedRepo: null,
+        materialized: null,
+        syncStatus: args.report?.status ?? null,
+        ok: true,
+        message:
+          "This subscribed/read-only vault was saved locally only; no online action happened.",
+      };
+    }
+    const writeGate = await deriveWriteGate(vault, db);
+    const mesh = vault.homeMeshRid === null ? null : await getMeshByRid(db, vault.homeMeshRid);
+    const eligibility = classifyScopedPublishEligibility({
+      publishable: !writeGate.blocked,
+      mesh,
+      reportStatus: args.report?.status,
+    });
+    if (eligibility.status === "skipped-readonly") {
+      return {
+        vaultName: vault.name,
+        status: "skipped-readonly",
+        remoteAction: "none",
+        visibility: "private",
+        expectedRepo: null,
+        materialized: null,
+        syncStatus: args.report?.status ?? null,
+        ok: true,
+        message:
+          "This subscribed/read-only vault was saved locally only; no online action happened.",
+      };
+    }
+    if (eligibility.status === "local-only-no-push-target") {
+      return {
+        vaultName: vault.name,
+        status: "local-only-no-push-target",
+        remoteAction: "none",
+        visibility: "private",
+        expectedRepo: null,
+        materialized: null,
+        syncStatus: args.report?.status ?? null,
+        ok: true,
+        message:
+          "Saved locally; the home mesh has no configured push target, so no online action happened.",
+      };
+    }
+    const pushTarget = eligibility.pushTarget;
+    const expectedRepo = `${pushTarget}/${vaultRepoName(vault.name)}`;
+    if (eligibility.status === "sync-incomplete") {
+      return {
+        vaultName: vault.name,
+        status: "sync-incomplete",
+        remoteAction: "none",
+        visibility: "private",
+        expectedRepo,
+        materialized: null,
+        syncStatus: eligibility.reportStatus,
+        ok: false,
+        message: `Scoped publication was not attempted because vault sync ended as ${eligibility.reportStatus ?? "missing-report"}.`,
+      };
+    }
+    if (eligibility.status === "already-online") {
+      return {
+        vaultName: vault.name,
+        status: "already-online",
+        remoteAction: "none",
+        visibility: "private",
+        expectedRepo,
+        materialized: null,
+        syncStatus: args.report?.status ?? null,
+        ok: true,
+        message: "The online copy is already connected; only this vault was processed.",
+      };
+    }
+    let materialized: MaterializeVaultResult;
+    try {
+      materialized = await materializeVaultPublishable(vault, {
+        handle: getHandleFromIdentity(),
+        repoOwner: pushTarget,
+        createRemoteIfMissing: true,
+        push: true,
+        setRemote: true,
+        visibility: "private",
+      });
+    } catch (err) {
+      return {
+        vaultName: vault.name,
+        status: "publish-deferred",
+        remoteAction: "targeted",
+        visibility: "private",
+        expectedRepo,
+        materialized: null,
+        syncStatus: args.report?.status ?? null,
+        ok: false,
+        message: `Saved locally, but the private online copy is still pending: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    const published = materialized.pushed;
+    const mismatch = materialized.skippedReason === "origin-mismatch";
+    return {
+      vaultName: vault.name,
+      status: published ? "published" : mismatch ? "origin-mismatch" : "publish-deferred",
+      remoteAction: published ? "targeted" : mismatch ? "none" : "targeted",
+      visibility: "private",
+      expectedRepo: published ? (materialized.remoteCoordinate ?? expectedRepo) : expectedRepo,
+      materialized,
+      syncStatus: args.report?.status ?? null,
+      ok: published,
+      message: published
+        ? "Saved this vault only to its private online copy."
+        : mismatch
+          ? `Publication refused: ${materialized.warnings.join("; ")}`
+          : `Saved locally, but the private online copy is still pending: ${materialized.warnings.join("; ") || materialized.skippedReason || "retry scoped sync"}`,
+    };
+  } finally {
+    await closeRegistry(db);
+  }
+}
+
+export type ScopedPublishEligibility =
+  | { status: "publish-needed"; pushTarget: string }
+  | { status: "already-online"; pushTarget: string }
+  | { status: "sync-incomplete"; pushTarget: string; reportStatus: VaultSyncStatus | null }
+  | { status: "local-only-no-push-target" }
+  | { status: "skipped-readonly" };
+
+export function classifyScopedPublishEligibility(args: {
+  publishable: boolean;
+  mesh: { ownCreated: boolean; pushTarget: string | null } | null;
+  reportStatus: VaultSyncStatus | undefined;
+}): ScopedPublishEligibility {
+  if (!args.publishable) return { status: "skipped-readonly" };
+  const pushTarget = args.mesh?.ownCreated === true ? args.mesh.pushTarget : null;
+  if (pushTarget === null || pushTarget.length === 0) {
+    return { status: "local-only-no-push-target" };
+  }
+  switch (args.reportStatus) {
+    case "no-upstream":
+      return { status: "publish-needed", pushTarget };
+    case "clean":
+    case "committed":
+    case "pushed":
+    case "pulled":
+    case "diverged-synced":
+      return { status: "already-online", pushTarget };
+    case undefined:
+    case "conflict":
+    case "skipped-frozen":
+    case "skipped-readonly":
+    case "skipped-tombstoned":
+    case "skipped-disconnected":
+    case "skipped-missing":
+    case "not-git-repo":
+    case "access-lost":
+    case "origin-mismatch":
+    case "error":
+      return { status: "sync-incomplete", pushTarget, reportStatus: args.reportStatus ?? null };
+  }
+}
+
+export function printScopedPublishHuman(outcome: ScopedPublishOutcome): void {
+  // eslint-disable-next-line no-console
+  console.log(`lyt sync (scoped): ${outcome.vaultName}: ${outcome.message}`);
+  if (outcome.expectedRepo !== null) {
+    // eslint-disable-next-line no-console
+    console.log(`  private target: ${outcome.expectedRepo}`);
+  }
 }
 
 interface SyncCliOpts {
@@ -408,6 +701,21 @@ export async function resolveScopedVaultName(vault: string): Promise<string> {
       );
     }
     return resolved.name;
+  } finally {
+    await closeRegistry(db);
+  }
+}
+
+async function resolveExpectedScopedOrigin(vaultName: string): Promise<string | undefined> {
+  const db = await openRegistry();
+  try {
+    const vault = await resolveVault(db, vaultName);
+    if (vault === null || vault.homeMeshRid === null) return undefined;
+    const mesh = await getMeshByRid(db, vault.homeMeshRid);
+    if (mesh?.ownCreated !== true || mesh.pushTarget === null || mesh.pushTarget.length === 0) {
+      return undefined;
+    }
+    return `${mesh.pushTarget}/${vaultRepoName(vault.name)}`;
   } finally {
     await closeRegistry(db);
   }
@@ -587,7 +895,10 @@ export function printPublishHuman(p: ReconcilePublishResult): void {
       "invalid-handle": "your account name looks invalid — run `lyt doctor`",
     };
     if (p.reason !== "no-single-pod" && p.reason !== "no-federation-state") {
-      const label = p.reason !== undefined ? (PUBLISH_SKIP_LABEL[p.reason] ?? "nothing to publish") : "nothing to publish";
+      const label =
+        p.reason !== undefined
+          ? (PUBLISH_SKIP_LABEL[p.reason] ?? "nothing to publish")
+          : "nothing to publish";
       // eslint-disable-next-line no-console
       console.log(`lyt sync (publish): skipped — ${label}`);
     }
@@ -626,7 +937,10 @@ export function printPodLedgerHuman(p: SyncPodLedgerResult): void {
       "pod-not-git-repo": "your pod isn't set up for syncing yet",
     };
     if (p.reason !== "no-single-pod" && p.reason !== "no-federation-state") {
-      const label = p.reason !== undefined ? (LEDGER_SKIP_LABEL[p.reason] ?? "nothing to sync") : "nothing to sync";
+      const label =
+        p.reason !== undefined
+          ? (LEDGER_SKIP_LABEL[p.reason] ?? "nothing to sync")
+          : "nothing to sync";
       // eslint-disable-next-line no-console
       console.log(`lyt sync (ledger): skipped — ${label}`);
     }

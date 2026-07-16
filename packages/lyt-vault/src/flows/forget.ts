@@ -24,6 +24,7 @@ import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
+import { assertNotMeshMainVault } from "./main-vault-removal-guard.js";
 
 export interface ForgetFlowOptions {
   tombstone?: boolean;
@@ -56,6 +57,7 @@ export async function forgetVaultFlow(
         `Vault '${name}' is already tombstoned. Use a fresh 'lyt vault init' at a new path if you want to start over.`,
       );
     }
+    await assertNotMeshMainVault(db, vault, "forget");
     await enforceNotFrozen(vault.path, vault.name);
     // Phase E item 1 (#9 — warn-then-drop). Snapshot the pod-local aliases
     // this forget would ORPHAN before mutating the registry; drop them after on

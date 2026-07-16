@@ -9,7 +9,7 @@
 <p align="center">
   <strong>@younndai/lyt-vault</strong><br />
   The vault primitive — local-first markdown vaults with capture, full-text search, and a regenerable index, built for AI agents.<br />
-  <em>Part of the Lyt™ toolchain — federated markdown vaults you own, made legible to AI.</em>
+  <em>Part of the Lyt (Link Your Think™) toolchain — federated markdown vaults you own, made legible to AI.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt-vault` is the **vault primitive** of [Lyt™](https://github.com/YounndAI/lyt) — the package that turns a folder of plain markdown notes into a **local-first, Git-native knowledge vault** with structured metadata, fast full-text search, and an AI-readable declaration file. A Lyt vault is markdown-in-Git: your notes stay plain `.md` files in a plain git repo, a `.lyt/` area carries the [YON](https://yon.younndai.com)-structured vault declaration and a regenerable libSQL index, and an `.obsidian/` scaffold makes the vault open cleanly in any markdown editor.
+`@younndai/lyt-vault` is the **vault primitive** of [Lyt](https://github.com/YounndAI/lyt) — the package that turns a folder of plain markdown notes into a **local-first, Git-native knowledge vault** with structured metadata, fast full-text search, and an AI-readable declaration file. A Lyt vault is editor-neutral markdown-in-Git: your notes stay plain `.md` files in a plain git repo, while a `.lyt/` area carries the [YON](https://yon.younndai.com)-structured vault declaration and a regenerable libSQL index. Obsidian users can explicitly add its scaffold with `lyt vault init --template obsidian-default`.
 
 Lyt is **AI-first by design** — a vault is as legible to an AI agent as it is to you. Capture a note and an agent can find it by full-text search seconds later; every vault speaks YON, so agents read structure directly instead of scraping prose. This package implements the verbs that create, adopt, inspect, search, and maintain individual vaults — plus the shared `help`, `doctor`, and `pattern` command groups.
 

@@ -9,7 +9,7 @@
 <p align="center">
   <strong>@younndai/lyt-runner</strong><br />
   The YON automation runner — declarative automators and directives that operate your vaults, deterministically.<br />
-  <em>Part of the Lyt™ toolchain — federated markdown vaults you own, made legible to AI.</em>
+  <em>Part of the Lyt (Link Your Think™) toolchain — federated markdown vaults you own, made legible to AI.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt-runner` is the **automation runner** of [Lyt™](https://github.com/YounndAI/lyt) — the engine that executes declarative [YON](https://yon.younndai.com) automations over your markdown vaults. An **automator** is a YON document living inside a vault (`.lyt/automators/*.yon`) that declares *what should happen* — fill missing metadata, build lanes, run a sync flow — and this package turns that declaration into governed, deterministic execution.
+`@younndai/lyt-runner` is the **automation runner** of [Lyt](https://github.com/YounndAI/lyt) — the engine that executes declarative [YON](https://yon.younndai.com) automations over your markdown vaults. An **automator** is a YON document living inside a vault (`.lyt/automators/*.yon`) that declares *what should happen* — fill missing metadata, build lanes, run a sync flow — and this package turns that declaration into governed, deterministic execution.
 
 It is a thin, focused layer on [`@younndai/yon-runner`](https://www.npmjs.com/package/@younndai/yon-runner): it loads the **yai.lyt expander**, which transforms `@AUTOMATOR` + `@DIRECTIVE` records into core YON (`@AGENT` + `@STEP` + ops) before execution, and registers the vault-aware operation set — `std:vault.*`, `std:mesh.*`, and `std:lease.*` ops — so automations can read, write, and sync vaults under the same permission semantics as every other Lyt surface. Because automations are YON documents in the vault, they are versioned with your knowledge, reviewable in any diff, and legible to AI agents — an agent can read, propose, or refine an automator the same way it reads a note.
 

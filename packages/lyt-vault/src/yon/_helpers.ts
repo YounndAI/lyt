@@ -44,7 +44,7 @@ import { isAbsolute } from "node:path";
 // from cluster YON (lanes.yon / arcs.yon), which now travels cross-machine.
 // A vault-relative POSIX figment path is the only legitimate shape; anything
 // absolute or carrying a `..` segment is a traversal attempt (peer-authored
-// `figment_rid` containing dot-dot segments). Members failing this
+// `figment_rid="<multi-level traversal>/Users/<victim>/.ssh/id_rsa"`). Members failing this
 // are SKIPPED at parse (matches the existing "skip malformed record" posture),
 // so the poison never enters the libSQL cache. Defense-in-depth alongside the
 // FS-sink containment gate in search-cascade.readSnippetFromDisk.

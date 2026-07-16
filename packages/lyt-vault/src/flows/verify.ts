@@ -26,6 +26,7 @@ import {
   updateLastVerified,
   type VaultRow,
 } from "../registry/repo.js";
+import { findMeshAnchoredByVault } from "./main-vault-removal-guard.js";
 
 export const DEFAULT_TOMBSTONE_THRESHOLD = 3;
 export const TOMBSTONE_THRESHOLD_ENV = "LYT_TOMBSTONE_THRESHOLD";
@@ -40,7 +41,20 @@ export interface VerifyTransition {
   path: string;
   from: VaultRow["status"];
   to: VaultRow["status"];
-  reason: "path-present" | "path-missing" | "auto-promoted" | "recovered" | "skipped-tombstoned";
+  reason:
+    | "path-present"
+    | "path-missing"
+    | "main-vault-missing"
+    | "auto-promoted"
+    | "recovered"
+    | "skipped-tombstoned";
+}
+
+export interface VerifyFinding {
+  code: "main-vault-missing";
+  mesh: string;
+  vault: string;
+  message: string;
 }
 
 export interface VerifyFlowResult {
@@ -53,6 +67,7 @@ export interface VerifyFlowResult {
   errored: number;
   threshold: number;
   transitions: VerifyTransition[];
+  findings: VerifyFinding[];
 }
 
 export function resolveTombstoneThreshold(override?: number): number {
@@ -83,6 +98,7 @@ export async function verifyVaultsFlow(opts: VerifyFlowOptions = {}): Promise<Ve
       errored: 0,
       threshold,
       transitions: [],
+      findings: [],
     };
     for (const v of vaults) {
       result.checked += 1;
@@ -158,16 +174,37 @@ export async function verifyVaultsFlow(opts: VerifyFlowOptions = {}): Promise<Ve
       } else if (v.status === "missing") {
         const newCount = await bumpVerifyFailCount(db, v.rid);
         if (newCount >= threshold) {
-          await tombstoneVault(db, v.rid);
-          result.tombstoned_new += 1;
-          result.transitions.push({
-            rid: v.ridHex,
-            name: v.name,
-            path: v.path,
-            from: "missing",
-            to: "tombstoned",
-            reason: "auto-promoted",
-          });
+          const anchoredMesh = await findMeshAnchoredByVault(db, v);
+          if (anchoredMesh !== null) {
+            result.transitions.push({
+              rid: v.ridHex,
+              name: v.name,
+              path: v.path,
+              from: "missing",
+              to: "missing",
+              reason: "main-vault-missing",
+            });
+            result.findings.push({
+              code: "main-vault-missing",
+              mesh: anchoredMesh.name,
+              vault: v.name,
+              message:
+                `Mesh '${anchoredMesh.name}' is missing its main vault '${v.name}'. ` +
+                `Restore the vault path or explicitly delete the mesh after removing its member vaults; ` +
+                `automatic verification will not tombstone a mesh anchor.`,
+            });
+          } else {
+            await tombstoneVault(db, v.rid);
+            result.tombstoned_new += 1;
+            result.transitions.push({
+              rid: v.ridHex,
+              name: v.name,
+              path: v.path,
+              from: "missing",
+              to: "tombstoned",
+              reason: "auto-promoted",
+            });
+          }
         } else {
           result.transitions.push({
             rid: v.ridHex,

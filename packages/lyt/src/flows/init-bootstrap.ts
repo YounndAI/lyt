@@ -65,8 +65,11 @@ import {
   type AdoptAndPrimeResult,
   type FederationGhClient,
   type FederationInitBranch,
+  type GhExecutor,
   type MaterializePodResult,
   type MeshGhClient,
+  type RecoverDrop,
+  type RecoverPodResult,
   type VaultCloneFn,
 } from "@younndai/lyt-vault";
 
@@ -144,13 +147,13 @@ export interface InitBootstrapAdopt {
   vaultsRecoveredFromManifest: number;
   vaultsAcquired: number;
   manifestSkipped: { vaultName: string; reason: string }[];
-  // FIX G2 (A2-R3 MAJOR-1 caller completeness) — the recover-pod SEMANTIC-REFUSAL
-  // signal, threaded up from adoptAndPrimeFlow (mirrors the wizard/adopt-and-prime
-  // shape). True ⇒ the cloned pod.yon was parseable-but-incoherent, so adopt FAILED
-  // CLOSED EARLY (no gh-walk, no scaffold). The command layer surfaces this as a
-  // NON-ZERO / refused outcome (distinct exit 13), never a completed adopt. A
-  // legitimately-empty COHERENT pod never sets this (it completes normally).
+  // Classified clone-walk drops. Non-empty means reconstruction was
+  // semantically incomplete even when the flow returned a structured result.
+  manifestDrops?: RecoverDrop[];
+  // Fail-closed recover-pod refusal. The kind distinguishes semantic invalidity
+  // from failed ownership authentication; the reason carries its exact remedy.
   manifestRefused?: boolean;
+  manifestRefusedKind?: RecoverPodResult["refusedKind"];
   manifestRefusedReason?: string;
   firstVaultCreated: boolean;
   primaryVaultPath: string | null;
@@ -211,6 +214,9 @@ export interface InitBootstrapArgs {
   // hermetically (a fake that fails one vault clone). Undefined in production
   // (defaults to a real git clone inside the engine).
   vaultCloneFn?: VaultCloneFn;
+  // Reuse adoptAndPrimeFlow's GitHub executor seam for manifest ownership
+  // authentication. Undefined in production, where lyt-vault uses live `gh`.
+  ghExecutor?: GhExecutor;
   // Open-once `registryDb?` seam: when supplied, the flow uses the
   // caller's already-open libSQL client and DOES NOT close it. v1.A.5
   // invariant.
@@ -493,6 +499,7 @@ async function doAdoptBranch(
         : {}),
       ...(args.meshGhClient !== undefined ? { meshGhClient: args.meshGhClient } : {}),
       ...(args.vaultCloneFn !== undefined ? { vaultCloneFn: args.vaultCloneFn } : {}),
+      ...(args.ghExecutor !== undefined ? { ghExecutor: args.ghExecutor } : {}),
     });
   } catch (err) {
     // a review finding (release review) — the pod/vault clone threw (network drop, private-repo
@@ -515,9 +522,12 @@ async function doAdoptBranch(
       vaultsRecoveredFromManifest: adopt.vaultsRecoveredFromManifest,
       vaultsAcquired: adopt.vaultsAcquired,
       manifestSkipped: adopt.manifestSkipped,
-      // FIX G2 — thread the semantic-refusal signal up so the command layer can
-      // report a non-zero / refused outcome instead of a completed adopt.
+      ...(adopt.manifestDrops !== undefined ? { manifestDrops: adopt.manifestDrops } : {}),
+      // Thread the typed refusal and its source-generated remedy to the command.
       ...(adopt.manifestRefused === true ? { manifestRefused: true } : {}),
+      ...(adopt.manifestRefusedKind !== undefined
+        ? { manifestRefusedKind: adopt.manifestRefusedKind }
+        : {}),
       ...(adopt.manifestRefusedReason !== undefined
         ? { manifestRefusedReason: adopt.manifestRefusedReason }
         : {}),

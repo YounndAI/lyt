@@ -15,6 +15,7 @@
  */
 
 import { deleteVaultFlow, type DeleteFlowResult } from "./delete.js";
+import { assertNamedVaultNotMeshMainVault } from "./main-vault-removal-guard.js";
 
 // `vault abandon` — the anti-lock-in "leave cleanly" verb, the inverse of
 // `adopt`. It is a THIN ALIAS over `deleteVaultFlow(name, { noTombstone: true })`:
@@ -43,9 +44,13 @@ export interface AbandonFlowResult extends DeleteFlowResult {
 
 export async function abandonVaultFlow(
   name: string,
-  opts: AbandonVaultOpts,
+  opts?: AbandonVaultOpts,
 ): Promise<AbandonFlowResult> {
-  if (!opts.confirmed) {
+  // A mesh main vault is not an abandonable vault: removing it means deleting
+  // the mesh. Resolve that structural guard before reading confirmation so an
+  // omitted options bag cannot mask the more important fail-closed verdict.
+  await assertNamedVaultNotMeshMainVault(name, "abandon");
+  if (opts?.confirmed !== true) {
     throw new Error(
       `Refusing to abandon '${name}' without explicit confirmation. CLI: pass --yes. ` +
         `This removes only LYT's local .lyt/ adoption — your markdown files and your ` +

@@ -43,6 +43,7 @@ import {
 } from "../util/federation-paths.js";
 import { bucketMeshName, bucketVaultRelDir, entryModeForSource } from "../util/bucket-mesh.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
+import { assertNoSymlinkOnWritePath } from "../util/write-path-guard.js";
 import { assertMeshNameNotReserved } from "../util/identity.js";
 import { rmWithRetry } from "../scaffold/delete.js";
 import { stripNestedReparsePoints } from "../util/reparse-safe.js";
@@ -52,6 +53,7 @@ import { renderVaultYon } from "../yon/vault.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { hexToUuid7Bytes } from "../util/uuid7.js";
 import { joinVaultFlow, type JoinResult } from "./join.js";
+import { relinkAllPatternsForVault } from "./pattern-relink-vault.js";
 
 // v1.B.3 — `lyt vault clone` extended with a `--to-mesh <name>` option.
 //
@@ -262,45 +264,6 @@ export class PreserveRidRequiresTargetMeshError extends Error {
         `preserveRid for a standalone 'lyt vault clone <url>'.`,
     );
     this.name = "PreserveRidRequiresTargetMeshError";
-  }
-}
-
-// Inc-2 Phase B / WRITE-PATH SYMLINK GUARD (standing directive: every
-// write to a handler-influenced path lstat-checks the leaf + parent chain and
-// refuses on a symlink; never follows it). Walks from `root` (the vaults root,
-// inclusive) down to the target's parent and refuses if any EXISTING component
-// is a reparse point. A missing ancestor is fine — it will be created fresh by
-// the flow's own mkdir. This is the write-side sibling of the reparse-safe
-// delete guard: a bucket parent (`subscriptions/{owner}`) swapped for a junction
-// pointing outside the vaults root would otherwise let the clone AND its later
-// junction-safe teardown operate outside the root.
-function assertNoSymlinkOnWritePath(root: string, target: string): void {
-  const rootR = resolve(root);
-  const chain: string[] = [];
-  let cur = resolve(dirname(target));
-  // Build the ancestor chain leafParent … rootR (bounded by the fs root).
-  for (;;) {
-    chain.push(cur);
-    if (cur === rootR) break;
-    const up = dirname(cur);
-    if (up === cur) break; // hit the filesystem root without meeting rootR
-    cur = up;
-  }
-  for (const p of chain) {
-    let st;
-    try {
-      st = lstatSync(p);
-    } catch {
-      continue; // ancestor does not exist yet — created fresh, no reparse risk
-    }
-    if (st.isSymbolicLink()) {
-      throw new Error(
-        `Refusing to clone into ${target}: the write-path component ${JSON.stringify(p)} ` +
-          `is a symlink/junction. A reparse point on the clone's parent chain could redirect ` +
-          `the write (and its later teardown) outside the vaults root. Remove or replace the ` +
-          `link with a real directory and retry.`,
-      );
-    }
   }
 }
 
@@ -573,16 +536,44 @@ export async function cloneVaultFlow(rawOpts: CloneOptions): Promise<CloneResult
       parseClonedVaultYonOrRefuse(readFileSync(defaultYonPath, "utf8"), target);
     }
     const defaultForeign = resolveForeignSourceOpt(opts);
-    const join_ = await joinVaultFlow(
-      target,
-      defaultForeign !== undefined ? { source: defaultForeign } : undefined,
-    );
-    // UNIT 4 — scaffold conformance on clone. A cloned vault may lack the
-    // sentinel-bearing priming seeds (or carry un-flagged ones); bring it to
-    // conformance so it does NOT FTS-pollute the primer. Additive + marker-
-    // bounded — never clobbers handler content (see writeScaffoldConformance).
-    writeScaffoldConformance({ vaultPath: target, name: join_.name });
-    return { ...join_, cloneTargetPath: target, meshAssignment: null, originDetached: null };
+    const join_ = await joinVaultFlow(target, {
+      // A clone is a checkout of an existing published vault. Local pattern
+      // relinking regenerates tracked `.lyt/agents.md`; keep the checkout
+      // byte-clean and let machine-local pattern repair run explicitly.
+      skipPatternRelink: true,
+      ...(defaultForeign !== undefined ? { source: defaultForeign } : {}),
+    });
+    // Pattern links are machine-local and ignored. Rebuild only those links;
+    // never regenerate the publisher's tracked `.lyt/agents.md` during clone.
+    await relinkAllPatternsForVault(join_.name, { regenerateAgentsMd: false });
+
+    // registerVaultFromYon resolves the declared home mesh, but the default
+    // clone path previously omitted the corresponding mesh_vaults home row.
+    // That made a correctly homed clone report `mesh_assignment:null` and later
+    // `orphan-vault`. Materialize the registry-side membership without rewriting
+    // the publisher's tracked vault.yon/scaffold.
+    const callerSupplied = opts.registryDb !== undefined;
+    const db = opts.registryDb ?? (await openRegistry());
+    let meshAssignment: CloneResult["meshAssignment"] = null;
+    try {
+      const vaultRow = await getVaultByRid(db, join_.rid);
+      const homeMesh =
+        vaultRow?.homeMeshRid !== null && vaultRow?.homeMeshRid !== undefined
+          ? await getMeshByRid(db, vaultRow.homeMeshRid)
+          : null;
+      if (vaultRow !== null && homeMesh !== null) {
+        await addVaultToMesh(db, homeMesh.rid, vaultRow.rid, "home");
+        meshAssignment = {
+          meshRidHex: homeMesh.ridHex,
+          meshName: homeMesh.name,
+          freshRidApplied: false,
+          externalMeshAutoRegistered: false,
+        };
+      }
+    } finally {
+      if (!callerSupplied) await closeRegistry(db);
+    }
+    return { ...join_, cloneTargetPath: target, meshAssignment, originDetached: null };
   } catch (err) {
     // release review — scope the cleanup to failures AT-OR-BEFORE
     // registration. If the vault row already landed (a late best-effort step
@@ -722,10 +713,7 @@ function hasControlChar(value: string): boolean {
 // topics). gitUrl and version are NOT length-capped — URLs and version strings
 // can legitimately vary in length — but ARE control-char screened. tier_hint is
 // borderline; control-char-only is the conservative choice (no length cap).
-function assertCloneFieldHygiene(
-  parsed: ReturnType<typeof parseVaultYon>,
-  target: string,
-): void {
+function assertCloneFieldHygiene(parsed: ReturnType<typeof parseVaultYon>, target: string): void {
   // LENGTH-CAPPED + control-char screened: short-metadata fields with a
   // clearly-correct 128-char bound.
   const cappedFields: Array<{ label: string; value: string }> = [];
@@ -886,10 +874,7 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
             `'lyt vault adopt <path>' instead.`,
         );
       }
-      const declared = parseClonedVaultYonOrRefuse(
-        readFileSync(guardYonPath, "utf8"),
-        args.target,
-      );
+      const declared = parseClonedVaultYonOrRefuse(readFileSync(guardYonPath, "utf8"), args.target);
       if (declared.name !== args.name) {
         throw new VaultIdentityMismatchError(args.name, declared.name, args.target);
       }
@@ -1117,12 +1102,8 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
           : {}),
         // Phase A — preserve scaffold-system version stamps across parse→render.
         // SEE ALSO: yon/parse.ts ParsedVaultYon + yon/vault.ts renderVaultYon.
-        ...(reparsed.templateVersion !== null
-          ? { templateVersion: reparsed.templateVersion }
-          : {}),
-        ...(reparsed.contractVersion !== null
-          ? { contractVersion: reparsed.contractVersion }
-          : {}),
+        ...(reparsed.templateVersion !== null ? { templateVersion: reparsed.templateVersion } : {}),
+        ...(reparsed.contractVersion !== null ? { contractVersion: reparsed.contractVersion } : {}),
         homeMesh: {
           vaultRid: freshRid,
           meshRid: meshRow.rid,
@@ -1214,9 +1195,7 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
     // (a stale registry pointing at a removed dir), the fresh clone is the ONLY
     // surviving copy, so do NOT sweep it out from under the user.
     const convergedElsewhere =
-      converged &&
-      resolve(join_.path) !== resolve(args.target) &&
-      existsSync(join_.path);
+      converged && resolve(join_.path) !== resolve(args.target) && existsSync(join_.path);
     if (convergedElsewhere) {
       await removeFailedCloneDir(args.target);
     }

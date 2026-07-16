@@ -9,7 +9,7 @@
 <p align="center">
   <strong>@younndai/lyt-skills</strong><br />
   Agent-harness skills — let Claude Code, Codex, and any agent runtime drive your markdown vaults as first-class operators.<br />
-  <em>Part of the Lyt™ toolchain — federated markdown vaults you own, made legible to AI.</em>
+  <em>Part of the Lyt (Link Your Think™) toolchain — federated markdown vaults you own, made legible to AI.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt-skills` is where [Lyt™](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: eleven harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can capture notes, search your pod, prime on context, adopt a vault, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
+`@younndai/lyt-skills` is where [Lyt](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: eleven harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can capture notes, search your pod, prime on context, adopt a vault, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
 
 The `/lyt-capture` skill wraps the `knowledge-capture` pattern verb from the `lyt pattern run` runtime, so structured note capture shows up as a first-class agent skill inside any vault; the read/orient + addressing + lifecycle skills (`/lyt-pod`, `/lyt-search`, `/lyt-recall`, `/lyt-primer-context`, `/lyt-mesh-explore`, `/lyt-sync`, `/lyt-alias`, `/lyt-adopt`, `/lyt-update`) wrap the corresponding CLI verbs directly. Pairs with [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault), which ships the bundled `knowledge-capture` pattern the capture/recall skills resolve against (workflow patterns are bring-your-own via `lyt pattern install`).
 

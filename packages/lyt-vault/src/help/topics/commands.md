@@ -19,10 +19,12 @@ vaults. Run `lyt help <topic>` for any group below in depth.
 - `lyt reindex [--all|--mesh <m>|--vault <n>]` — rebuild the libSQL search caches
   from the markdown source of truth. On an interactive terminal this is also where
   the optional one-time local semantic-search model is fetched (with a prompt first).
-- `lyt sync [--check] [--watch] [--no-publish] [--message <msg>]` — reconcile
+- `lyt sync [--vault <name>] [--check] [--watch] [--no-publish] [--json] [--message <msg>]` — reconcile
   every registered active vault with its remote (commit named paths, pull
   `--rebase`, push) under the writable gate, then publish Your Pod. `--check`
-  reports freshness without writing. See `lyt help sync`.
+  reports freshness without writing. Normal scoped `--json` includes the
+  scoped-publication receipt; `--no-publish` holds both scoped and pod-wide
+  publication. See `lyt help sync`.
 - `lyt status [--json]` — publish-drift trust surface (per-vault + pod: unpushed /
   no-remote / clean). Distinct from `lyt mesh status` (the topology renderer).
 - `lyt doctor [--json|--full]` — git/gh/node/npm checks, registry integrity,
@@ -44,7 +46,8 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   sharing mesh; default local-only), `--description`, `--ask-description`,
   `--topic <name>` (repeatable), `--no-starter-figment`, `--path <dir>`,
   `--parent <rid>`, `--tier-hint`, `--template empty|obsidian-default`,
-  `--no-git`, `--commit-initial`.
+  `--no-git`, `--commit-initial`, `--json` (machine-readable init result,
+  including mesh assignment and the explicit sync-next-step receipt).
 - `lyt vault adopt <path>` — upgrade an existing Obsidian vault to Lyt-aware
   (adds `.lyt/`, never edits existing markdown).
 - `lyt vault join <path>` — register an already-Lyt-aware vault on this machine

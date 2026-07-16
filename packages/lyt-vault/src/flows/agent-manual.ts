@@ -458,8 +458,11 @@ function buildSyncSection(): string {
   return [
     "## `[lyt.sync]` Sync only via `/lyt-sync`",
     "",
-    "Never raw `git pull/commit/push` for a vault sync. `/lyt-sync` owns the gate, commit-message",
-    "inference, and conflicts. Read-only/subscriber/orphan/no-remote vaults pull but skip push.",
+    "Never raw `git pull/commit/push`, `git remote add`, or `gh repo create` for vault sync.",
+    "`/lyt-sync` invokes `lyt sync --vault <qualified-vault>`. For an owned vault whose mesh has",
+    "a trusted push target, that exact command creates the missing PRIVATE repository, establishes",
+    "the first online copy, and touches no other vault. A genuine local/no-target vault remains",
+    "local; a subscriber/read-only vault never publishes; `--no-publish` holds all online action.",
   ].join("\n");
 }
 
@@ -486,7 +489,9 @@ function buildDestructiveSection(): string {
   return [
     "## `[lyt.destructive]` Destructive verbs need handler confirmation",
     "",
-    "`lyt vault delete|forget`, `git push --force`. Non-idempotent by design.",
+    "`lyt vault delete|forget`, `git push --force`. Non-idempotent by design. Lyt refuses to",
+    "delete, forget, or abandon a mesh main vault; removing it requires an explicit mesh-lifecycle",
+    "flow, never a vault-command workaround.",
   ].join("\n");
 }
 
@@ -635,6 +640,9 @@ function buildAddressingSection(): string {
     "**Create-if-missing:** `lyt vault init company/handbook` (or `--mesh company`) creates the",
     "`company` mesh if absent, the vault if absent, and STOPS + notifies if the vault already",
     "exists. Add `--push-to <handle>` to make an auto-created mesh a sharing mesh (else local-only).",
+    "Init is editor-neutral and performs NO online action; add `--template obsidian-default` only",
+    "when the Handler wants Obsidian. Then offer `lyt sync --vault company/handbook`: a trusted",
+    "mesh target enables scoped private first publication; without one the vault remains local.",
   ].join("\n");
 }
 

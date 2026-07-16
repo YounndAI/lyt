@@ -17,15 +17,16 @@
 import { Command, Option } from "commander";
 import { createInterface } from "node:readline/promises";
 
-import { initVaultFlow } from "../flows/init.js";
-import { federationRepoFullName } from "../util/federation-paths.js";
+import { initVaultFlow, type InitFlowResult } from "../flows/init.js";
+import { federationRepoFullName, vaultRepoName } from "../util/federation-paths.js";
 import { recordInitFailure } from "../util/failure-log.js";
 import type { TemplateName } from "../templates/index.js";
+import { uuid7BytesToDashedString } from "../util/uuid7.js";
 
 export function buildInitCommand(): Command {
   const cmd = new Command("init");
   cmd
-    .description("Create a new Lyt vault (folder + .obsidian/ + .lyt/) and register it")
+    .description("Create a new Lyt vault (folder + .lyt/) and register it")
     .argument("<name>", "Vault name (used for path + vault rid)")
     .option("--path <dir>", "Override the default location (~/lyt/vaults/<name>)")
     .option(
@@ -39,7 +40,7 @@ export function buildInitCommand(): Command {
     .addOption(
       new Option("--template <name>", "Scaffold template")
         .choices(["empty", "obsidian-default"])
-        .default("obsidian-default"),
+        .default("empty"),
     )
     .option("--parent <vault>", "Parent vault ref (e.g., vault:al0)")
     .option("--tier-hint <tier>", "Tier label hint (e.g., L0, L1, L2 — informational only)")
@@ -63,6 +64,7 @@ export function buildInitCommand(): Command {
       "--commit-initial",
       "After scaffolding, stage and commit the lyt scaffold files (explicit path list, never `git add -A`). Off by default.",
     )
+    .option("--json", "Emit machine-readable JSON instead of human-readable output")
     .action(async (name: string, opts: InitCliOpts) => {
       const desc = await resolveDescription(opts);
 
@@ -74,10 +76,8 @@ export function buildInitCommand(): Command {
         if (name.includes("/")) {
           const namedMesh = name.slice(0, name.indexOf("/"));
           if (namedMesh !== opts.mesh) {
-            // eslint-disable-next-line no-console
-            console.error(
-              `lyt vault init: conflicting mesh — name '${name}' specifies mesh '${namedMesh}' but --mesh is '${opts.mesh}'. Pass one or the other.`,
-            );
+            const message = `lyt vault init: conflicting mesh — name '${name}' specifies mesh '${namedMesh}' but --mesh is '${opts.mesh}'. Pass one or the other.`;
+            emitInitError(opts.json === true, "conflicting-mesh", message);
             process.exitCode = 2;
             return;
           }
@@ -139,11 +139,32 @@ export function buildInitCommand(): Command {
           summary: `initVaultFlow threw: ${msg}`,
           context: { name },
         });
+        if (opts.json === true) {
+          const code =
+            typeof err === "object" &&
+            err !== null &&
+            "errorCode" in err &&
+            typeof err.errorCode === "string"
+              ? err.errorCode
+              : "vault-init-error";
+          emitInitError(true, code, msg);
+          process.exitCode = 1;
+          return;
+        }
         throw err;
       }
 
+      const displayName = result.meshAssignment?.meshName
+        ? `${result.meshAssignment.meshName}/${effectiveName.includes("/") ? effectiveName.slice(effectiveName.indexOf("/") + 1) : effectiveName}`
+        : effectiveName;
+      if (opts.json === true) {
+        // eslint-disable-next-line no-console
+        console.log(JSON.stringify(buildInitJsonPayload(result, displayName), null, 2));
+        return;
+      }
+
       // eslint-disable-next-line no-console
-      console.log(`Created Lyt vault '${result.meshAssignment?.meshName ? `${result.meshAssignment.meshName}/${effectiveName.includes("/") ? effectiveName.slice(effectiveName.indexOf("/") + 1) : effectiveName}` : effectiveName}'`);
+      console.log(`Created Lyt vault '${displayName}'`);
       // eslint-disable-next-line no-console
       console.log(`  path:     ${result.vaultPath}`);
       // eslint-disable-next-line no-console
@@ -168,6 +189,9 @@ export function buildInitCommand(): Command {
         // eslint-disable-next-line no-console
         console.log(`  mesh:     ${result.meshAssignment.statusVoiceEmitted}`);
       }
+      const publishNext = buildInitPublishNextStep(result, displayName);
+      // eslint-disable-next-line no-console
+      console.log(`  next:     ${publishNext.message}`);
       if (result.federationSelfHealed) {
         // eslint-disable-next-line no-console
         console.log(`  pod:      ${result.federationSelfHealed.statusVoiceEmitted}`);
@@ -200,6 +224,68 @@ interface InitCliOpts {
   starterFigment?: boolean;
   git?: boolean;
   commitInitial?: boolean;
+  json?: boolean;
+}
+
+export function buildInitJsonPayload(result: InitFlowResult, displayName: string) {
+  return {
+    ok: true,
+    vault: {
+      name: displayName,
+      path: result.vaultPath,
+      rid: uuid7BytesToDashedString(result.vaultRid),
+      memscopeRid: uuid7BytesToDashedString(result.memscopeRid),
+      template: result.template,
+      tier: result.tier,
+    },
+    primingFilesWritten: result.primingFilesWritten,
+    git: {
+      initialized: result.gitInitialized,
+      initialCommitMade: result.initialCommitMade,
+    },
+    registry: {
+      registered: result.registered,
+      committed: result.committed,
+      unverifiedNote: result.unverifiedNote,
+    },
+    mesh: result.meshAssignment,
+    federation: result.federationSelfHealed,
+    publish: buildInitPublishNextStep(result, displayName),
+  };
+}
+
+export function buildInitPublishNextStep(result: InitFlowResult, displayName: string) {
+  const command = `lyt sync --vault ${displayName}`;
+  const mesh = result.meshAssignment;
+  const owner = mesh?.ownCreated === true ? mesh.pushTarget : null;
+  if (owner !== null && owner.length > 0) {
+    const expectedRepo = `${owner}/${vaultRepoName(displayName)}`;
+    return {
+      status: "pending-scoped-sync" as const,
+      remoteAction: "none" as const,
+      command,
+      visibility: "private" as const,
+      expectedRepo,
+      message:
+        `No remote action happened. Only the scoped sync remains: run \`${command}\` ` +
+        `to create the private online copy ${expectedRepo} and save only this vault.`,
+    };
+  }
+  return {
+    status: "local-only-no-push-target" as const,
+    remoteAction: "none" as const,
+    command,
+    visibility: "private" as const,
+    expectedRepo: null,
+    message:
+      `No remote action happened. This mesh has no configured push target, so the vault ` +
+      `remains local; configure the mesh before running \`${command}\`.`,
+  };
+}
+
+function emitInitError(json: boolean, error: string, message: string): void {
+  // eslint-disable-next-line no-console
+  console.error(json ? JSON.stringify({ ok: false, error, message }, null, 2) : message);
 }
 
 function collectTopic(value: string, previous: string[]): string[] {

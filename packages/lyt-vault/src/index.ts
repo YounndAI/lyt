@@ -1118,7 +1118,11 @@ export type {
 // Brief B (B.1/B.2) — the shared publish-materialization atoms (per-vault +
 // pod-commit) + the pod-local orchestrator. init/adopt call materializePodLocal
 // push-held; the lyt-mesh sync engine reuses the atoms with push=true.
-export { materializeVaultPublishable, commitPodRepo } from "./flows/federation/vault-publish.js";
+export {
+  materializeVaultPublishable,
+  commitPodRepo,
+  normalizeGitHubRepoCoordinate,
+} from "./flows/federation/vault-publish.js";
 export type {
   MaterializeVaultOptions,
   MaterializeVaultResult,

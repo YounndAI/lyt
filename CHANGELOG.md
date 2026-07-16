@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.12.2] — 2026-07-16
+
+### Changed
+- **Editor-neutral creation** — `lyt vault init` supports JSON, defaults to an editor-neutral scaffold, and creates `.obsidian/` only with explicit `--template obsidian-default`; its receipt names the exact scoped sync follow-up and confirms init made no online change.
+- **Scoped first publication** — `lyt sync --vault <vault>` uses an owned mesh's trusted target to create the exact missing private repository, attach the remote, establish the first upstream, and publish only that vault; genuine local/no-target vaults remain local.
+- **Second-machine reconstruction** — legacy joins resolve their declared organization owner, clones are homed into the intended mesh, reconstruction failures reach the process exit code, and machine-local repair no longer dirties tracked `.lyt/agents.md`.
+- **Main-vault lifecycle safety** — delete, forget, and abandon refuse a mesh main vault; verification reports a missing main vault rather than silently tombstoning it.
+- **Remote and ownership hardening** — publication rejects mismatched origins, revalidates immediately before push, and authenticates claimed user or organization ownership before remote creation or writes.
+- **Truthful sync outcomes** — scoped JSON and quiet mode distinguish published, already-online, local-only, held, read-only, deferred, origin-mismatch, and incomplete outcomes and preserve failure in the exit code.
+- **Local-only sync isolation** — `--no-publish` performs no network discovery, fetch, remote creation, or push.
+- **Origin validation before network writes** — scoped sync validates the expected origin before both fetch and push, refusing mismatches.
+- **Adopted pod validation** — malformed `pod.yon` input is refused instead of being accepted into recovery.
+- **Public artifact compliance** — package tarballs carry `LICENSE`, `NOTICE`, `CONTRIBUTING.md`, and `SECURITY.md`, use the correct prominent Lyt mark, and stamp required headers into shipped JavaScript.
+- **Maintained tar extraction** — Lyt's direct `tar` dependency is upgraded to maintained 7.x, with packed-artifact proof asserting the resolved version.
+
+---
 ## [0.12.1] — 2026-07-14
 
 Reliability follow-up for multi-machine and team use. This release preserves pod ownership during reconstruction, gives received vaults a clean home, and adds stricter identity checks before remote state is adopted.

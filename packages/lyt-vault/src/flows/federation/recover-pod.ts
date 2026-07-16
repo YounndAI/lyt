@@ -28,13 +28,15 @@ import {
   getFederationRepoDir,
   vaultRepoName,
 } from "../../util/federation-paths.js";
+import { getDefaultGhExecutor, type GhExecutor } from "../../util/gh-discover.js";
 import { realFederationGhClient } from "../../util/gh-federation.js";
 import { isValidGhHandle, validateMeshName } from "../../util/identity.js";
-import { resolveVaultPath } from "../../util/paths.js";
+import { getDefaultVaultsRoot, resolveVaultPath } from "../../util/paths.js";
+import { assertNoSymlinkOnWritePath } from "../../util/write-path-guard.js";
 import { hexToUuid7Bytes } from "../../util/uuid7.js";
 import { validatePodManifestSemantics } from "../../yon/federation-manifest-validate.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
-import type { FedMeshRole } from "../../yon/federation-write.js";
+import type { FedMeshRecord, FedMeshRole } from "../../yon/federation-write.js";
 import { registerVaultFromYon } from "../register.js";
 
 // Brief B (B.5 — folds a review finding). Pod.yon-driven RECOVERY/acquisition.
@@ -65,6 +67,10 @@ export interface RecoverPodArgs {
   podDir?: string | undefined;
   // Injectable clone seam (tests pass a fake that drops a vault.yon).
   cloneFn?: VaultCloneFn | undefined;
+  // Existing GitHub executor seam, threaded through adopt/bootstrap so tests of
+  // the consumed package never escape to the live `gh` binary. Runtime defaults
+  // to the real executor below.
+  ghExecutor?: GhExecutor | undefined;
 }
 
 // G1 (0.12.1 completeness) — a vault DROPPED during the clone-walk is a
@@ -96,13 +102,14 @@ export interface RecoverPodResult {
   // loud + classified). Non-empty ⇒ the reconstruction is INCOMPLETE and must
   // report a nonzero exit (see reconstructionExitCode).
   drops: RecoverDrop[];
-  // FIX A (A2-R3 MAJOR-1) — a DISTINGUISHABLE semantic-refusal signal. Set ONLY on
-  // the semantic-validation refusal return (a parseable-but-incoherent pod.yon):
-  // fail-closed-EARLY. A legitimately-empty COHERENT pod (0 issues, 0 vaults) MUST
-  // NOT set it — it is a legit success (exit 0). Threaded end-to-end so the exit
-  // code is a distinct nonzero (13), the step-3b gh-discovery walk is NOT run, and
-  // the wizard/command layer reports FAILURE, never "Adopted successfully".
+  // A distinguishable fail-closed refusal. Semantic incoherence and an
+  // unauthenticated ownership claim both stop before the discovery/clone walk;
+  // a legitimately-empty coherent pod does not set this and remains exit 0.
   refused?: boolean;
+  refusedKind?: "syntax-validation" | "semantic-validation" | "ownership-authentication";
+  // Complete, actionable text rendered at the authority boundary. Callers must
+  // relay this instead of guessing whether the remedy is manifest repair or
+  // GitHub authentication/organization permission.
   refusedReason?: string;
 }
 
@@ -152,6 +159,85 @@ const defaultVaultCloneFn: VaultCloneFn = async ({ handle, repo, targetPath }) =
   await realFederationGhClient.cloneExisting(handle, repo, targetPath);
 };
 
+const ORG_CREATE_AUTHORITY_QUERY =
+  "query($login:String!){organization(login:$login){viewerCanCreateRepositories}}";
+
+function renderRecoveryRefusal(
+  kind: NonNullable<RecoverPodResult["refusedKind"]>,
+  detail: string,
+  remedy: string,
+): string {
+  const subject =
+    kind === "syntax-validation"
+      ? "pod.yon failed syntax validation"
+      : kind === "semantic-validation"
+        ? "pod.yon failed semantic validation"
+        : "pod.yon ownership authentication failed";
+  return `${subject}: ${detail}. ${remedy}`;
+}
+
+async function verifyRecoveredOwnMeshClaims(
+  meshes: readonly FedMeshRecord[],
+  gh: GhExecutor,
+): Promise<string[]> {
+  const claims = meshes.filter((mesh) => mesh.role === "own" && mesh.pushTarget.length > 0);
+  if (claims.length === 0) return [];
+
+  const issues: string[] = [];
+  let authenticatedActor: string | null = null;
+  const orgAuthority = new Map<string, boolean>();
+
+  for (const mesh of claims) {
+    try {
+      if (mesh.pushKind === "handle") {
+        authenticatedActor ??= (await gh(["api", "/user", "--jq", ".login"])).trim();
+        if (
+          authenticatedActor.length === 0 ||
+          authenticatedActor.toLowerCase() !== mesh.pushTarget.toLowerCase()
+        ) {
+          issues.push(
+            `own mesh ${JSON.stringify(mesh.meshName)} targets personal owner ` +
+              `${JSON.stringify(mesh.pushTarget)}, but the authenticated GitHub actor is ` +
+              `${JSON.stringify(authenticatedActor || "unknown")}`,
+          );
+        }
+        continue;
+      }
+
+      const key = mesh.pushTarget.toLowerCase();
+      let canCreate = orgAuthority.get(key);
+      if (canCreate === undefined) {
+        const raw = await gh([
+          "api",
+          "graphql",
+          "-f",
+          `query=${ORG_CREATE_AUTHORITY_QUERY}`,
+          "-F",
+          `login=${mesh.pushTarget}`,
+          "--jq",
+          ".data.organization.viewerCanCreateRepositories",
+        ]);
+        canCreate = raw.trim().toLowerCase() === "true";
+        orgAuthority.set(key, canCreate);
+      }
+      if (!canCreate) {
+        issues.push(
+          `own mesh ${JSON.stringify(mesh.meshName)} targets organization ` +
+            `${JSON.stringify(mesh.pushTarget)}, but GitHub did not confirm that the ` +
+            `authenticated actor may create repositories there`,
+        );
+      }
+    } catch (err) {
+      issues.push(
+        `own mesh ${JSON.stringify(mesh.meshName)} ownership could not be authenticated ` +
+          `for ${JSON.stringify(mesh.pushTarget)}: ${errMsg(err)}`,
+      );
+    }
+  }
+
+  return issues;
+}
+
 export async function recoverVaultsFromPodManifest(
   args: RecoverPodArgs,
 ): Promise<RecoverPodResult> {
@@ -194,12 +280,22 @@ export async function recoverVaultsFromPodManifest(
   try {
     doc = parseFederationYon(readFileSync(podYonPath, "utf8"));
   } catch (err) {
+    const detail = errMsg(err);
+    const remedy =
+      `Inspect/repair the pod.yon in ${federationRepoFullName(args.handle)} (or re-clone ` +
+      `the pod), then re-run 'lyt init'.`;
+    const refusedReason = renderRecoveryRefusal("syntax-validation", detail, remedy);
     return {
       meshesRecovered: 0,
       vaultsRecovered,
       skipped,
       drops,
-      warnings: [`pod.yon parse failed: ${errMsg(err)}`],
+      refused: true,
+      refusedKind: "syntax-validation",
+      refusedReason,
+      warnings: [
+        `pod.yon failed syntax validation — refusing before any clone: ${detail}. ${remedy}`,
+      ],
     };
   }
 
@@ -219,20 +315,22 @@ export async function recoverVaultsFromPodManifest(
     const remedy =
       `Inspect/repair the pod.yon in ${federationRepoFullName(args.handle)} (or re-clone ` +
       `the pod), then re-run 'lyt init'.`;
+    const refusedReason = renderRecoveryRefusal("semantic-validation", detail, remedy);
     // eslint-disable-next-line no-console
     console.error(
       `lyt reconstruction REFUSED — pod.yon parsed but is semantically incoherent ` +
-        `(${semanticIssues.length} issue(s)); no vault was cloned: ${detail}. ${remedy}`,
+        `(${semanticIssues.length} issue(s)); no vault was cloned: ${refusedReason}`,
     );
     return {
       meshesRecovered: 0,
       vaultsRecovered,
       skipped,
       drops,
-      // FIX A — the DISTINGUISHABLE fail-closed-early signal (set ONLY here). A
-      // legit-empty coherent pod never reaches this branch, so it never sets it.
+      // Distinguishable semantic refusal; ownership authentication below uses
+      // the same exit category with a different typed kind and remedy.
       refused: true,
-      refusedReason: `pod.yon failed semantic validation (${semanticIssues.length} issue(s)): ${detail}`,
+      refusedKind: "semantic-validation",
+      refusedReason,
       warnings: [
         `pod.yon failed semantic validation (${semanticIssues.length} issue(s)) — refusing ` +
           `to reconstruct before any clone: ${detail}. ${remedy}`,
@@ -240,11 +338,49 @@ export async function recoverVaultsFromPodManifest(
     };
   }
 
+  // `role=own` is a manifest claim, not authenticated authority. `ownCreated`
+  // selects repository owners for publish and repair operations, so persisting
+  // it from an unverified claim can redirect repo creation, pushes, or origin
+  // rewrites. Authenticate every non-local ownership claim before the first
+  // mesh insert or vault clone. Personal targets must match the live GitHub
+  // actor; organization targets must explicitly allow that actor to create
+  // repositories. False or indeterminate proof refuses the whole recovery so
+  // no partially-authorized registry state can be consumed later.
+  const ownershipIssues = await verifyRecoveredOwnMeshClaims(
+    doc.meshes,
+    args.ghExecutor ?? getDefaultGhExecutor(),
+  );
+  if (ownershipIssues.length > 0) {
+    const detail = ownershipIssues.join("; ");
+    const remedy =
+      `Authenticate GitHub with the account that owns these targets (and has repository-create ` +
+      `authority for each organization), then re-run 'lyt init'.`;
+    const refusedReason = renderRecoveryRefusal("ownership-authentication", detail, remedy);
+    // eslint-disable-next-line no-console
+    console.error(
+      `lyt reconstruction REFUSED — pod.yon ownership claims could not be authenticated; ` +
+        `no mesh or vault was recovered: ${refusedReason}`,
+    );
+    return {
+      meshesRecovered: 0,
+      vaultsRecovered,
+      skipped,
+      drops,
+      refused: true,
+      refusedKind: "ownership-authentication",
+      refusedReason,
+      warnings: [
+        `pod.yon ownership authentication failed — refusing before any mesh insert or vault ` +
+          `clone: ${detail}. ${remedy}`,
+      ],
+    };
+  }
+
   // R1-m1 fix-pass — index the MANIFEST mesh records by rid so the vault loop
   // can classify a drop against the manifest's declared `role` (not just the
   // registry row's push shape).
-  const manifestMeshByRidHex = new Map<string, FedMeshRole>();
-  for (const m of doc.meshes) manifestMeshByRidHex.set(m.meshRidHex, m.role);
+  const manifestMeshByRidHex = new Map<string, FedMeshRecord>();
+  for (const m of doc.meshes) manifestMeshByRidHex.set(m.meshRidHex, m);
 
   // 1. Recover meshes first (so vault home-mesh FK is satisfiable). Idempotent.
   let meshesRecovered = 0;
@@ -278,21 +414,12 @@ export async function recoverVaultsFromPodManifest(
           // ownCreated fail-closed to false, which reconstructed every OWN mesh
           // as `join` and (via deriveVaultRepoOwner) refused the org push_target,
           // clone-404ing every org vault. The manifest's `role` IS the
-          // ownership authority (H1: manifest-derivable, no gh call). M2 keeps
-          // this fail-CLOSED: only an explicit `role=="own"` confers ownership.
-          //
-          // LOAD-BEARING INVARIANT (a review finding) — recover-pod reads ONLY the
-          // user's OWN `{handle}/lyt-pod`, a PROJECTED manifest view with NO
-          // per-writer `writerId`, so this path structurally CANNOT apply the
-          // origin-writer guard the ledger write-back uses. Trusting `role=own`
-          // here is safe ONLY because the invariant "pod.yon role=own ⇒
-          // user-authored via `lyt mesh init`" holds: `mesh join` hard-sets
-          // ownCreated=false (mesh-join.ts) and `mesh subscribe` never touches
-          // the mesh ledger, so no foreign mesh is ever folded into this pod.yon
-          // with role=own. If any FUTURE flow folds a foreign mesh into pod.yon
-          // as role=own (e.g. a cross-pod mesh-ledger merge), THIS restore
-          // re-opens the origin-hijack — such a flow MUST re-establish writer
-          // provenance before it can rely on this path.
+          // ownership claim. M2 keeps parsing fail-CLOSED: only an explicit
+          // `role=="own"` can reach this assignment. The authenticated preflight
+          // above is the authority boundary: it proves the live actor matches a
+          // personal target or may create repositories in the target org before
+          // any mesh is inserted. Therefore this restore never promotes the
+          // unauthenticated manifest claim by itself.
           ownCreated: m.role === "own",
         });
         meshesRecovered += 1;
@@ -322,13 +449,26 @@ export async function recoverVaultsFromPodManifest(
     let owner = args.handle;
     // The vault's home-mesh role as DECLARED in the manifest (undefined for an
     // orphan / absent mesh block) — drives the drop classifier (R1-m1).
-    const manifestRole =
+    const manifestMesh =
       v.homeMeshRidHex !== null ? manifestMeshByRidHex.get(v.homeMeshRidHex) : undefined;
+    const manifestRole = manifestMesh?.role;
     try {
       if (v.homeMeshRidHex !== null) {
         homeMesh = await getMeshByRid(db, hexToUuid7Bytes(v.homeMeshRidHex));
       }
-      owner = deriveVaultRepoOwner(homeMesh, args.handle);
+      // The cloned pod manifest is the reconstruction source of truth for the
+      // READ coordinate. Historical pod.yon files legitimately carry
+      // `role=join` + `push_kind=handle` for meshes owned through another
+      // account/org, while still preserving their correct push_target (for
+      // example Marlink-Technologies and YounndAI). `role` continues to gate
+      // write authority/ownCreated. A current foreign `role=join` + `push_kind=org`
+      // remains untrusted and uses deriveVaultRepoOwner's fail-closed fallback.
+      owner =
+        manifestMesh !== undefined &&
+        isValidGhHandle(manifestMesh.pushTarget) &&
+        (manifestMesh.role === "own" || manifestMesh.pushKind === "handle")
+          ? manifestMesh.pushTarget
+          : deriveVaultRepoOwner(homeMesh, args.handle);
     } catch {
       owner = args.handle;
     }
@@ -349,6 +489,10 @@ export async function recoverVaultsFromPodManifest(
         continue;
       }
       const targetPath = resolveVaultPath(v.vaultName);
+      // Guard the target leaf and every parent before even probing for an
+      // existing vault.yon: a leaf junction can make that read, DB init, and
+      // registration operate on an external tree without ever cloning.
+      assertNoSymlinkOnWritePath(getDefaultVaultsRoot(), targetPath);
       const vaultYonPath = join(targetPath, ".lyt", "vault.yon");
       if (!existsSync(vaultYonPath)) {
         await cloneFn({ handle: owner, repo, targetPath });

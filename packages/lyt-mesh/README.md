@@ -9,7 +9,7 @@
 <p align="center">
   <strong>@younndai/lyt-mesh</strong><br />
   The mesh layer — weave markdown vaults into shared knowledge meshes across people and organizations.<br />
-  <em>Part of the Lyt™ toolchain — federated markdown vaults you own, made legible to AI.</em>
+  <em>Part of the Lyt (Link Your Think™) toolchain — federated markdown vaults you own, made legible to AI.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt-mesh` is the **mesh layer** of [Lyt™](https://github.com/YounndAI/lyt) — the operations that span multiple markdown vaults. A **mesh** is a named group of vaults with declared edges between them: your personal vaults, a team's shared vaults, an organization's knowledge base, or a public mesh anyone can subscribe to. Where [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault) owns the single-vault primitive, this package owns the graph: cloning a whole owner's vault set onto a new machine, subscribing to vaults from other meshes, validating the declared topology, and rolling up activity across edges.
+`@younndai/lyt-mesh` is the **mesh layer** of [Lyt](https://github.com/YounndAI/lyt) — the operations that span multiple markdown vaults. A **mesh** is a named group of vaults with declared edges between them: your personal vaults, a team's shared vaults, an organization's knowledge base, or a public mesh anyone can subscribe to. Where [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault) owns the single-vault primitive, this package owns the graph: cloning a whole owner's vault set onto a new machine, subscribing to vaults from other meshes, validating the declared topology, and rolling up activity across edges.
 
 Meshes connect the way email does — independent vaults that interoperate, publishers never see subscribers, and there is no central server. Everything stays markdown-in-Git, so a mesh is just a set of git repos with a machine-readable shape an AI agent can traverse: subscribe to a public knowledge mesh and your agent reads its content directly, ranked alongside your own notes.
 

@@ -19,10 +19,10 @@ License Agreement (CLA). The CLA is a one-time legal document that confirms:
 
 ### Which CLA do I sign?
 
-- **[Individual CLA](CLA.md)** — if you are
+- **[Individual CLA](https://github.com/YounndAI/lyt/blob/main/CLA.md)** — if you are
   contributing on your own behalf, on your own time, and your employer has no
   claim to your intellectual-property output.
-- **[Entity CLA](CLA-entity.md)** — if you are
+- **[Entity CLA](https://github.com/YounndAI/lyt/blob/main/CLA-entity.md)** — if you are
   contributing as an employee or contractor on behalf of an employer or
   organization. The Entity CLA covers all contributors your organization
   authorizes (listed in its Schedule A).
@@ -49,7 +49,7 @@ confirms a signed CLA is on file for all contributors.**
 
 ## Code of conduct
 
-We follow the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+We follow the [Contributor Covenant Code of Conduct](https://github.com/YounndAI/lyt/blob/main/CODE_OF_CONDUCT.md).
 By contributing, you agree to abide by its terms.
 
 ## Questions?

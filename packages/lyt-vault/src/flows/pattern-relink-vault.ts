@@ -22,7 +22,10 @@ import { patternLinkFlow, type PatternLinkResult } from "./pattern-link.js";
 
 // On vault adopt/join, auto-rebuild symlinks for every installed pattern. Symlinks are
 // gitignored from vault repos; this restores them on the local machine.
-export async function relinkAllPatternsForVault(vaultName: string): Promise<PatternLinkResult[]> {
+export async function relinkAllPatternsForVault(
+  vaultName: string,
+  opts: { regenerateAgentsMd?: boolean | undefined } = {},
+): Promise<PatternLinkResult[]> {
   const patternsDir = getUserPatternsDir();
   if (!existsSync(patternsDir)) return [];
   const patternNames = readdirSync(patternsDir).filter((n) => {
@@ -34,7 +37,11 @@ export async function relinkAllPatternsForVault(vaultName: string): Promise<Patt
   const results: PatternLinkResult[] = [];
   for (const name of patternNames) {
     try {
-      const r = await patternLinkFlow({ patternName: name, vaultName });
+      const r = await patternLinkFlow({
+        patternName: name,
+        vaultName,
+        regenerateAgentsMd: opts.regenerateAgentsMd,
+      });
       results.push(r);
     } catch {
       // Best-effort; one pattern's failure doesn't block the rest.

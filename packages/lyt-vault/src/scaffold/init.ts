@@ -141,7 +141,9 @@ export function initVault(opts: InitOptions): InitResult {
 
   writeVaultYon({ vaultPath, name: opts.name, vaultRid, memscopeRid, owner, createdAt, opts });
   writeMemscopeYon({ vaultPath, name: opts.name, vaultRid, memscopeRid, owner });
-  writeObsidianScaffold(vaultPath, template);
+  if (template === "obsidian-default") {
+    writeObsidianScaffold(vaultPath, template);
+  }
   writeReadme(vaultPath, opts.name);
   writeVaultGitignore(vaultPath);
   writeNotesPlaceholder(vaultPath);
@@ -546,7 +548,10 @@ const SCAFFOLD_COMMIT_PATHS = [".lyt", ".obsidian", ".gitignore", "README.md", "
 
 function runInitialCommit(vaultPath: string, primingFiles: readonly string[]): boolean {
   try {
-    const paths = [...SCAFFOLD_COMMIT_PATHS, ...primingFiles];
+    const paths = [
+      ...SCAFFOLD_COMMIT_PATHS.filter((path) => existsSync(join(vaultPath, path))),
+      ...primingFiles,
+    ];
     const args = paths.map((p) => `"${p}"`).join(" ");
     execSync(`git add ${args}`, {
       cwd: vaultPath,

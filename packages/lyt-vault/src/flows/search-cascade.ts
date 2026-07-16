@@ -1460,7 +1460,7 @@ function hexLowerToBytes(hex: string): Uint8Array {
 
 // CRIT-B (residual sweep): cluster YON (lanes.yon / arcs.yon) now travels
 // cross-machine, so a peer-authored `figment_rid` reaches this FS sink. An
-// unguarded `figment_rid` containing dot-dot segments would escape
+// unguarded `figment_rid="<multi-level traversal>/Users/<victim>/.ssh/id_rsa"` would escape
 // the vault root and surface arbitrary local-file bytes in a search snippet
 // (arbitrary-read / exfil). Every read of a figment path derived from cluster
 // YON MUST pass through this containment gate first. This is the primary layer

@@ -70,6 +70,9 @@ export interface InitFlowResult extends InitResult {
     autoNormalizedFrom: string | null;
     meshAutoCreated: boolean;
     statusVoiceEmitted: string;
+    pushTarget: string | null;
+    pushKind: string | null;
+    ownCreated: boolean;
   } | null;
 }
 
@@ -316,6 +319,9 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
         autoNormalizedFrom: meshSelfHealAssignment.autoNormalizedFrom,
         meshAutoCreated: meshSelfHealAssignment.meshAutoCreated,
         statusVoiceEmitted: meshSelfHealAssignment.statusVoiceEmitted,
+        pushTarget: meshSelfHealAssignment.pushTarget,
+        pushKind: meshSelfHealAssignment.pushKind,
+        ownCreated: meshSelfHealAssignment.ownCreated,
       };
     }
 
@@ -358,6 +364,9 @@ interface ResolvedHomeMeshAssignment {
   autoNormalizedFrom: string | null;
   meshAutoCreated: boolean;
   statusVoiceEmitted: string;
+  pushTarget: string | null;
+  pushKind: string | null;
+  ownCreated: boolean;
   scaffoldHomeMesh: {
     meshRid: Uint8Array;
     meshName: string;
@@ -454,6 +463,9 @@ async function maybeAssignHomeMesh(
     autoNormalizedFrom,
     meshAutoCreated,
     statusVoiceEmitted,
+    pushTarget: meshRow.pushTarget,
+    pushKind: meshRow.pushKind,
+    ownCreated: meshRow.ownCreated,
     scaffoldHomeMesh: {
       meshRid: meshRow.rid,
       meshName: meshRow.name,
@@ -484,6 +496,10 @@ async function maybeSelfHealFederation(
       handle: decision.handle,
       visibility: "private",
       pushToRemote: fed.pushOnSelfHeal ?? false,
+      // `vault init` is local-only. The explicit scoped `lyt sync --vault`
+      // is the first operation authorized to create a remote or publish data.
+      createRemoteIfMissing: false,
+      localOnly: true,
       // Thread the open registry through (fold #4).
       db,
       ...(fed.ghClient !== undefined ? { ghClient: fed.ghClient } : {}),

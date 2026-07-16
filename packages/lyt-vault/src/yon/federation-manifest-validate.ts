@@ -22,9 +22,8 @@
 // on any mesh or clones any vault — fail-closed-EARLY (a corrupt/suspicious pod
 // stops the flow before any vault is touched).
 //
-// The networked ownership oracle (gh-accessibility of each push_target) is the
-// explicitly-DEFERRED 0.12.2 gh-oracle lane — this file is the cheap
-// manifest-INTERNAL check only.
+// This file is the cheap manifest-INTERNAL check only. recover-pod follows it
+// with the live GitHub ownership/organization-create preflight before mutation.
 
 import { isValidGhHandle } from "../util/identity.js";
 import type { FederationDoc } from "./federation-write.js";
@@ -90,7 +89,8 @@ export function validatePodManifestSemantics(doc: FederationDoc): ManifestSemant
     // at an attacker-controlled org would clone foreign content into a trusted
     // `vaults/{mesh}` bucket as role=own (design §6.1 G2). This is the cheap
     // INTERNAL check — the push_target must be a valid GitHub owner-handle SHAPE;
-    // the full networked gh-accessibility oracle is the DEFERRED 0.12.2 lane.
+    // recover-pod performs the live GitHub authority check after this gate and
+    // before any registry insert or clone.
     // An EMPTY push_target is a legit LOCAL-ONLY (--no-push) own mesh — owner
     // resolution falls back to the federation handle — so it is allowed.
     if (m.role === "own" && m.pushTarget.length > 0 && !isValidGhHandle(m.pushTarget)) {

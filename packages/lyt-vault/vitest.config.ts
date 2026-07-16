@@ -83,7 +83,7 @@ const ACCESS_ISOLATED = ["tests/access/**/*.test.ts"];
 // real fetch never fires). Passes in isolation; only flaked in the full run.
 const EMBEDDINGS_PROGRESS_ISOLATED = ["tests/util/embeddings-download-progress.test.ts"];
 
-// The observable-degrade regression hoists a
+// Inc-2 R1 (release review) — the observable-degrade red-prove hoists a
 // vi.mock("../../src/yon/federation-vault-ledger-author.js") so it can inject a
 // transient authoring fault into renameVaultFlow / moveVaultFlow and prove the
 // non-fatal degrade is surfaced. Under the shared single-fork module graph

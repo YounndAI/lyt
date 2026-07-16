@@ -1343,21 +1343,17 @@ export async function phase_adoptPod(opts: WizardRunOptions): Promise<WizardPhas
     const createdNote = result.firstVaultCreated
       ? " + scaffolded personal/main (pod had no acquirable vaults)"
       : "";
-    // FIX A (A2-R3 MAJOR-1) — a SEMANTIC REFUSAL (the cloned pod.yon parsed but is
-    // incoherent) is a FAILURE, not a clean adopt. adoptAndPrimeFlow already failed
-    // closed EARLY (no gh-walk, no scaffold); surface it as ok:false with the
-    // distinct exit code 13 so the command maps it to process.exitCode and never
-    // reports "Adopted … successfully".
+    // A recovery refusal is a failure, not a clean adopt. Its source-generated
+    // reason carries the correct remedy for semantic invalidity versus failed
+    // GitHub ownership authentication.
     if (result.manifestRefused === true) {
       return {
         phase: 8,
         name: "adopt-pod",
         ok: false,
         message:
-          `Refusing the adopt of pod ${result.podHandle}/${federationRepoName()} — the cloned ` +
-          `pod.yon parsed but is semantically INCOHERENT; no vault was cloned. ` +
-          `${result.manifestRefusedReason ?? ""}`.trimEnd() +
-          ` Inspect/repair the pod.yon (or re-clone the pod) and re-run.`,
+          `Refusing the adopt of pod ${result.podHandle}/${federationRepoName()} — ` +
+          `no vault was cloned. ${result.manifestRefusedReason ?? ""}`.trimEnd(),
         // a review finding — carry the refusal exit code (13) so the command maps it to
         // process.exitCode, distinct from the drop codes (12/11) and clean (0).
         data: {
