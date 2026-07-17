@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.13.3] — 2026-07-17
+
+### Fixed
+
+- **Scoped sync of existing vaults** — recognize a verified existing Git remote on legacy joined meshes without granting authority to create new repositories.
+- **Clean-machine adoption** — reflect committed index metadata instead of rewriting tracked lane/arc files, and report manifest-recovered vaults in `vaultsAcquired`.
+- **Agent bootstrap** — direct non-interactive agents to `lyt init --auto --json`; plain `lyt init` remains the Handler-driven wizard.
+
+---
 ## [0.13.2] — 2026-07-17
 
 ### Fixed

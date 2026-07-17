@@ -297,6 +297,17 @@ function buildOneLiner(): string {
   ].join("\n");
 }
 
+function buildInitSection(): string {
+  return [
+    "## `[lyt.init]` Bootstrap — agents use the non-interactive path",
+    "",
+    "On a clean machine or an empty local registry, an agent runs `lyt init --auto --json`.",
+    "Plain `lyt init` enters the Handler-driven interactive wizard and must be used only when its",
+    "prompts are visibly connected to a Handler. The agent-safe path may adopt an existing pod,",
+    "but it never prompts for or performs outward publication; sync remains a separate explicit step.",
+  ].join("\n");
+}
+
 function buildPrimeSection(): string {
   return [
     "## `[lyt.prime]` Orient first — discover state, never assume paths",
@@ -815,6 +826,8 @@ export async function generateAgentManual(args: AgentManualArgs): Promise<AgentM
     "> Lyt release this matches.",
     "",
     buildOneLiner(),
+    "",
+    buildInitSection(),
     "",
     buildPrimeSection(),
     "",

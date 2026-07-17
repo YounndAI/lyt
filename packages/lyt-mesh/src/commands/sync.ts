@@ -25,6 +25,7 @@ import {
   getHandleFromIdentity,
   getMeshByRid,
   materializeVaultPublishable,
+  normalizeGitHubRepoCoordinate,
   openRegistry,
   podNeedsConnect,
   reconcilePublishFlow,
@@ -498,6 +499,8 @@ export async function materializeScopedVaultAfterSync(args: {
     const eligibility = classifyScopedPublishEligibility({
       publishable: !writeGate.blocked,
       mesh,
+      existingRepoCoordinate:
+        vault.gitUrl === null ? null : normalizeGitHubRepoCoordinate(vault.gitUrl),
       reportStatus: args.report?.status,
     });
     if (eligibility.status === "skipped-readonly") {
@@ -611,10 +614,23 @@ export type ScopedPublishEligibility =
 export function classifyScopedPublishEligibility(args: {
   publishable: boolean;
   mesh: { ownCreated: boolean; pushTarget: string | null } | null;
+  existingRepoCoordinate?: string | null;
   reportStatus: VaultSyncStatus | undefined;
 }): ScopedPublishEligibility {
   if (!args.publishable) return { status: "skipped-readonly" };
   const pushTarget = args.mesh?.ownCreated === true ? args.mesh.pushTarget : null;
+  const existingOwner = args.existingRepoCoordinate?.split("/", 1)[0] ?? null;
+  if (
+    existingOwner !== null &&
+    existingOwner.length > 0 &&
+    (args.reportStatus === "clean" ||
+      args.reportStatus === "committed" ||
+      args.reportStatus === "pushed" ||
+      args.reportStatus === "pulled" ||
+      args.reportStatus === "diverged-synced")
+  ) {
+    return { status: "already-online", pushTarget: existingOwner };
+  }
   if (pushTarget === null || pushTarget.length === 0) {
     return { status: "local-only-no-push-target" };
   }
@@ -713,7 +729,9 @@ async function resolveExpectedScopedOrigin(vaultName: string): Promise<string | 
     if (vault === null || vault.homeMeshRid === null) return undefined;
     const mesh = await getMeshByRid(db, vault.homeMeshRid);
     if (mesh?.ownCreated !== true || mesh.pushTarget === null || mesh.pushTarget.length === 0) {
-      return undefined;
+      return vault.gitUrl === null
+        ? undefined
+        : (normalizeGitHubRepoCoordinate(vault.gitUrl) ?? undefined);
     }
     return `${mesh.pushTarget}/${vaultRepoName(vault.name)}`;
   } finally {

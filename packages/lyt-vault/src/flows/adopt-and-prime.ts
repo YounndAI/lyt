@@ -42,7 +42,7 @@ import type { AdoptCloneFn } from "./mesh-adopt-cluster.js";
 import type { SubscribeCloneFn } from "./subscribe.js";
 import { meshInitFlow } from "./mesh-init.js";
 import { rebuildVaultFlow } from "./rebuild-vault.js";
-import { writeIndexWatermark } from "../util/index-watermark.js";
+import { reflectInboundIndex } from "./reflect-index.js";
 import { reconcileMeshLinks } from "./mesh-link-reconcile.js";
 import { healPatterns } from "../util/pattern-paths.js";
 
@@ -370,22 +370,21 @@ export async function adoptAndPrimeFlow(
       console.error(`lyt adopt: mesh-link reconcile failed non-fatally — ${msg}`);
     }
 
-    // 4. Re-index — V-B-6 fix-pass (2026-06-09): the adopt re-index was FTS-only
-    // (backfillFigmentCaches), so arcs/lanes/keywords stayed empty and search
-    // tiers 0/1 + the primer were blank until a manual `lyt reindex --all`. Run
-    // the ALL-TIER rebuild (lanes → arcs → fts → rollup) per vault so an adopt
-    // leaves search + primers FRESH. Per-vault non-fatal (never-fail); tombstoned
-    // vaults are skipped (rebuildVaultFlow rejects them, matching reindexFlow).
+    // 4. Re-index received vaults by reflecting their committed YON + markdown
+    // into machine-local caches. Re-clustering here rewrites tracked lanes.yon /
+    // arcs.yon and dirties a freshly cloned vault. Only a locally scaffolded
+    // fallback vault needs a full rebuild because it has no received index SoT.
     const reconciledVaultPaths: string[] = [];
     if (args.skipReconcile !== true) {
       const finalVaults = await listVaults(db);
       for (const v of finalVaults) {
         if (v.status === "tombstoned") continue;
         try {
-          await rebuildVaultFlow({ vault: v.name, registryDb: db });
-          // V-C-1 Phase B (L2) — stamp the index watermark so the L3 empty-result
-          // self-heal doesn't redundantly re-cluster a vault we just rebuilt.
-          writeIndexWatermark(v.path);
+          if (firstVaultCreated && v.path === primaryVaultPath) {
+            await rebuildVaultFlow({ vault: v.name, registryDb: db });
+          } else {
+            await reflectInboundIndex(v.name, v.path);
+          }
           reconciledVaultPaths.push(v.path);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -395,9 +394,11 @@ export async function adoptAndPrimeFlow(
       }
     }
 
-    const vaultsAcquired = clusterOutcomes
-      .filter((o) => o.status === "adopted" || o.status === "external")
-      .reduce((n, o) => n + o.membersProcessed, 0);
+    const vaultsAcquired =
+      vaultsRecoveredFromManifest +
+      clusterOutcomes
+        .filter((o) => o.status === "adopted" || o.status === "external")
+        .reduce((n, o) => n + o.membersProcessed, 0);
 
     // (Brief A) — regenerate the derived pod manifest from the now-populated
     // registry so the adopt leaves a POPULATED pod.yon (federationInitFlow at
