@@ -46,6 +46,7 @@ import {
   openRegistry,
   readIdentityCache,
   reconcilePublishFlow,
+  recoverVaultsFromPodManifest,
   reconstructionExitCode,
   ReadlinePromptHandler,
   renderNextSteps,
@@ -53,6 +54,7 @@ import {
   resolveAskedState,
   runWizard,
   startSpinner,
+  syncPodLedgerFlow,
   validateMeshName,
   type IPromptHandler,
   type PhaseSpinnerHandle,
@@ -304,6 +306,29 @@ export function buildLytInitCommand(): Command {
         // with the real handle + setRemote:true.
         materializePublish: (db) =>
           materializePodLocal(db, { push: false, setRemote: !isLocalFirstContext() }),
+        refreshExistingPod: async (db) => {
+          const refreshed = await syncPodLedgerFlow({
+            registryDb: db,
+            push: false,
+            refreshOnly: true,
+          });
+          if (refreshed.status === "conflict" || refreshed.status === "error") {
+            throw new Error(`existing pod refresh failed: ${refreshed.reason ?? refreshed.status}`);
+          }
+          if (refreshed.status === "skipped") return;
+          const recovered = await recoverVaultsFromPodManifest({
+            handle: getHandleFromIdentity(),
+            registryDb: db,
+          });
+          const exitCode = reconstructionExitCode(recovered);
+          if (exitCode !== 0) {
+            throw new Error(
+              recovered.refusedReason ??
+                recovered.drops[0]?.reason ??
+                "pod manifest recovery was incomplete",
+            );
+          }
+        },
         ...(customOverrides !== undefined ? { customOverrides } : {}),
         ...(spinner !== undefined
           ? {

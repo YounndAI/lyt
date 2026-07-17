@@ -190,7 +190,7 @@ export interface InitBootstrapResult {
   // leaves search FRESH (fresh: the new vault; re-init: every healthy vault).
   reconciledVaultPaths?: string[];
   // Brief B (B.1) — populated when a materialize-publish runner was supplied AND
-  // the branch materialized (fresh + re-init; discovery is read-only). Reports
+  // the fresh branch materialized. Reports
   // what was made publishable (per-vault git/commit/remote, pod commit). At init
   // this is LOCAL-only (push held); the honest card (B.3) reads it.
   publish?: MaterializePodResult;
@@ -239,7 +239,7 @@ export interface InitBootstrapArgs {
   // failure is swallowed (never-fail) — see runHealIfProvided.
   heal?: (() => Promise<HealResult>) | undefined;
   // Brief B (B.1) — materialize-publish runner. When supplied, the flow runs it
-  // on the fresh + re-init branches (NOT discovery) AFTER the pod.yon regen, so a
+  // on the fresh branch only (NOT adopt, re-init, or discovery), so a
   // single `lyt init` leaves each vault with git + an initial commit + a remote
   // URL, and the pod.yon committed (push HELD — outward gh-create + push are the
   // consented sync engine's job, B.2). INJECTABLE so unit tests stay hermetic
@@ -248,6 +248,9 @@ export interface InitBootstrapArgs {
   // Receives the bootstrap's open db (open-once seam). Failure is swallowed
   // (never-fail) — see runMaterializeIfProvided.
   materializePublish?: ((db: Client) => Promise<MaterializePodResult>) | undefined;
+  // Re-init production seam: refresh the existing pod repository and recover
+  // newly advertised vaults before integrity/index work. Tests omit it.
+  refreshExistingPod?: ((db: Client) => Promise<void>) | undefined;
   // v1.GP F7-followup — phase-boundary hook for the command layer's
   // phase-spanning spinner. Invoked (and awaited) at each FRESH-branch phase
   // boundary so the command can re-label its persistent spinner + yield to
@@ -396,15 +399,14 @@ export async function initBootstrapFlow(args: InitBootstrapArgs): Promise<InitBo
       );
     }
     if (branch === "re-init") {
-      const result = await doReInitBranch(args, db);
+      if (args.refreshExistingPod !== undefined) await args.refreshExistingPod(db);
+      const result = await doReInitBranch(db);
       const heal = await runHealIfProvided(args);
-      const publish = await runMaterializeIfProvided(args, db);
       return finalize(
         {
           ...result,
           branch,
           ...(heal !== null ? { heal } : {}),
-          ...(publish !== null ? { publish } : {}),
         },
         startedAtMs,
         args.nowIso,
@@ -669,7 +671,6 @@ async function doFreshBranch(
 }
 
 async function doReInitBranch(
-  args: InitBootstrapArgs,
   db: Client,
 ): Promise<Omit<InitBootstrapResult, "branch" | "durationMs">> {
   const vaults = await listVaults(db);
@@ -688,11 +689,6 @@ async function doReInitBranch(
     .filter((v) => issues.find((i) => i.vaultName === v.name)?.status === "ok")
     .map((v) => v.path);
   const reconciledVaultPaths = await reconcileVaults(okPaths);
-
-  // (Brief A) — re-init against an existing pod regenerates pod.yon so it
-  // reflects the ACTUAL registered vaults (acceptance #2). Non-fatal; skipped
-  // if the pod has no federation_state yet.
-  await regeneratePodManifestNonFatal(db, args.nowIso !== undefined ? { nowIso: args.nowIso } : {});
 
   return { integrityIssues: issues, reconciledVaultPaths };
 }

@@ -1262,9 +1262,53 @@ function parsePorcelainPath(line: string): string | null {
   const rest = line.slice(3);
   const arrow = rest.indexOf(" -> ");
   if (arrow >= 0) {
-    return rest.slice(arrow + 4);
+    return decodeGitQuotedPath(rest.slice(arrow + 4));
   }
-  return rest;
+  return decodeGitQuotedPath(rest);
+}
+
+// Git porcelain quotes pathnames using C-style escapes. Those quote characters
+// are presentation, not part of the filename, and must never reach argv.
+function decodeGitQuotedPath(path: string): string {
+  if (path.length < 2 || path[0] !== '"' || path[path.length - 1] !== '"') return path;
+  const bytes: number[] = [];
+  const inner = path.slice(1, -1);
+  for (let i = 0; i < inner.length; i += 1) {
+    const codePoint = inner.codePointAt(i)!;
+    const char = String.fromCodePoint(codePoint);
+    if (char !== "\\") {
+      bytes.push(...Buffer.from(char, "utf8"));
+      if (codePoint > 0xffff) i += 1;
+      continue;
+    }
+    const escaped = inner[++i];
+    if (escaped === undefined) return path;
+    const simple: Record<string, number> = {
+      a: 0x07,
+      b: 0x08,
+      t: 0x09,
+      n: 0x0a,
+      v: 0x0b,
+      f: 0x0c,
+      r: 0x0d,
+      '"': 0x22,
+      "\\": 0x5c,
+    };
+    if (simple[escaped] !== undefined) {
+      bytes.push(simple[escaped]);
+      continue;
+    }
+    if (/[0-7]/.test(escaped)) {
+      let octal = escaped;
+      while (octal.length < 3 && i + 1 < inner.length && /[0-7]/.test(inner[i + 1]!)) {
+        octal += inner[++i]!;
+      }
+      bytes.push(Number.parseInt(octal, 8));
+      continue;
+    }
+    return path;
+  }
+  return Buffer.from(bytes).toString("utf8");
 }
 
 // Brief C (F2) — assemble the deterministic metadata-driven commit message for

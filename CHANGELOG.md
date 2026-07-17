@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.13.5] — 2026-07-17
+
+### Fixed
+
+- **Existing-pod re-init** — refresh the online pod manifest before recovery, acquire newly advertised vaults, and never create a stale local pod commit during re-init.
+- **Quoted Git paths** — decode porcelain-quoted filenames before staging so global sync handles deleted files whose paths contain spaces or escaped characters.
+
+---
+
 ## [0.13.4] — 2026-07-17
 
 ### Fixed

@@ -111,6 +111,10 @@ export interface SyncPodLedgerArgs {
   push?: boolean | undefined;
   // Pull-rebase before commit. Default true. On conflict → abort + surface.
   pull?: boolean | undefined;
+  // Fetch/pull only. Used by re-init to refresh the authoritative pod manifest
+  // before recovery without staging, committing, pushing, or regenerating it
+  // from the machine's stale registry.
+  refreshOnly?: boolean | undefined;
   runGit?: GitRunner | undefined;
   // Open-once registry seam (the reconstitution shares it).
   registryDb?: Client | undefined;
@@ -134,6 +138,7 @@ export async function syncPodLedgerFlow(
   const git = args.runGit ?? defaultRunGit;
   const push = args.push ?? true;
   const pull = args.pull ?? true;
+  const refreshOnly = args.refreshOnly ?? false;
   const warnings: string[] = [];
 
   const result: SyncPodLedgerResult = {
@@ -191,7 +196,13 @@ export async function syncPodLedgerFlow(
         { cwd: podDir, allowFailure: true },
       );
       if (hasUpstream.code === 0) {
-        await git(["fetch", "--quiet"], { cwd: podDir, allowFailure: true });
+        const fetched = await git(["fetch", "--quiet"], {
+          cwd: podDir,
+          allowFailure: true,
+        });
+        if (refreshOnly && fetched.code !== 0) {
+          return { ...result, status: "error", reason: "fetch-failed" };
+        }
         const ab = await git(["rev-list", "--left-right", "--count", "HEAD...@{u}"], {
           cwd: podDir,
           allowFailure: true,
@@ -232,6 +243,13 @@ export async function syncPodLedgerFlow(
           }
         }
       }
+    }
+
+    if (refreshOnly) {
+      if (conflicted) {
+        return { ...result, status: "conflict", reason: "pull-rebase-conflict" };
+      }
+      return { ...result, status: "synced" };
     }
 
     // 3. Stage + commit local `ledger/` changes (explicit pathspec, never -A).
