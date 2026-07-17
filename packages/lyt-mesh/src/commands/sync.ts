@@ -20,6 +20,7 @@ import { createInterface } from "node:readline/promises";
 import {
   adoptRemoteRenameAsideFlow,
   closeRegistry,
+  commitPodRepo,
   connectPodFlow,
   deriveWriteGate,
   getHandleFromIdentity,
@@ -479,6 +480,24 @@ export async function materializeScopedVaultAfterSync(args: {
 }): Promise<ScopedPublishOutcome> {
   const db = await openRegistry();
   try {
+    const syncPodMetadata = async (): Promise<string[]> => {
+      const warnings: string[] = [];
+      const podLedger = await syncPodLedgerFlow({ registryDb: db });
+      warnings.push(...podLedger.warnings);
+      if (podLedger.status === "synced" && podLedger.podDir !== undefined) {
+        const podCommit = await commitPodRepo(
+          podLedger.podDir,
+          "chore(lyt): advertise scoped vault publication",
+          { push: true },
+        );
+        warnings.push(...podCommit.warnings);
+      } else {
+        warnings.push(
+          `pod metadata sync ${podLedger.status}${podLedger.reason === undefined ? "" : `: ${podLedger.reason}`}`,
+        );
+      }
+      return warnings;
+    };
     const vault = await resolveVault(db, args.vaultName);
     if (vault === null) {
       return {
@@ -584,6 +603,9 @@ export async function materializeScopedVaultAfterSync(args: {
     }
     const published = materialized.pushed;
     const mismatch = materialized.skippedReason === "origin-mismatch";
+    const metadataWarnings = published ? await syncPodMetadata() : [];
+    materialized.warnings.push(...metadataWarnings);
+    const metadataPending = metadataWarnings.length > 0;
     return {
       vaultName: vault.name,
       status: published ? "published" : mismatch ? "origin-mismatch" : "publish-deferred",
@@ -592,9 +614,11 @@ export async function materializeScopedVaultAfterSync(args: {
       expectedRepo: published ? (materialized.remoteCoordinate ?? expectedRepo) : expectedRepo,
       materialized,
       syncStatus: args.report?.status ?? null,
-      ok: published,
+      ok: published && !metadataPending,
       message: published
-        ? "Saved this vault only to its private online copy."
+        ? metadataPending
+          ? `Saved this vault to its private online copy, but its pod advertisement is pending: ${materialized.warnings.join("; ")}`
+          : "Saved this vault to its private online copy and advertised it to your pod."
         : mismatch
           ? `Publication refused: ${materialized.warnings.join("; ")}`
           : `Saved locally, but the private online copy is still pending: ${materialized.warnings.join("; ") || materialized.skippedReason || "retry scoped sync"}`,
@@ -618,7 +642,11 @@ export function classifyScopedPublishEligibility(args: {
   reportStatus: VaultSyncStatus | undefined;
 }): ScopedPublishEligibility {
   if (!args.publishable) return { status: "skipped-readonly" };
-  const pushTarget = args.mesh?.ownCreated === true ? args.mesh.pushTarget : null;
+  // Scoped sync is an explicit outward action on one owned vault. Its mesh's
+  // configured target is therefore the inherited publication coordinate;
+  // GitHub authorization remains the final permission gate. `ownCreated` is a
+  // stale false value on pre-migration pods and must not erase that coordinate.
+  const pushTarget = args.mesh?.pushTarget ?? null;
   const existingOwner = args.existingRepoCoordinate?.split("/", 1)[0] ?? null;
   if (
     existingOwner !== null &&
@@ -728,7 +756,7 @@ async function resolveExpectedScopedOrigin(vaultName: string): Promise<string | 
     const vault = await resolveVault(db, vaultName);
     if (vault === null || vault.homeMeshRid === null) return undefined;
     const mesh = await getMeshByRid(db, vault.homeMeshRid);
-    if (mesh?.ownCreated !== true || mesh.pushTarget === null || mesh.pushTarget.length === 0) {
+    if (mesh === null || mesh.pushTarget === null || mesh.pushTarget.length === 0) {
       return vault.gitUrl === null
         ? undefined
         : (normalizeGitHubRepoCoordinate(vault.gitUrl) ?? undefined);

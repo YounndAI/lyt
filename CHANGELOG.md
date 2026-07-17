@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.13.4] — 2026-07-17
+
+### Fixed
+
+- **Scoped first publication on legacy pods** — inherit the configured mesh push target during an explicit one-vault sync even when old ownership provenance is stale; GitHub authorization remains the final permission gate.
+- **Cross-machine discovery after publication** — publish the federation ledger and pod manifest immediately after a successful scoped first publication so another machine can acquire the new vault.
+
+---
+
 ## [0.13.3] — 2026-07-17
 
 ### Fixed
