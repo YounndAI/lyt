@@ -16,7 +16,13 @@
 
 import { Command, Option } from "commander";
 
-import { symlinkSkillsTriRuntime, ALL_RUNTIMES, type Runtime } from "../symlink.js";
+import {
+  symlinkSkillsTriRuntime,
+  ALL_RUNTIMES,
+  getBundledSkillsDir,
+  listBundledSkills,
+  type Runtime,
+} from "../symlink.js";
 
 interface SkillsInstallCliOpts {
   runtime?: string;
@@ -30,6 +36,7 @@ export function buildSkillsInstallSubcommand(): Command {
   const cmd = new Command("install");
   cmd
     .description("Symlink bundled Lyt skills into Claude Code / Codex / .agents runtimes")
+    .argument("[names...]", "Install only the named bundled skills")
     .addOption(
       new Option("--runtime <name>", "Target runtime")
         .choices(["claude", "codex", "agents", "all"])
@@ -39,11 +46,21 @@ export function buildSkillsInstallSubcommand(): Command {
     .option("-f, --force", "Overwrite divergent symlinks or copied directories", false)
     .option("--source <dir>", "Override bundled skills source directory (test seam)")
     .option("--json", "Emit deterministic JSON shape", false)
-    .action((opts: SkillsInstallCliOpts) => {
+    .action((names: string[], opts: SkillsInstallCliOpts) => {
       const runtimes = resolveRuntimes(opts.runtime ?? "all");
+      const sourceDir = opts.source ?? getBundledSkillsDir();
+      const validNames = [...listBundledSkills(sourceDir)].sort();
+      const validNameSet = new Set(validNames);
+      const unknownNames = [...new Set(names.filter((name) => !validNameSet.has(name)))].sort();
+      if (unknownNames.length > 0) {
+        printUnknownSkills(unknownNames, validNames, opts.json ?? false);
+        process.exitCode = 1;
+        return;
+      }
       const result = symlinkSkillsTriRuntime({
         sourceDir: opts.source,
         runtimes,
+        skillNames: names.length > 0 ? names : undefined,
         copy: opts.copy ?? false,
         force: opts.force ?? false,
       });
@@ -58,6 +75,31 @@ export function buildSkillsInstallSubcommand(): Command {
       if (exitCode !== 0) process.exitCode = exitCode;
     });
   return cmd;
+}
+
+function printUnknownSkills(
+  unknownNames: readonly string[],
+  validNames: readonly string[],
+  json: boolean,
+): void {
+  if (json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          error: "unknown-skill",
+          unknownSkills: unknownNames,
+          validSkills: validNames,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error(
+    `Unknown Lyt skill name(s): ${unknownNames.join(", ")}\nValid skill names: ${validNames.join(", ")}`,
+  );
 }
 
 function resolveRuntimes(name: string): readonly Runtime[] {

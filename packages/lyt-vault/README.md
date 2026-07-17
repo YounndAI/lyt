@@ -36,9 +36,11 @@ You usually do not install this package directly — install [`@younndai/lyt`](h
 npm install -g @younndai/lyt-vault@alpha
 ```
 
-This exposes a `lyt` binary scoped to the vault, help, doctor, and pattern verb groups.
+This exposes a `lyt-vault` binary for the vault-owned verb groups. Install
+`@younndai/lyt` for the unified `lyt` binary used in the examples below,
+including `capture`, `search`, and `reindex`.
 
-## Top verbs
+## Unified CLI examples
 
 ```bash
 # Create or adopt a vault
@@ -106,6 +108,7 @@ Every note carries an 8-field frontmatter contract — `title`, `created`, `modi
 
 ```ts
 import {
+  applyOperation,
   buildVaultSubcommand,
   buildRegistrySubcommand,
   buildHelpCommand,
@@ -114,7 +117,11 @@ import {
 } from "@younndai/lyt-vault";
 ```
 
-The [`@younndai/lyt`](https://www.npmjs.com/package/@younndai/lyt) meta package composes these factories; you can do the same in custom CLI builds.
+The package also exports the small, caller-supplied `afterOperation` and
+`doctorChecks` lifecycle hooks. Lyt does not discover, persist, authorize, or
+invoke external layers; the embedding caller owns hook lifetime and policy.
+The [`@younndai/lyt`](https://www.npmjs.com/package/@younndai/lyt) meta package
+composes these factories; you can do the same in custom CLI builds.
 
 ## The Lyt toolchain
 
@@ -141,7 +148,7 @@ think together without losing what makes either whole.
 
 Apache-2.0. © 2026 MARLINK TRADING SRL (YounndAI). See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
 
-"LYT", "Lyt", and "YounndAI" are trademarks of MARLINK TRADING SRL — see [`TRADEMARK.md`](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md).
+"Lyt" and "YounndAI" are trademarks of MARLINK TRADING SRL — see [`TRADEMARK.md`](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md).
 
 Created by [Alexandru Mareș](https://allemaar.com).
 

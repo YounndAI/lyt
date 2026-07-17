@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Lyt™ — Link Your Think</strong><br />
+  <strong>Lyt (Link Your Think™)</strong><br />
   Federated markdown vaults — the storage architecture for AI-native knowledge work, AI-first by design.<br />
   <em>You own the markdown. Lyt is the federation layer over it.</em>
 </p>
@@ -43,7 +43,7 @@ You keep the markdown. Lyt is the thin federation layer over it: it never asks y
 
 ## Status
 
-**Public alpha — in active testing.** Lyt is being validated with a small alpha cohort right now. The CLI surface, file formats, and docs may change between alpha releases without deprecation cycles. There is no `latest` release yet — install with the `alpha` dist-tag (see below). Nothing phones home, and your notes stay plain markdown in plain git repos, so trying Lyt risks none of your data. Feedback is welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+**Public alpha — in active testing.** Lyt is being validated with a small alpha cohort right now. The CLI surface, file formats, and docs may change between alpha releases without deprecation cycles. Install with the `alpha` dist-tag (see below). Nothing phones home, and your notes stay plain markdown in plain git repos, so trying Lyt risks none of your data. Feedback is welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Install
 
@@ -81,10 +81,13 @@ lyt vault init alex/main \
 lyt capture "an idea worth keeping"
 lyt search "idea"          # ranked across your whole pod
 
-# 3. On another machine, clone your configured vault sources.
+# 3. Publish only this vault when you are ready.
+lyt sync --vault alex/main
+
+# 4. On another machine, clone your configured vault sources.
 lyt mesh clone-all
 
-# 4. Open it in any markdown editor.
+# 5. Open it in any markdown editor.
 obsidian ~/lyt/vaults/alex/main
 ```
 
@@ -121,7 +124,7 @@ lyt federation init|list|rebuild     lyt discover     lyt repair [--dry-run|--ap
 lyt identity|machine|provenance|audit|housekeep
 
 lyt pattern list|install|uninstall|link|unlink|fork|verbs|run
-lyt skills install                   lyt agent-manual --install
+lyt skills install [name...]         lyt agent-manual --install
 lyt help [<topic>] [--markdown]      lyt doctor [--json|--full]   lyt mcp start
 ```
 
@@ -160,7 +163,7 @@ think together without losing what makes either whole.
 
 Apache-2.0. © 2026 MARLINK TRADING SRL (YounndAI). See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 
-"LYT", "Lyt", and "YounndAI" are trademarks of MARLINK TRADING SRL — see [`TRADEMARK.md`](TRADEMARK.md).
+"Lyt" and "YounndAI" are trademarks of MARLINK TRADING SRL — see [`TRADEMARK.md`](TRADEMARK.md).
 
 Created by [Alexandru Mareș](https://allemaar.com).
 

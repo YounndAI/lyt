@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-vault",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "Lyt vault primitive — CLI verbs to create and manage editor-neutral markdown vaults with a .lyt scaffold.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -47,7 +47,7 @@
     "SECURITY.md"
   ],
   "scripts": {
-    "build": "tsc && node ./scripts/copy-help-topics.mjs && node ./scripts/copy-patterns.mjs && node ./scripts/copy-yon-defaults.mjs && node ../../scripts/public-release/stamp-dist-license-headers.mjs",
+    "build": "tsc && node ./scripts/copy-help-topics.mjs && node ./scripts/copy-patterns.mjs && node ./scripts/copy-yon-defaults.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",

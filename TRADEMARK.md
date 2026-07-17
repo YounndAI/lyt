@@ -1,6 +1,6 @@
 # Trademark Notice
 
-**YounndAI™** and **LYT™** (Link Your Think; also styled "Lyt") are trademarks of
+**YounndAI™** and **Lyt (Link Your Think™)** are trademarks of
 MARLINK TRADING SRL.
 
 The Apache License, Version 2.0 under which this project is distributed grants
@@ -11,16 +11,16 @@ origin of the work and reproducing the content of the `NOTICE` file.
 
 ## Permitted without prior permission
 
-- **Nominative use** — referring to LYT™ or YounndAI™ to accurately describe
-  the software, compatibility, or integration ("works with LYT", "built on
-  the LYT mesh format").
+- **Nominative use** — referring to Lyt or YounndAI™ to accurately describe
+  the software, compatibility, or integration ("works with Lyt", "built on
+  the Lyt mesh format").
 - **Unmodified redistribution** — distributing unmodified copies of the
   software under its Apache-2.0 license, preserving the `NOTICE` file.
 
 ## Requires rebranding
 
 - **Forks** that modify the software and distribute it **must not** use the
-  LYT™ or YounndAI™ marks (or confusingly similar marks) as the name of the
+  Lyt or YounndAI™ marks (or confusingly similar marks) as the name of the
   fork or in a way that implies endorsement. Forks must rebrand fully, preserve
   the `NOTICE` file, and cite the original attribution.
 

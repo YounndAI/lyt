@@ -39,7 +39,7 @@ npm install -g @younndai/lyt@alpha
 lyt init                       # interactive setup wizard
 ```
 
-There is no `latest` release yet — the `alpha` tag is required.
+The `alpha` tag is the recommended channel while compatibility testing continues.
 
 ## Quick start
 
@@ -47,6 +47,7 @@ There is no `latest` release yet — the `alpha` tag is required.
 lyt init                       # create or adopt your first vault
 lyt capture "an idea worth keeping"
 lyt search "idea"              # full-text across your pod
+lyt sync --vault personal/main # publish only this vault when ready
 lyt mesh status                # the federation graph
 lyt doctor                     # confirm your environment is healthy
 ```
@@ -117,7 +118,7 @@ think together without losing what makes either whole.
 
 Apache-2.0. © 2026 MARLINK TRADING SRL (YounndAI). See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
 
-"LYT", "Lyt", and "YounndAI" are trademarks of MARLINK TRADING SRL — see [`TRADEMARK.md`](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md).
+"Lyt" and "YounndAI" are trademarks of MARLINK TRADING SRL — see [`TRADEMARK.md`](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md).
 
 Created by [Alexandru Mareș](https://allemaar.com).
 

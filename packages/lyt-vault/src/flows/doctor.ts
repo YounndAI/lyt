@@ -83,6 +83,7 @@ import {
 import { createClient } from "@libsql/client";
 import { readGitRemoteOriginUrl } from "../util/git.js";
 import { readMachineState } from "./machine-state.js";
+import type { LytLifecycleHooks } from "../hooks.js";
 
 export type CheckStatus = "pass" | "warn" | "fail" | "info";
 
@@ -128,6 +129,8 @@ export interface DoctorOptions {
   // manual without touching the real home dir.
   homedirOverride?: string | undefined;
   agentManualVersionOverride?: string | undefined;
+  /** Caller-supplied, in-process lifecycle callbacks. Lyt never discovers hooks. */
+  hooks?: Pick<LytLifecycleHooks, "doctorChecks"> | undefined;
 }
 
 export interface DoctorResult {
@@ -423,6 +426,19 @@ export async function doctorFlow(opts: DoctorOptions = {}): Promise<DoctorResult
   );
 
   checks.push(checkSettingsJson(cwdFn()));
+
+  try {
+    const callerChecks = await opts.hooks?.doctorChecks?.();
+    if (callerChecks !== undefined) checks.push(...callerChecks);
+  } catch (error) {
+    checks.push({
+      id: "caller.doctor-checks",
+      group: "caller",
+      label: "caller-supplied doctor checks",
+      status: "fail",
+      message: `caller-supplied doctor checks failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
 
   const summary = summarize(checks);
   const exitCode = summary.failures > 0 ? 1 : summary.warnings > 0 ? 2 : 0;
@@ -1541,11 +1557,9 @@ export async function checkMarkersRender(
   return out;
 }
 
-
 // Fed-v2 Slice 1b (#13 DELETE) — DEFAULT_PUBLIC_MESH_HYGIENE_PATTERNS,
 // PublicMeshHygieneOptions, and checkPublicMeshHygiene removed.
 // The @MESH_PUBLIC surface they guarded no longer exists.
-
 
 // ---------------------------------------------------------------------------
 // hardening fix-pass (2026-06-10) — index-tier + registry-shape
@@ -1960,7 +1974,9 @@ export async function checkFrontmatterContract(
         .join(", ")}`,
       remediation: `Run: ${offenders
         .map((o) => `lyt vault backfill '${o.name}'`)
-        .join(" ; ")} — fills missing fields with deterministic defaults (purpose/topic left blank + flagged), or \`lyt vault reconcile '<name>' --apply\` to also re-index.`,
+        .join(
+          " ; ",
+        )} — fills missing fields with deterministic defaults (purpose/topic left blank + flagged), or \`lyt vault reconcile '<name>' --apply\` to also re-index.`,
       detail: { offenders, probeErrors: probeErrors.length > 0 ? probeErrors : undefined },
     };
   }
@@ -2045,7 +2061,9 @@ export async function checkFrontmatterVersion(
         .join(", ")}`,
       remediation: `Run: ${behind
         .map((b) => `lyt vault reconcile '${b.name}'`)
-        .join(" ; ")} to list the version-behind figments (the migration heal lands with the contract bump).`,
+        .join(
+          " ; ",
+        )} to list the version-behind figments (the migration heal lands with the contract bump).`,
       detail: { behind, probeErrors: probeErrors.length > 0 ? probeErrors : undefined },
     };
   }

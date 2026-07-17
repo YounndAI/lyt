@@ -432,10 +432,7 @@ export { listVaultTopicsFlow } from "./flows/list-vault-topics.js";
 // topics by similarity to the figment when the model is present; degrade to the
 // frequency order otherwise (read-never-fetches).
 export { rankVaultTopicsFlow } from "./flows/rank-vault-topics.js";
-export type {
-  RankVaultTopicsArgs,
-  RankVaultTopicsResult,
-} from "./flows/rank-vault-topics.js";
+export type { RankVaultTopicsArgs, RankVaultTopicsResult } from "./flows/rank-vault-topics.js";
 // Lane V Phase 0 (0.5 / C1-C3) — all-tiers rebuild umbrella + pod/mesh/vault reindex.
 export { rebuildVaultFlow } from "./flows/rebuild-vault.js";
 export type {
@@ -541,10 +538,7 @@ export type { BackfillFigmentCachesResult } from "./flows/backfill-figment-cache
 // content change (fs-mtime keyed, floored-second, clamped `>= created`;
 // `created` preserved). The write / sync-watch path invokes this before
 // reconciling so the index picks up the advanced date.
-export {
-  maintainModifiedFromMtime,
-  mtimeToFlooredIso,
-} from "./flows/maintain-modified.js";
+export { maintainModifiedFromMtime, mtimeToFlooredIso } from "./flows/maintain-modified.js";
 export type { MaintainModifiedResult } from "./flows/maintain-modified.js";
 // V-C-1 (Lane V Track C) — index-on-write (L1): the single seam every capture
 // path calls after writing a figment so search/recall/primer hit with NO manual
@@ -555,7 +549,14 @@ export type { CaptureIndexArgs, CaptureIndexResult } from "./flows/capture-index
 // append-only op-log, per-verb Receipt verification, the capture Operation, and
 // the undo engine behind `lyt undo`. Consumed by the lyt CLI package.
 export { defaultInverseForHorizon } from "./op/operation.js";
-export type { Operation, SyncHorizon, Inverse, UndoAction, Preview, Receipt } from "./op/operation.js";
+export type {
+  Operation,
+  SyncHorizon,
+  Inverse,
+  UndoAction,
+  Preview,
+  Receipt,
+} from "./op/operation.js";
 export {
   openOpLog,
   closeOpLog,
@@ -571,6 +572,15 @@ export {
 export type { OpLogInput, OpLogRow, OpStatus } from "./op/operation-log.js";
 export { CaptureOperation } from "./op/operations/capture-op.js";
 export type { CaptureInput, CaptureOperationDeps } from "./op/operations/capture-op.js";
+// 0.13.0 — small caller-supplied lifecycle callbacks for programmatic
+// composition. No discovery, registry, subprocess loading, or layer vocabulary.
+export { AfterOperationHookError, applyOperation } from "./hooks.js";
+export type {
+  AfterOperationEvent,
+  AfterOperationHook,
+  DoctorChecksHook,
+  LytLifecycleHooks,
+} from "./hooks.js";
 export { undoLast, previewUndo } from "./op/undo.js";
 export type { UndoDeps, UndoOutcome } from "./op/undo.js";
 // makeReceipt is the canonical Receipt constructor for Operation implementers —
@@ -606,7 +616,12 @@ export type { OpAuditTarget } from "./op/op-audit.js";
 // never asserted from the verb. GitRemoteProvider = the v1 github-backed default
 // wrapping the firewalled runGit; non-GitHub slot reserved.
 export { GitRemoteProvider } from "./remote/remote-provider.js";
-export type { RemoteProvider, PushResult, PullResult, GitRunnerFn } from "./remote/remote-provider.js";
+export type {
+  RemoteProvider,
+  PushResult,
+  PullResult,
+  GitRunnerFn,
+} from "./remote/remote-provider.js";
 // v1.G.2 writability derivation + the 0.9.3 write-gate. `deriveWriteGate`
 // is the shared capture/sync/publish refusal decision, keyed on the LIVE
 // writability verdict (it replaced the too-narrow `isPureSubscriberVault`, which
@@ -705,10 +720,7 @@ export {
 } from "./registry/embeddings-repo.js";
 export type { EmbeddingRow } from "./registry/embeddings-repo.js";
 export { rebuildEmbeddingsFlow } from "./flows/rebuild-embeddings.js";
-export type {
-  RebuildEmbeddingsArgs,
-  RebuildEmbeddingsResult,
-} from "./flows/rebuild-embeddings.js";
+export type { RebuildEmbeddingsArgs, RebuildEmbeddingsResult } from "./flows/rebuild-embeddings.js";
 export { upsertEmbeddingsCache } from "./flows/upsert-embeddings-cache.js";
 export type {
   UpsertEmbeddingsCacheResult,
@@ -725,10 +737,7 @@ export {
 // Phase D Slice 2a — the idempotent-offer-surface resolver (separate
 // module so embeddings-offer.ts stays clean of nudge-state symbols).
 export { resolveAskedState } from "./flows/embeddings-offer-state.js";
-export type {
-  EmbeddingsOfferArgs,
-  EmbeddingsOfferOutcome,
-} from "./flows/embeddings-offer.js";
+export type { EmbeddingsOfferArgs, EmbeddingsOfferOutcome } from "./flows/embeddings-offer.js";
 export { fuseDense } from "./flows/search-cascade.js";
 export type {
   SearchCascadeArgs,
@@ -788,7 +797,12 @@ export type {
   SyncMetadataScope,
   SyncMetadataVaultReport,
 } from "./flows/sync-metadata.js";
-export { doctorFlow, renderHumanReport, checkFrontmatterContract, checkFrontmatterVersion } from "./flows/doctor.js";
+export {
+  doctorFlow,
+  renderHumanReport,
+  checkFrontmatterContract,
+  checkFrontmatterVersion,
+} from "./flows/doctor.js";
 export type {
   BinaryRunner,
   CheckResult,
@@ -843,11 +857,7 @@ export {
   resolveScaffoldTier,
   renderSeedFigment,
 } from "./templates/tier-payloads.js";
-export type {
-  ScaffoldTier,
-  TierPayload,
-  SeedFigmentSpec,
-} from "./templates/tier-payloads.js";
+export type { ScaffoldTier, TierPayload, SeedFigmentSpec } from "./templates/tier-payloads.js";
 export {
   POD_README_MANAGED_BEGIN,
   POD_README_MANAGED_END,

@@ -1,6 +1,6 @@
 # `lyt help skills` — Lyt harness skills
 
-> Skills are agent-facing wrappers around `lyt pattern run`. They live in `@younndai/lyt-skills@0.2.0` and install into the user's agent harness (Claude Code: `~/.claude/skills/`; Codex: `~/.codex/skills/`). Each skill is a directory with a `SKILL.md` frontmatter file the harness loads on startup.
+> Skills are agent-facing wrappers around `lyt pattern run`. They ship in `@younndai/lyt-skills` and install into the user's agent harness (Claude Code: `~/.claude/skills/`; Codex: `~/.codex/skills/`; agents-compatible harnesses: `~/.agents/skills/`). Each skill is a directory with a `SKILL.md` frontmatter file the harness loads on startup.
 
 ---
 
@@ -24,14 +24,32 @@
 
 ---
 
-## Installing skills into your harness
+## Inspecting and installing skills
 
 ```bash
-npm install -g @younndai/lyt-skills
-lyt-skills install
+lyt skills list
+lyt skills list --runtime codex --json
+
+lyt skills install
+lyt skills install lyt-capture lyt-search --runtime codex
+lyt skills install --runtime all --copy --force --json
 ```
 
-The installer detects harness presence (Claude Code / Codex) and copies bundled SKILL.md directories into the appropriate `~/.<harness>/skills/` location. Pass `--harness claude-code` or `--harness codex` to override the auto-detect. Pass `--force` to overwrite existing skill files.
+`lyt skills list` reports the bundled skills and their state in each requested runtime. `lyt skills install` with no names installs all bundled skills; pass one or more exact names to install only that selection. An unknown name exits nonzero and prints the valid names.
+
+Both commands accept `--runtime claude|codex|agents|all` (default: `all`) and `--json`. Install also accepts:
+
+- `--copy` — recursively copy each skill instead of creating a link.
+- `--force` — replace a divergent existing symlink. It does not authorize deleting user directories.
+
+Without `--copy`, install creates a symlink (a directory junction on Windows) from the harness skill directory to the bundled skill. If the operating system refuses link creation with a permissions error, Lyt falls back to a copy. An existing pristine Lyt copy is replaced safely; a different directory is renamed to `<skill>.local-<timestamp>` before installation so its contents are preserved.
+
+Exit behavior is stable and independent of human or JSON output:
+
+- `0` — successful install/list, including already-linked, copy-fallback, safe replacement, or collision rename-aside results.
+- `1` — command-line validation failure, including an invalid runtime or unknown skill name.
+- `2` — a divergent symlink was left untouched; rerun install with `--force` to replace it.
+- `4` — the target exists but is neither a directory nor a symlink, so Lyt refuses to touch it.
 
 After install, the harness picks up new skills on next session start.
 
@@ -64,16 +82,16 @@ user: /lyt-capture
 
 ---
 
-## Auto-detection conventions
+## Vault targeting conventions
 
-Skills auto-resolve their target vault from this chain:
+Each skill documents its own target-resolution chain. For capture, the chain is:
 
-1. `--vault <name>` explicit argument
-2. `$LYT_ACTIVE_VAULT` environment variable (or `$LYT_DEFAULT_VAULT`)
-3. `lyt vault info --by-path <cwd>` — if cwd is inside a registered vault
-4. `~/lyt/vaults/alex/main/` — the convention's default master vault for the user
+1. `--vault <name-or-path>` explicit argument
+2. `$LYT_ACTIVE_VAULT` environment variable
+3. `<pod-root>/vaults/<handle>/main/` — resolving `<handle>` from `identity.yon` / `pod.yon`, never hardcoding it
+4. ask the user which vault to target
 
-If no vault resolves, the skill stops and asks the user to pass `--vault` explicitly or set the env var. Skills NEVER write to a random directory; if `.lyt/vault.yon` is missing at the resolved path, the skill aborts.
+Skills never fabricate a vault from cwd or write to a random directory. If `.lyt/vault.yon` is missing at the resolved path, the skill aborts.
 
 ---
 
