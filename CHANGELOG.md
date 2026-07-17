@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.13.2] — 2026-07-17
+
+### Fixed
+
+- **Clean-machine pod recovery** — preserve pod-manifest vault identities and mesh creation timestamps instead of creating duplicate vault records.
+- **Existing-pod adoption** — absorb the cloned pod without creating an ahead commit, migration-ledger dirt, fresh-pod demo/pod-map state, or a publication prompt; label the resolved vault with its actual mesh.
+
+---
+
 ## [0.13.1] — 2026-07-17
 
 ### Fixed

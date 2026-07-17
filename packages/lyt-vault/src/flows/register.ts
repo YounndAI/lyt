@@ -30,6 +30,11 @@ import { parseVaultYon } from "../yon/parse.js";
 export interface RegisterVaultArgs {
   vaultPath: string;
   status?: VaultStatus;
+  // The pod manifest is the cross-machine identity source during a trusted
+  // reconstruction. Its rid can differ from stale vault.yon metadata in an
+  // older repository, so recover-pod supplies the manifest rid explicitly.
+  // Other registration paths continue to use vault.yon.
+  ridOverride?: Uint8Array | undefined;
   // fed-v2 Layer-2 P1 — identity-preserving restore capability. When
   // true, a re-registration of a rid ALREADY held locally under the SAME name
   // may re-home it to a new on-disk path (genuine cross-machine reconstitution:
@@ -108,6 +113,10 @@ export async function registerVaultFromYon(
   const content = readFileSync(yonPath, "utf8");
   const parsed = parseVaultYon(content);
 
+  if (args.ridOverride !== undefined && args.trustedReconstruction !== true) {
+    throw new Error("ridOverride is restricted to trusted reconstruction flows");
+  }
+
   // Per Phase 5.5 smoke Observation #1: fall back to .git/config remote.origin.url
   // when vault.yon was written before the remote was added (the init→push→clone
   // workflow leaves vault.yon's @META git_url empty even though the remote exists).
@@ -116,7 +125,7 @@ export async function registerVaultFromYon(
   // v1.A.1b boundary: vault.yon serialises rid as the 8-4-4-4-12 dashed
   // UUIDv7 string; parser returns it as a string; flip to bytes here at the
   // edge so the registry/repo CRUD only sees Uint8Array rids.
-  const ridBytes = hexToUuid7Bytes(parsed.rid);
+  const ridBytes = args.ridOverride ?? hexToUuid7Bytes(parsed.rid);
   const memscopeBytes = parsed.memscopeRid ? hexToUuid7Bytes(parsed.memscopeRid) : null;
   const parentBytes = parsed.parentVault ? hexToUuid7Bytes(parsed.parentVault) : null;
   // v1.B.3 — when vault.yon carries a @VAULT_HOME_MESH record, prime
@@ -164,9 +173,7 @@ export async function registerVaultFromYon(
     if ((await getMeshByRid(db, parsedHomeMeshBytes)) !== null) {
       homeMeshBytes = parsedHomeMeshBytes;
     } else {
-      const byName = parsed.homeMesh
-        ? await getMeshByName(db, parsed.homeMesh.meshName)
-        : null;
+      const byName = parsed.homeMesh ? await getMeshByName(db, parsed.homeMesh.meshName) : null;
       if (byName !== null) {
         homeMeshBytes = byName.rid;
       } else {

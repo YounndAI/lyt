@@ -227,9 +227,7 @@ export async function adoptAndPrimeFlow(
         manifestDrops,
         manifestRefused: true,
         ...(manifestRefusedKind !== undefined ? { manifestRefusedKind } : {}),
-        ...(manifestRefusedReason !== undefined
-          ? { manifestRefusedReason }
-          : {}),
+        ...(manifestRefusedReason !== undefined ? { manifestRefusedReason } : {}),
         clusterOutcomes: [],
         firstVaultCreated: false,
         primaryVaultPath: null,
@@ -406,7 +404,12 @@ export async function adoptAndPrimeFlow(
     // step 2 wrote only the skeleton, BEFORE vaults were acquired/scaffolded —
     // the root cause of the empty-manifest dogfood symptom). Non-fatal; reuses
     // the open registry.
-    await regeneratePodManifestNonFatal(db, { handle });
+    // A cloned pod is already the recovery source of truth. Do not rewrite its
+    // manifest or materialize migration ledgers during absorption; an explicit
+    // later sync owns any publication-facing regeneration.
+    if (fed.branch !== "adopted") {
+      await regeneratePodManifestNonFatal(db, { handle });
+    }
 
     return {
       podBranch: fed.branch,

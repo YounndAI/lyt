@@ -436,39 +436,27 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     ownerForPodMap = resolveOwnerForPodMap(p8);
   }
 
-  // P11 — pod-map vault auto-init + Pod Manager plugin install (v1.G.10).
-  // Owner derives from the fresh federation-init handle OR (adopt branch) the
-  // probed handle. If unknown, the generator returns ok:false (the ratified default refuse)
-  // and the wizard surfaces the gap to the handler.
-  emit(
-    "\nPhase 11 — Pod-map vault\n" +
-      "Generating your pod-map vault at `lyt-pod-map` — every mesh + vault gets " +
-      "a note; wikilinks encode federation edges; Obsidian's graph view renders the " +
-      "topology natively. The Pod Manager community plugin installs alongside for " +
-      "mesh-boundary coloring + 🔒 read-only badges. (writable=false; generator-managed.)",
-  );
-  const p9 = await phase9_podMapInit(ownerForPodMap, opts.dryRun);
-  phases.push(p9);
-  if (!p9.ok && !p9.skipped) return { status: "halted", phases };
+  if (mode !== "adopt") {
+    // P11/P12 are onboarding for a genuinely fresh pod. An adopted pod already
+    // has vaults and content; creating a local Obsidian pod-map and a welcome
+    // Figment there mutates recovered repositories unexpectedly.
+    emit(
+      "\nPhase 11 — Pod-map vault\n" +
+        "Generating your pod-map vault at `lyt-pod-map` — every mesh + vault gets " +
+        "a note; wikilinks encode federation edges; Obsidian's graph view renders the " +
+        "topology natively. The Pod Manager community plugin installs alongside for " +
+        "mesh-boundary coloring + 🔒 read-only badges. (writable=false; generator-managed.)",
+    );
+    const p9 = await phase9_podMapInit(ownerForPodMap, opts.dryRun);
+    phases.push(p9);
+    if (!p9.ok && !p9.skipped) return { status: "halted", phases };
 
-  // P12 — first-use demo against the resolved primary vault path. R1 cold-
-  // review fix-pass: if the adopt branch couldn't resolve a vault (e.g. a
-  // torn-mesh repair case), SKIP the demo gracefully rather than halting the
-  // wizard — the pod is still adopted, and a non-fatal init is the contract.
-  emit("\nPhase 12 — First-use demo\nCapturing a 'Welcome to Lyt' sample Figment + recalling it.");
-  let p10: WizardPhaseResult;
-  if (!opts.dryRun && firstVaultPath.length === 0) {
-    p10 = {
-      phase: 12,
-      name: "first-use-demo",
-      ok: true,
-      skipped: true,
-      message: "Skipped — no primary vault resolved (adopt left a repair case); run 'lyt doctor'.",
-    };
-  } else {
-    p10 = await phase10_firstUseDemo(firstVaultPath, opts.dryRun);
+    emit(
+      "\nPhase 12 — First-use demo\nCapturing a 'Welcome to Lyt' sample Figment + recalling it.",
+    );
+    const p10 = await phase10_firstUseDemo(firstVaultPath, opts.dryRun);
+    phases.push(p10);
   }
-  phases.push(p10);
 
   // v1.GP WS4 — end-of-init pod card + clickable links + Next-steps trio.
   // Skipped under --dry-run (the phase-walk output stays deterministic; a
@@ -477,7 +465,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   // the terminal supports them (graceful plain-text fallback otherwise).
   if (!opts.dryRun) {
     const localMode = mode === "local";
-    emitPodCard(firstVaultPath, localMode);
+    emitPodCard(firstVaultPath, localMode, mode === "adopt");
 
     // Phase C (C4) — interactive-only embeddings offer. The no-flag init
     // routes here (the wizard is the primary non-tech entry), so this is where
@@ -549,7 +537,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
       emit(
         "\nYour pod is local-only (not connected to GitHub). Run `lyt sync` to connect + back it up.\n",
       );
-    } else {
+    } else if (mode !== "adopt") {
       // Brief C (F1) — staged-HIL publish prompt. The wizard materialized the pod
       // LOCALLY (mesh/federation init held the push; the pod CONTAINER repo may
       // already exist on GitHub per two-tier consent, but the CONTENT —
@@ -560,6 +548,8 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
         isTty: process.stdin.isTTY === true,
         publishFlow: opts.publishFlowOverride ?? reconcilePublishFlow,
       });
+    } else {
+      emit("\nExisting pod adopted. No publication is needed.\n");
     }
   } else {
     emit("\nDone. Your pod is ready.\n");
@@ -645,7 +635,7 @@ export async function maybePromptAndPublishWizard(
 // presence are tolerant (a missing piece simply doesn't render). Never throws
 // into the wizard return path. `localOnly` drives the honest "not
 // connected to GitHub" status line (vs the connected "staged" wording).
-function emitPodCard(firstVaultPath: string, localOnly: boolean): void {
+function emitPodCard(firstVaultPath: string, localOnly: boolean, adopted = false): void {
   let handle = "";
   try {
     handle = getHandleFromIdentity();
@@ -658,9 +648,13 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean): void {
     return;
   }
 
-  // First vault: always `personal/main` (mesh-init's main vault).
+  // Fresh pods start at personal/main. Adopted pods may resolve any existing
+  // vault first, so derive the mesh from its actual path instead of mislabelling
+  // it as personal.
   const vaultLeaf = firstVaultPath.length > 0 ? basenameOf(firstVaultPath) : "main";
-  const vaultName = `personal/${vaultLeaf}`;
+  const meshName =
+    adopted && firstVaultPath.length > 0 ? basenameOf(dirname(firstVaultPath)) : "personal";
+  const vaultName = `${meshName}/${vaultLeaf}`;
 
   // the pod-map vault sits FLAT under `vaults/` (no `<owner>` segment)
   // — mirrors derivePodMapPaths in pod-map-generate.ts.
@@ -673,7 +667,7 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean): void {
   const data: PodCardData = {
     handle,
     mesh: {
-      meshName: "personal",
+      meshName,
       vaultName,
       vaultPath: firstVaultPath,
     },
@@ -688,13 +682,13 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean): void {
     hyperlinksEnabled: process.stdout.isTTY === true,
     // local pod → "not connected to GitHub"; connected (staged) pod →
     // "not yet published". Both lead the Next-steps with `lyt sync`.
-    publishState: localOnly ? "local-only" : "staged",
+    publishState: adopted ? "published" : localOnly ? "local-only" : "staged",
   };
 
   emit(renderPodCard(data));
   // Brief C (F4) + the wizard's pod is always unpublished at this point
   // (staged or local-only), so the Next-steps lead with `lyt sync`.
-  emit(renderNextSteps({ unpublished: true }));
+  emit(renderNextSteps({ unpublished: !adopted }));
   emit("");
 }
 

@@ -35,12 +35,13 @@ import {
 } from "../../util/federation-paths.js";
 import { getDefaultGhExecutor, type GhExecutor } from "../../util/gh-discover.js";
 import { realFederationGhClient } from "../../util/gh-federation.js";
-import { isValidGhHandle, validateMeshName } from "../../util/identity.js";
+import { isValidGhHandle, validateMeshName, validateVaultName } from "../../util/identity.js";
 import { getDefaultVaultsRoot, resolveVaultPath } from "../../util/paths.js";
 import { assertNoSymlinkOnWritePath } from "../../util/write-path-guard.js";
-import { hexToUuid7Bytes } from "../../util/uuid7.js";
+import { hexToUuid7Bytes, uuid7BytesToHex } from "../../util/uuid7.js";
 import { validatePodManifestSemantics } from "../../yon/federation-manifest-validate.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
+import { parseVaultYon } from "../../yon/parse.js";
 import type { FedMeshRecord, FedMeshRole } from "../../yon/federation-write.js";
 import { registerVaultFromYon } from "../register.js";
 
@@ -435,6 +436,7 @@ export async function recoverVaultsFromPodManifest(
           name: m.meshName,
           pushTarget: m.pushTarget,
           pushKind: m.pushKind,
+          createdAt: m.addedAt,
           // #1 (SC2) — RESTORE ownership from the manifest's `role`. Omitting
           // ownCreated fail-closed to false, which reconstructed every OWN mesh
           // as `join` and (via deriveVaultRepoOwner) refused the org push_target,
@@ -470,6 +472,7 @@ export async function recoverVaultsFromPodManifest(
   // (status is reachability-only now) and was removed.
   for (const v of doc.vaults) {
     const repo = v.repo.length > 0 ? v.repo : vaultRepoName(v.vaultName);
+    const manifestHomeMeshRidHex = v.homeMeshRidHex;
     // #2 — resolve each vault's REAL repo owner from its HOME MESH push_target,
     // not the pod-owner handle. An ORG-mesh vault lives under the org handle; the
     // old `cloneFn({ handle: args.handle, ... })` cloned it under the personal
@@ -484,7 +487,9 @@ export async function recoverVaultsFromPodManifest(
     // The vault's home-mesh role as DECLARED in the manifest (undefined for an
     // orphan / absent mesh block) — drives the drop classifier (R1-m1).
     const manifestMesh =
-      v.homeMeshRidHex !== null ? manifestMeshByRidHex.get(v.homeMeshRidHex) : undefined;
+      manifestHomeMeshRidHex !== null
+        ? manifestMeshByRidHex.get(manifestHomeMeshRidHex)
+        : undefined;
     const manifestRole = manifestMesh?.role;
     try {
       if (v.homeMeshRidHex !== null) {
@@ -510,6 +515,7 @@ export async function recoverVaultsFromPodManifest(
     // isn't a valid GitHub username must never reach the clone spawn.
     if (!isValidGhHandle(owner)) owner = args.handle;
     try {
+      validateVaultName(v.vaultName);
       // Idempotency probe is rid-keyed, NOT name-keyed. The vault `rid`
       // (UUIDv7 identity) is stable across rename/move; the name in pod.yon can
       // diverge from the registry (a local rename, or a colliding name across
@@ -531,6 +537,10 @@ export async function recoverVaultsFromPodManifest(
       if (!existsSync(vaultYonPath)) {
         await cloneFn({ handle: owner, repo, targetPath });
       }
+      // A clone can introduce links below the target root after the first
+      // guard. Re-check the exact metadata and index paths before read/write.
+      assertNoSymlinkOnWritePath(targetPath, vaultYonPath);
+      assertNoSymlinkOnWritePath(targetPath, join(targetPath, ".lyt", "indexes"));
       if (!existsSync(vaultYonPath)) {
         const reason = "clone produced no .lyt/vault.yon";
         skipped.push({ vaultName: v.vaultName, reason });
@@ -543,6 +553,26 @@ export async function recoverVaultsFromPodManifest(
           reason,
         });
         continue;
+      }
+      const clonedVault = parseVaultYon(readFileSync(vaultYonPath, "utf8"));
+      if (clonedVault.name !== v.vaultName) {
+        throw new Error(
+          `cloned vault identity mismatch: pod.yon names '${v.vaultName}', ` +
+            `but .lyt/vault.yon names '${clonedVault.name}'`,
+        );
+      }
+      const clonedHomeMeshRid = clonedVault.homeMesh?.meshRid;
+      if (
+        manifestHomeMeshRidHex === null ||
+        manifestMesh === undefined ||
+        clonedHomeMeshRid === undefined ||
+        uuid7BytesToHex(hexToUuid7Bytes(clonedHomeMeshRid)) !== manifestHomeMeshRidHex ||
+        clonedVault.homeMesh?.meshName !== manifestMesh.meshName
+      ) {
+        throw new Error(
+          `cloned vault home-mesh mismatch for '${v.vaultName}': ` +
+            `pod.yon requires mesh '${manifestMesh?.meshName ?? manifestHomeMeshRidHex ?? "<missing>"}'`,
+        );
       }
       // A just-cloned vault has no .lyt/indexes/*.db (gitignored) — init them so
       // the downstream Lane M reconcile has schemas to fill.
@@ -560,6 +590,8 @@ export async function recoverVaultsFromPodManifest(
       const reg = await registerVaultFromYon(db, {
         vaultPath: targetPath,
         trustedReconstruction: true,
+        ridOverride: ridBytes,
+        homeMeshRidOverride: hexToUuid7Bytes(manifestHomeMeshRidHex),
       });
       vaultsRecovered.push({ vaultName: reg.name, repo, path: targetPath });
     } catch (err) {

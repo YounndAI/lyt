@@ -336,7 +336,7 @@ export async function federationInitFlow(
     // never clobbered (doctor warns-not-acts on a later delete). Lands in the
     // forge commit below (commitAndOptionallyPush stages the whole localDir).
     const podReadmePath = join(localDir, "README.md");
-    if (!existsSync(podReadmePath)) {
+    if (branch !== "adopted" && !existsSync(podReadmePath)) {
       mkdirSync(localDir, { recursive: true });
       writeFileSync(
         podReadmePath,
@@ -362,11 +362,12 @@ export async function federationInitFlow(
           writeIdentityCache(podIdentity);
         }
       }
-      // Brief B (R5) — on BOTH fresh and adopt, ensure the pod carries
-      // identity.yon (write if missing). On fresh this is the initial write;
-      // on adopt it heals a pod that was cloned without one. This commit
-      // (below) then captures it.
-      ensurePodIdentityWriteback(localDir, handle, now().getTime());
+      // A fresh pod writes its durable identity. Adoption consumes the cloned
+      // identity but never rewrites the repository merely because it is now on
+      // another machine.
+      if (branch !== "adopted") {
+        ensurePodIdentityWriteback(localDir, handle, now().getTime());
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // eslint-disable-next-line no-console
@@ -384,8 +385,10 @@ export async function federationInitFlow(
         : `chore(federation): refresh ${remoteFullName}`;
     let pushed = false;
     try {
-      await ghClient.commitAndOptionallyPush(localDir, commitMessage, push);
-      pushed = push;
+      if (branch !== "adopted") {
+        await ghClient.commitAndOptionallyPush(localDir, commitMessage, push);
+        pushed = push;
+      }
     } catch (err) {
       // Don't swallow — the handler needs to know push failed. But preserve
       // the local-state write (federation_state row written below) so
