@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.13.1] — 2026-07-17
+
+### Fixed
+
+- **Fresh-machine pod recovery** — an owned mesh may use any name while targeting a personal account or organization. Recovery now authenticates legacy organization targets that were recorded as `push_kind=handle`, normalizes them to `org`, and preserves fail-closed handling for unverified owners.
+
+---
+
 ## [0.13.0] — 2026-07-17
 
 Reliable team use across machines, with an editor-neutral vault format, safe scoped first publication, and a deliberately small programmatic lifecycle-hook surface. The unreleased `0.12.2` candidate is included here; no `0.12.2` package was published.

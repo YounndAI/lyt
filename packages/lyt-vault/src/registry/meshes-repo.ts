@@ -164,6 +164,23 @@ export async function updateMeshMainVault(
   });
 }
 
+export async function updateMeshOwnership(
+  db: Client,
+  rid: Uint8Array,
+  args: { pushTarget: string; pushKind: MeshPushKind; ownCreated: boolean },
+): Promise<void> {
+  if (!isUuidv7Bytes(rid)) {
+    throw new Error("updateMeshOwnership: rid must be a 16-byte UUIDv7 BLOB.");
+  }
+  if (!isValidGhHandle(args.pushTarget)) {
+    throw new Error("updateMeshOwnership: pushTarget must be a valid GitHub owner.");
+  }
+  await db.execute({
+    sql: "UPDATE meshes SET push_target = ?, push_kind = ?, own_created = ? WHERE rid = ?",
+    args: [args.pushTarget, args.pushKind, args.ownCreated ? 1 : 0, rid],
+  });
+}
+
 export async function deleteMesh(db: Client, rid: Uint8Array): Promise<void> {
   await db.execute({
     sql: "DELETE FROM meshes WHERE rid = ?",

@@ -19,7 +19,12 @@ import { join } from "node:path";
 
 import type { Client } from "@libsql/client";
 
-import { getMeshByRid, insertMesh, type MeshRow } from "../../registry/meshes-repo.js";
+import {
+  getMeshByRid,
+  insertMesh,
+  type MeshRow,
+  updateMeshOwnership,
+} from "../../registry/meshes-repo.js";
 import { getVaultByRid } from "../../registry/repo.js";
 import { initVaultDbs } from "../../registry/vault-db.js";
 import {
@@ -179,13 +184,33 @@ function renderRecoveryRefusal(
 async function verifyRecoveredOwnMeshClaims(
   meshes: readonly FedMeshRecord[],
   gh: GhExecutor,
-): Promise<string[]> {
+): Promise<{ issues: string[]; normalizedPushKinds: Map<string, "handle" | "org"> }> {
   const claims = meshes.filter((mesh) => mesh.role === "own" && mesh.pushTarget.length > 0);
-  if (claims.length === 0) return [];
+  if (claims.length === 0) return { issues: [], normalizedPushKinds: new Map() };
 
   const issues: string[] = [];
+  const normalizedPushKinds = new Map<string, "handle" | "org">();
   let authenticatedActor: string | null = null;
   const orgAuthority = new Map<string, boolean>();
+
+  const canCreateInOrg = async (target: string): Promise<boolean> => {
+    const key = target.toLowerCase();
+    let canCreate = orgAuthority.get(key);
+    if (canCreate !== undefined) return canCreate;
+    const raw = await gh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${ORG_CREATE_AUTHORITY_QUERY}`,
+      "-F",
+      `login=${target}`,
+      "--jq",
+      ".data.organization.viewerCanCreateRepositories",
+    ]);
+    canCreate = raw.trim().toLowerCase() === "true";
+    orgAuthority.set(key, canCreate);
+    return canCreate;
+  };
 
   for (const mesh of claims) {
     try {
@@ -195,31 +220,25 @@ async function verifyRecoveredOwnMeshClaims(
           authenticatedActor.length === 0 ||
           authenticatedActor.toLowerCase() !== mesh.pushTarget.toLowerCase()
         ) {
+          // Historical pod manifests could record an organization target as
+          // `push_kind=handle`. Authenticate that target as an organization
+          // before refusing, then normalize the recovered registry row so the
+          // next manifest regeneration repairs the stale classification.
+          if (await canCreateInOrg(mesh.pushTarget)) {
+            normalizedPushKinds.set(mesh.meshRidHex, "org");
+            continue;
+          }
           issues.push(
-            `own mesh ${JSON.stringify(mesh.meshName)} targets personal owner ` +
-              `${JSON.stringify(mesh.pushTarget)}, but the authenticated GitHub actor is ` +
-              `${JSON.stringify(authenticatedActor || "unknown")}`,
+            `own mesh ${JSON.stringify(mesh.meshName)} targets owner ` +
+              `${JSON.stringify(mesh.pushTarget)}, but it matches neither the authenticated ` +
+              `GitHub actor ${JSON.stringify(authenticatedActor || "unknown")} nor an ` +
+              `organization where that actor may create repositories`,
           );
         }
         continue;
       }
 
-      const key = mesh.pushTarget.toLowerCase();
-      let canCreate = orgAuthority.get(key);
-      if (canCreate === undefined) {
-        const raw = await gh([
-          "api",
-          "graphql",
-          "-f",
-          `query=${ORG_CREATE_AUTHORITY_QUERY}`,
-          "-F",
-          `login=${mesh.pushTarget}`,
-          "--jq",
-          ".data.organization.viewerCanCreateRepositories",
-        ]);
-        canCreate = raw.trim().toLowerCase() === "true";
-        orgAuthority.set(key, canCreate);
-      }
+      const canCreate = await canCreateInOrg(mesh.pushTarget);
       if (!canCreate) {
         issues.push(
           `own mesh ${JSON.stringify(mesh.meshName)} targets organization ` +
@@ -235,7 +254,7 @@ async function verifyRecoveredOwnMeshClaims(
     }
   }
 
-  return issues;
+  return { issues, normalizedPushKinds };
 }
 
 export async function recoverVaultsFromPodManifest(
@@ -346,12 +365,12 @@ export async function recoverVaultsFromPodManifest(
   // actor; organization targets must explicitly allow that actor to create
   // repositories. False or indeterminate proof refuses the whole recovery so
   // no partially-authorized registry state can be consumed later.
-  const ownershipIssues = await verifyRecoveredOwnMeshClaims(
+  const ownership = await verifyRecoveredOwnMeshClaims(
     doc.meshes,
     args.ghExecutor ?? getDefaultGhExecutor(),
   );
-  if (ownershipIssues.length > 0) {
-    const detail = ownershipIssues.join("; ");
+  if (ownership.issues.length > 0) {
+    const detail = ownership.issues.join("; ");
     const remedy =
       `Authenticate GitHub with the account that owns these targets (and has repository-create ` +
       `authority for each organization), then re-run 'lyt init'.`;
@@ -376,15 +395,20 @@ export async function recoverVaultsFromPodManifest(
     };
   }
 
+  const recoveredMeshes = doc.meshes.map((mesh) => ({
+    ...mesh,
+    pushKind: ownership.normalizedPushKinds.get(mesh.meshRidHex) ?? mesh.pushKind,
+  }));
+
   // R1-m1 fix-pass — index the MANIFEST mesh records by rid so the vault loop
   // can classify a drop against the manifest's declared `role` (not just the
   // registry row's push shape).
   const manifestMeshByRidHex = new Map<string, FedMeshRecord>();
-  for (const m of doc.meshes) manifestMeshByRidHex.set(m.meshRidHex, m);
+  for (const m of recoveredMeshes) manifestMeshByRidHex.set(m.meshRidHex, m);
 
   // 1. Recover meshes first (so vault home-mesh FK is satisfiable). Idempotent.
   let meshesRecovered = 0;
-  for (const m of doc.meshes) {
+  for (const m of recoveredMeshes) {
     try {
       // fed-v2 Layer-2 P1 (recover-pod meshName) — the pod.yon is FOREIGN input
       // (a cloned manifest, possibly hostile). Validate the declared mesh name
@@ -404,7 +428,8 @@ export async function recoverVaultsFromPodManifest(
         continue;
       }
       const rid = hexToUuid7Bytes(m.meshRidHex);
-      if ((await getMeshByRid(db, rid)) === null) {
+      const existingMesh = await getMeshByRid(db, rid);
+      if (existingMesh === null) {
         await insertMesh(db, {
           rid,
           name: m.meshName,
@@ -423,6 +448,15 @@ export async function recoverVaultsFromPodManifest(
           ownCreated: m.role === "own",
         });
         meshesRecovered += 1;
+      } else if (m.role === "own") {
+        // Recovery is idempotent over partial/legacy local state. The ownership
+        // preflight above authenticated this exact target before any mutation,
+        // so converge an existing row to the verified manifest authority too.
+        await updateMeshOwnership(db, rid, {
+          pushTarget: m.pushTarget,
+          pushKind: m.pushKind,
+          ownCreated: true,
+        });
       }
     } catch (err) {
       warnings.push(`mesh ${m.meshName}: ${errMsg(err)}`);
