@@ -1,4 +1,4 @@
-# Contributing to Lyt
+# Contributing to Lyt (Link Your Think™)
 
 Thank you for your interest in contributing to Lyt, a YounndAI™ product by
 MARLINK TRADING SRL.
@@ -42,9 +42,9 @@ confirms a signed CLA is on file for all contributors.**
 - [ ] Signed the appropriate CLA (see above)
 - [ ] Apache-2.0 copyright header included in any new source files (see existing files for the exact block)
 - [ ] Code follows existing project conventions (TypeScript strict mode, libSQL-only data layer, cross-platform paths)
-- [ ] Tests added for new functionality; `npm run build` + `npm test` green (test tiers: `test:smoke` / `test:affected` / `test:release`)
+- [ ] Focused tests added for new functionality; `npm run build`, `npm run typecheck`, and `npm test` green
 - [ ] Documentation updated for user-facing changes
-- [ ] Trademark indicators (™) on first prominent use of any YounndAI or LYT mark in new documentation
+- [ ] Trademark indicators (™) on first prominent use of any YounndAI or Lyt mark in new documentation
 - [ ] CHANGELOG.md updated where the change is user-facing
 
 ## Code of conduct
