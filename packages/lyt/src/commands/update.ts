@@ -572,6 +572,20 @@ function resolveNpmCliPath(): string | null {
 }
 
 function packageRoot(packageName: string): string | null {
+  const cliPath = typeof process.argv[1] === "string" ? resolve(process.argv[1]) : null;
+  if (cliPath !== null) {
+    const currentPackageRoot = resolve(dirname(cliPath), "..");
+    const packageSegments = packageName.split("/");
+    const candidates =
+      packageName === "@younndai/lyt"
+        ? [currentPackageRoot]
+        : [
+            join(currentPackageRoot, "node_modules", ...packageSegments),
+            join(resolve(currentPackageRoot, "..", ".."), ...packageSegments),
+          ];
+    const found = candidates.find((candidate) => existsSync(join(candidate, "package.json")));
+    if (found !== undefined) return found;
+  }
   try {
     const require = createRequire(import.meta.url);
     let cursor = dirname(require.resolve(packageName));
@@ -834,9 +848,14 @@ export async function revalidateProductionUpdatePlan(plan: UpdatePlanV1): Promis
       registry: parsed.registry_url,
       version: parsed.target_version,
     });
-    if (canonicalJson(graph) !== canonicalJson(parsed.package_graph)) return false;
+    const normalizedGraph = [...graph].sort((left, right) => left.name.localeCompare(right.name));
+    if (canonicalJson(normalizedGraph) !== canonicalJson(parsed.package_graph)) return false;
     const observed = observeInstalledState();
-    if (canonicalJson(observed) !== canonicalJson(parsed.before_state)) return false;
+    const normalizedObserved = {
+      ...observed,
+      packages: [...observed.packages].sort((left, right) => left.name.localeCompare(right.name)),
+    };
+    if (canonicalJson(normalizedObserved) !== canonicalJson(parsed.before_state)) return false;
     const currentRoots = new Map(
       UPDATE_PLAN_PACKAGES.map((name) => [name, packageRoot(name) ?? "missing-target-package"]),
     );
@@ -894,7 +913,8 @@ export function installedEvidenceMatchesPlan(
   return (
     versions.size === UPDATE_PLAN_PACKAGES.length &&
     UPDATE_PLAN_PACKAGES.every((name) => versions.get(name) === plan.target_version) &&
-    canonicalJson(graph) === canonicalJson(plan.package_graph)
+    canonicalJson([...graph].sort((left, right) => left.name.localeCompare(right.name))) ===
+      canonicalJson(plan.package_graph)
   );
 }
 

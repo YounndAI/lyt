@@ -255,6 +255,7 @@ export async function openReceiptAttempt(
     session: Object.freeze({
       operationId: begun.operationId,
       attemptId: receipt.attempt_id,
+      startedAt: receipt.timestamps.started_at,
       priorTerminalStatus: begun.priorTerminalStatus,
       async close() {
         if (settled) return Object.freeze([]);
@@ -275,7 +276,13 @@ export async function openReceiptAttempt(
         settled = true;
         const warnings: ReceiptAttemptWarningCode[] = [];
         try {
-          await finalize(db, parseReceiptV1ForEmission(terminalReceipt));
+          await finalize(db, {
+            ...parseReceiptV1ForEmission(terminalReceipt),
+            timestamps: {
+              ...terminalReceipt.timestamps,
+              started_at: receipt.timestamps.started_at,
+            },
+          });
         } catch {
           warnings.push("receipt-store-finalize-failed");
         }
