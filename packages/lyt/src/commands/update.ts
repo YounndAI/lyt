@@ -179,7 +179,7 @@ function parseChannel(value: string): UpdateChannel {
 }
 
 function readMetaVersion(): string {
-  return (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+  return (createRequire(import.meta.url)("../../package.json") as { version: string }).version;
 }
 
 export function resolveConfiguredChannel(
