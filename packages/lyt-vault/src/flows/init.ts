@@ -15,6 +15,8 @@
  */
 
 import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 
 import type { Client } from "@libsql/client";
 
@@ -26,10 +28,24 @@ import { getMeshByName } from "../registry/meshes-repo.js";
 import { getVaultByName, getVaultByExactName, setVaultHomeMesh } from "../registry/repo.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
 import { initVaultDbs } from "../registry/vault-db.js";
-import { initVault, type InitOptions, type InitResult } from "../scaffold/init.js";
+import { LEDGER_REGISTRY } from "../registry/ledger-registry.js";
+import {
+  initVault,
+  plannedObsidianScaffoldPaths,
+  type InitOptions,
+  type InitResult,
+} from "../scaffold/init.js";
+import {
+  createInitialCheckpointContext,
+  finalizeInitialCheckpoint,
+  recordInitialCheckpointPaths,
+  type LocalCheckpointResult,
+} from "../scaffold/local-checkpoint.js";
 import { getFederationRepoDir } from "../util/federation-paths.js";
 import { recordInitFailure } from "../util/failure-log.js";
 import { getHandleFromIdentity } from "../util/identity.js";
+import { hexToUuid7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { getWriterId } from "../util/writer-id.js";
 import { VOICE } from "../voice.js";
 import { federationInitFlow } from "./federation/init.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
@@ -38,6 +54,26 @@ import type { FederationGhClient, FederationRepoVisibility } from "../util/gh-fe
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import { registerVaultFromYon } from "./register.js";
 import { indexScaffoldFtsOnCreate } from "./upsert-fts-cache.js";
+import { setCanonicalDestinationPolicy } from "./federation/destination-policy-service.js";
+import { parseCanonicalDestinationTarget } from "../registry/destination-policy.js";
+import { destinationPolicyKey } from "../registry/destination-policy.js";
+import { getFederationRoot } from "../util/federation-paths.js";
+import {
+  foldDestinationPolicyWinners,
+  readAllDestinationPolicyRecords,
+} from "./federation/destination-policy-ledger.js";
+import {
+  asCreationMutationFailure,
+  CreationMutationJournal,
+  type CreationMutationEvidence,
+} from "../op/creation-mutation-journal.js";
+import type { CreationPlanV1, DestinationRequest } from "./creation-plan.js";
+import {
+  assertVaultCreationBinding,
+  assertVaultInitWriteTarget,
+  inspectVaultInitPreflight,
+  type VaultCreationBinding,
+} from "./vault-init-preflight.js";
 
 export interface InitFlowResult extends InitResult {
   registered: boolean;
@@ -73,6 +109,12 @@ export interface InitFlowResult extends InitResult {
     pushTarget: string | null;
     pushKind: string | null;
     ownCreated: boolean;
+  } | null;
+  /** Phase B local-only creation evidence; command adapters own Receipt V1. */
+  creation: {
+    plan: CreationPlanV1;
+    checkpoints: LocalCheckpointResult[];
+    mutations: CreationMutationEvidence;
   } | null;
 }
 
@@ -136,9 +178,13 @@ export interface MeshSelfHealOptions {
   // nested `meshInitFlow` call when auto-creation fires. Mirrors the
   // federation self-heal shape.
   ghClient?: MeshGhClient | undefined;
+  /** Exact mesh plan used only when this vault operation creates the mesh. */
+  creation?: VaultCreationBinding | undefined;
 }
 
 export interface InitFlowOptions extends InitOptions {
+  /** Exact, attempt-bound request/plan consumed by this mutation. */
+  creation: VaultCreationBinding;
   selfHeal?: {
     federation?: FederationSelfHealOptions;
     mesh?: MeshSelfHealOptions;
@@ -227,15 +273,87 @@ export class VaultAlreadyExistsError extends Error {
 }
 
 export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResult> {
+  if (opts.creation === undefined) {
+    throw new Error("Vault creation requires one exact, attempt-bound CreationBinding.");
+  }
+  const creationBinding = opts.creation;
+  let creationPreflight = inspectVaultInitPreflight({
+    name: opts.name,
+    ...(opts.path === undefined ? {} : { path: opts.path }),
+    meshEnabled: opts.selfHeal?.mesh?.enabled === true,
+    ...(opts.selfHeal?.mesh?.meshName === undefined
+      ? {}
+      : { defaultMeshName: opts.selfHeal.mesh.meshName }),
+  });
+  assertVaultCreationBinding(creationPreflight, creationBinding);
+  // Re-read and revalidate immediately before the first migration-capable
+  // registry open. The preflight itself is physically read-only.
+  creationPreflight = inspectVaultInitPreflight({
+    name: opts.name,
+    ...(opts.path === undefined ? {} : { path: opts.path }),
+    meshEnabled: opts.selfHeal?.mesh?.enabled === true,
+    ...(opts.selfHeal?.mesh?.meshName === undefined
+      ? {}
+      : { defaultMeshName: opts.selfHeal.mesh.meshName }),
+  });
+  assertVaultCreationBinding(creationPreflight, creationBinding);
+  assertVaultInitWriteTarget(creationPreflight, creationBinding);
+  const freshPodBoundary = captureFreshPodMutationBoundary(creationBinding.creationPlan);
+
   // v1.A.1b: open the registry ONCE up-front (v1.A.1a fold #4 extended) so
   // we can (a) resolve --parent <name> → parentVaultRid bytes before the
   // scaffold writes vault.yon, (b) register the just-scaffolded vault, and
   // (c) thread the same db into the federation self-heal probe. Saves the
   // duplicate-open the v1.A.0 code did pre-fold-#4.
-  const db = await openRegistry();
+  let db: Client | null = null;
   let federationSelfHealed: InitFlowResult["federationSelfHealed"] = null;
   let meshAssignment: InitFlowResult["meshAssignment"] = null;
+  let creation: InitFlowResult["creation"] = null;
+  const mutationJournal = new CreationMutationJournal(creationBinding.attemptId);
   try {
+    db = await openRegistry();
+    const writerId =
+      creationBinding.creationPlan.intended_effects.identity.kind === "create"
+        ? getWriterId()
+        : null;
+    // Materialize the planned first-pod identity before any vault or mesh
+    // scaffold.  This keeps all nested creation paths on the same real pod
+    // rather than letting one of them manufacture a second identity.
+    if (creationPreflight.podIdentity.state === "missing") {
+      const identity = creationBinding.creationPlan.intended_effects.identity;
+      if (identity.kind !== "create") {
+        throw new Error("First-vault creation is missing its planned pod identity effect.");
+      }
+      const pod = await federationInitFlow({
+        handle: identity.handle,
+        visibility: "private",
+        pushToRemote: false,
+        createRemoteIfMissing: false,
+        localOnly: true,
+        checkpointMode: "deferred",
+        plannedFedRidBytes: hexToUuid7Bytes(identity.rid),
+        db,
+      });
+      if (pod.fedRidHex !== identity.rid) {
+        throw new Error(
+          "Vault creation pod apply observed an identity that differs from its plan.",
+        );
+      }
+      if (pod.branch === "cached") {
+        throw new Error(
+          "Vault creation pod apply received branch=cached despite a missing planned identity.",
+        );
+      }
+      federationSelfHealed = {
+        handle: pod.handle,
+        fedRidHex: pod.fedRidHex,
+        branch: pod.branch,
+        visibility: pod.visibility,
+        statusVoiceEmitted: VOICE.forgingFromDetectedState,
+      };
+      mutationJournal.record({ registryRows: 1 });
+    }
+
     // v1.B.3 — name normalization + mesh self-heal probe. Runs BEFORE the
     // scaffold so vault.yon gets a @VAULT_HOME_MESH block on first write
     // (no post-scaffold re-render). The decision tree:
@@ -251,6 +369,9 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
     // otherwise (per Plan-D1: don't silently auto-create non-personal
     // meshes).
     const meshSelfHealAssignment = await maybeAssignHomeMesh(opts, db);
+    if (meshSelfHealAssignment?.meshMutations !== undefined) {
+      mutationJournal.record(meshSelfHealAssignment.meshMutations);
+    }
 
     const effectiveName = meshSelfHealAssignment?.normalizedName ?? opts.name;
     const homeMeshScaffoldArg = meshSelfHealAssignment?.scaffoldHomeMesh;
@@ -283,12 +404,32 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
       name: effectiveName,
       ...(parentVaultRid !== undefined ? { parentVaultRid } : {}),
       ...(homeMeshScaffoldArg !== undefined ? { homeMesh: homeMeshScaffoldArg } : {}),
+      plannedVaultRid: hexToUuid7Bytes(
+        creationBinding.creationPlan.intended_effects.primary_vault_rid,
+      ),
+      plannedMemscopeRid: hexToUuid7Bytes(
+        creationBinding.creationPlan.intended_effects.vaults.find(
+          (vault) => vault.rid === creationBinding.creationPlan.intended_effects.primary_vault_rid,
+        )!.memscope_rid,
+      ),
+      checkpointMode: "deferred" as const,
     };
 
     const result = initVault(scaffoldOpts);
+    const editorLocalWritePaths = plannedObsidianScaffoldPaths(result.template);
+    mutationJournal.record({
+      filesystemWrites: result.checkpointContext.paths.length + editorLocalWritePaths.length,
+      checkpointPaths: result.checkpointContext.paths,
+    });
+    assertPlannedCheckpointPaths(
+      creationBinding.creationPlan,
+      result.vaultPath,
+      result.checkpointContext.paths,
+    );
     // Per-vault libSQL initialised on creation so the 6 schemas are queryable
     // on first read, not lazily on first write. Block-A Commit 4 invariant.
     await initVaultDbs(result.vaultPath);
+    mutationJournal.record({ localDatabases: 1 + LEDGER_REGISTRY.length });
 
     // B-4 / Decision-B (B2): index the scaffold figments into FTS at create so a
     // freshly-init'd vault has FTS == on-disk-indexable and doctor's
@@ -297,6 +438,16 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
     await indexScaffoldFtsOnCreate(result.vaultPath);
 
     const registered = await registerVaultFromYon(db, { vaultPath: result.vaultPath });
+    mutationJournal.record({ registryRows: 1 });
+    if (
+      uuid7BytesToHex(result.vaultRid) !==
+        creationBinding.creationPlan.intended_effects.primary_vault_rid ||
+      registered.ridHex !== creationBinding.creationPlan.intended_effects.primary_vault_rid
+    ) {
+      throw new Error(
+        "Vault creation apply observed an identity that differs from its immutable plan.",
+      );
+    }
 
     // v1.B.3 — when a home-mesh assignment landed in vault.yon, complete
     // the registry-side binding: set vaults.home_mesh_rid (register.ts
@@ -306,13 +457,16 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
     // mesh.yon.
     if (meshSelfHealAssignment !== null) {
       await setVaultHomeMesh(db, registered.rid, meshSelfHealAssignment.meshRid);
+      mutationJournal.record({ topologyBindings: 1 });
       await addVaultToMesh(db, meshSelfHealAssignment.meshRid, registered.rid, "home");
+      mutationJournal.record({ registryRows: 1, topologyBindings: 1 });
       appendMeshHomeToFile({
         mainVaultPath: meshSelfHealAssignment.mainVaultPath,
         meshRid: meshSelfHealAssignment.meshRid,
         vaultRid: registered.rid,
         vaultName: effectiveName,
       });
+      mutationJournal.record({ filesystemWrites: 1, checkpointPaths: [".lyt/mesh.yon"] });
       meshAssignment = {
         meshRidHex: meshSelfHealAssignment.meshRidHex,
         meshName: meshSelfHealAssignment.meshName,
@@ -325,7 +479,30 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
       };
     }
 
-    federationSelfHealed = await maybeSelfHealFederation(opts, db);
+    if (creationPreflight.podIdentity.state !== "missing") {
+      federationSelfHealed = await maybeSelfHealFederation(opts, db);
+    }
+    const policyPodRid =
+      creationPreflight.podRid ??
+      federationSelfHealed?.fedRidHex ??
+      creationBinding.creationPlan.intended_effects.identity.rid;
+    if (policyPodRid === null) {
+      throw new Error("Vault creation lost its initialized pod identity before policy apply.");
+    }
+    await applyVaultCreationPolicy(
+      db,
+      policyPodRid,
+      registered.rid,
+      creationBinding.creationPlan,
+      creationBinding.destinationRequest,
+    );
+    mutationJournal.record({ destinationPolicyRecords: 1 });
+    await assertPlannedVaultApply(
+      db,
+      creationBinding.creationPlan,
+      policyPodRid,
+      creationBinding.destinationRequest,
+    );
 
     // (Brief A) — regenerate the derived pod manifest from the now-populated
     // registry so `pod.yon` reflects this just-registered vault. Runs LAST, after
@@ -336,23 +513,326 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
       db,
       federationSelfHealed !== null ? { handle: federationSelfHealed.handle } : {},
     );
+    mutationJournal.record({ filesystemWrites: 1 });
+
+    const podCheckpoint = finalizePlannedPodCheckpoint(
+      creationBinding.creationPlan,
+      creationPreflight.podIdentity.state === "present"
+        ? creationPreflight.podIdentity.repositoryRoot
+        : creationBinding.creationPlan.intended_effects.identity.kind === "create"
+          ? getFederationRepoDir(creationBinding.creationPlan.intended_effects.identity.handle)
+          : null,
+      freshPodBoundary,
+      writerId,
+      opts.checkpointGitRunner,
+    );
 
     // Read-back guard on top of registration. Re-read the row by rid and
     // assert the vault is actually present before claiming success — closes
     // the "reported success without effect" class for the init surface.
     const committed = await assertVaultRegistered(db, registered.rid);
 
-    return {
+    const checkpoints: LocalCheckpointResult[] = [];
+    const checkpointRepositories: Array<{
+      repositoryRoot: string;
+      checkpoint: LocalCheckpointResult;
+    }> = [];
+    const vaultCheckpoint =
+      opts.checkpointMode !== "deferred" &&
+      result.gitInitialized &&
+      result.checkpoint.status === "deferred"
+        ? finalizeInitialCheckpoint(result.checkpointContext, opts.checkpointGitRunner)
+        : result.checkpoint;
+    checkpoints.push(vaultCheckpoint);
+    checkpointRepositories.push({ repositoryRoot: result.vaultPath, checkpoint: vaultCheckpoint });
+    if (podCheckpoint !== null) {
+      checkpoints.push(podCheckpoint);
+      const podRoot =
+        creationPreflight.podIdentity.state === "present"
+          ? creationPreflight.podIdentity.repositoryRoot
+          : getFederationRepoDir(
+              (
+                creationBinding.creationPlan.intended_effects.identity as {
+                  kind: "create";
+                  handle: string;
+                }
+              ).handle,
+            );
+      checkpointRepositories.push({ repositoryRoot: podRoot, checkpoint: podCheckpoint });
+    }
+    if (
+      result.gitInitialized &&
+      meshSelfHealAssignment !== null &&
+      meshSelfHealAssignment.mainVaultPath !== result.vaultPath
+    ) {
+      const meshContext = meshSelfHealAssignment.mainVaultCheckpointContext;
+      if (meshContext !== undefined) {
+        // The auto-created mesh deferred its own checkpoint specifically so
+        // this final mesh-home binding joins the original scaffold journal.
+        recordInitialCheckpointPaths(meshContext, [".lyt/mesh.yon"]);
+      }
+      const meshCheckpoint = finalizeInitialCheckpoint(
+        meshContext ??
+          createInitialCheckpointContext(meshSelfHealAssignment.mainVaultPath, [".lyt/mesh.yon"]),
+        opts.checkpointGitRunner,
+      );
+      checkpoints.push(meshCheckpoint);
+      checkpointRepositories.push({
+        repositoryRoot: meshSelfHealAssignment.mainVaultPath,
+        checkpoint: meshCheckpoint,
+      });
+    }
+    const checkpointPaths = checkpoints.flatMap((checkpoint) => checkpoint.paths);
+    for (const checkpoint of checkpoints) {
+      if (checkpoint.status === "committed") mutationJournal.record({ checkpointCommits: 1 });
+    }
+    mutationJournal.record({
+      checkpointRepositories: checkpointRepositories.map(({ repositoryRoot, checkpoint }) => ({
+        repositoryRoot,
+        paths: checkpoint.paths,
+        ...(checkpoint.commitSha === undefined ? {} : { commitSha: checkpoint.commitSha }),
+        ...(checkpoint.beforeCommitSha === undefined
+          ? {}
+          : { beforeCommitSha: checkpoint.beforeCommitSha }),
+        clean: checkpoint.status === "committed" || checkpoint.status === "skipped",
+      })),
+    });
+    creation = {
+      plan: creationBinding.creationPlan,
+      checkpoints,
+      mutations: {
+        ...mutationJournal.snapshot(),
+        checkpointPaths: [
+          ...new Set([...mutationJournal.snapshot().checkpointPaths, ...checkpointPaths]),
+        ].sort(),
+      },
+    };
+    const returnedResult = {
       ...result,
+      checkpoint: vaultCheckpoint,
+      initialCommitMade: vaultCheckpoint.status === "committed",
+    };
+
+    return {
+      ...returnedResult,
       registered: true,
       federationSelfHealed,
       meshAssignment,
+      creation,
       committed: committed.verdict,
       unverifiedNote: committed.unverifiedNote,
     };
+  } catch (error) {
+    const failureLogged = recordInitFailure({
+      site: "first-vault-create",
+      step: "flow:initVaultFlow",
+      summary: "Vault creation stopped after its local apply phase began.",
+      context: { name: opts.name },
+    });
+    if (failureLogged) mutationJournal.record({ failureLogRecords: 1, filesystemWrites: 1 });
+    throw asCreationMutationFailure(error, mutationJournal, {
+      code: "vault-init-apply-failed",
+      summary: "Vault creation stopped after its local apply phase began.",
+      nextAction: {
+        code: "inspect-local-creation",
+        summary: "Run lyt repair --dry-run, inspect the local creation state, then retry.",
+      },
+    });
   } finally {
-    await closeRegistry(db);
+    if (db !== null) await closeRegistry(db);
   }
+}
+
+async function assertPlannedVaultApply(
+  db: Client,
+  plan: CreationPlanV1,
+  podRid: string,
+  request: DestinationRequest,
+): Promise<void> {
+  for (const row of plan.intended_effects.registry_rows) {
+    const present =
+      row.table === "federation_state"
+        ? await db.execute({
+            sql: "SELECT 1 FROM federation_state WHERE lower(hex(fed_rid)) = ?",
+            args: [row.key],
+          })
+        : row.table === "meshes"
+          ? await db.execute({
+              sql: "SELECT 1 FROM meshes WHERE lower(hex(rid)) = ?",
+              args: [row.key],
+            })
+          : row.table === "vaults"
+            ? await db.execute({
+                sql: "SELECT 1 FROM vaults WHERE lower(hex(rid)) = ?",
+                args: [row.key],
+              })
+            : (() => {
+                const [meshRid, vaultRid] = row.key.split(":");
+                return db.execute({
+                  sql: "SELECT 1 FROM mesh_vaults WHERE lower(hex(mesh_rid)) = ? AND lower(hex(vault_rid)) = ?",
+                  args: [meshRid ?? "", vaultRid ?? ""],
+                });
+              })();
+    if ((await present).rows.length !== 1) {
+      throw new Error(
+        `Vault creation did not realize planned registry row ${row.table}:${row.key}.`,
+      );
+    }
+  }
+  for (const binding of plan.intended_effects.topology_bindings) {
+    const present = await db.execute({
+      sql: "SELECT 1 FROM mesh_vaults WHERE lower(hex(mesh_rid)) = ? AND lower(hex(vault_rid)) = ? AND role = 'home'",
+      args: [binding.mesh_rid, binding.vault_rid],
+    });
+    if (present.rows.length !== 1) {
+      throw new Error("Vault creation did not realize a planned topology binding.");
+    }
+  }
+  const winner = foldDestinationPolicyWinners(
+    readAllDestinationPolicyRecords(podRid, getFederationRoot()),
+  ).get(destinationPolicyKey("vault", plan.intended_effects.primary_vault_rid));
+  const expectedSource = request.kind === "inherit" ? "mesh-inherited" : "vault-override";
+  if (winner === undefined || winner.state !== "active" || winner.source !== expectedSource) {
+    throw new Error("Vault creation destination-policy apply differs from its immutable plan.");
+  }
+  if (plan.destination.kind === "local") {
+    if (
+      winner.destinationKind !== "local" ||
+      winner.targetOwner !== null ||
+      winner.targetKind !== null
+    ) {
+      throw new Error("Vault creation local destination-policy apply differs from its plan.");
+    }
+  } else {
+    const target = parseCanonicalDestinationTarget(plan.destination.target);
+    if (
+      target === null ||
+      winner.destinationKind !== "github" ||
+      winner.targetOwner !== target.targetOwner ||
+      winner.targetKind !== target.targetKind ||
+      winner.repositoryName !== plan.subject.repositoryName
+    ) {
+      throw new Error("Vault creation GitHub destination-policy apply differs from its plan.");
+    }
+  }
+}
+
+function assertPlannedCheckpointPaths(
+  plan: CreationPlanV1,
+  repositoryRoot: string,
+  observedPaths: readonly string[],
+): void {
+  const intended = plan.intended_effects.checkpoints.find(
+    (checkpoint) => checkpoint.repository_root === repositoryRoot,
+  );
+  if (
+    intended === undefined ||
+    !isDeepStrictEqual([...intended.exact_paths].sort(), [...observedPaths].sort())
+  ) {
+    throw new Error("Vault creation checkpoint paths differ from its immutable plan.");
+  }
+}
+
+function finalizePlannedPodCheckpoint(
+  plan: CreationPlanV1,
+  podRoot: string | null,
+  freshBoundary: FreshPodMutationBoundary | null,
+  writerId: string | null,
+  runGit: Parameters<typeof finalizeInitialCheckpoint>[1] | undefined,
+): LocalCheckpointResult | null {
+  if (podRoot === null) return null;
+  const intended = plan.intended_effects.checkpoints.find(
+    (checkpoint) => checkpoint.repository_root === podRoot,
+  );
+  if (intended === undefined) {
+    throw new Error("First-vault creation plan is missing its exact pod checkpoint.");
+  }
+  const paths =
+    plan.intended_effects.identity.kind === "create"
+      ? freshPodMutationPaths(plan, podRoot, intended.exact_paths, freshBoundary, writerId)
+      : [...intended.exact_paths];
+  const checkpoint = finalizeInitialCheckpoint(
+    createInitialCheckpointContext(podRoot, paths),
+    runGit,
+  );
+  if (checkpoint.status !== "committed") {
+    throw new Error("First-vault creation could not finalize its exact pod checkpoint.");
+  }
+  return checkpoint;
+}
+
+interface FreshPodMutationBoundary {
+  podRoot: string;
+  preexistingPaths: ReadonlySet<string>;
+}
+
+function captureFreshPodMutationBoundary(plan: CreationPlanV1): FreshPodMutationBoundary | null {
+  if (plan.intended_effects.identity.kind !== "create") return null;
+  const podRoot = getFederationRepoDir(plan.intended_effects.identity.handle);
+  const checkpoint = plan.intended_effects.checkpoints.find(
+    (entry) => entry.repository_root === podRoot,
+  );
+  if (checkpoint === undefined) {
+    throw new Error("First-vault creation plan is missing its exact pod checkpoint.");
+  }
+  if (!existsSync(podRoot)) return { podRoot, preexistingPaths: new Set() };
+  const output = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    { cwd: podRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  return {
+    podRoot,
+    preexistingPaths: new Set(
+      output
+        .split("\0")
+        .filter((path) => path.length > 0)
+        .map((path) => path.replaceAll("\\", "/")),
+    ),
+  };
+}
+
+function freshPodMutationPaths(
+  plan: CreationPlanV1,
+  podRoot: string,
+  requiredPaths: readonly string[],
+  boundary: FreshPodMutationBoundary | null,
+  writerId: string | null,
+): string[] {
+  if (boundary === null || boundary.podRoot !== podRoot || writerId === null) {
+    throw new Error("Fresh pod checkpoint is missing its operation-local mutation boundary.");
+  }
+  const ledgerKinds = [
+    ...(plan.intended_effects.vaults.length > 0 ? ["destination-policy", "vaults"] : []),
+    ...(plan.intended_effects.topology_bindings.length > 0 ? ["meshes"] : []),
+  ];
+  const expectedLedgerPaths = ledgerKinds.map((kind) => `ledger/${kind}/${writerId}.yon`);
+  const allowedPaths = new Set([...requiredPaths, ".gitignore", ...expectedLedgerPaths]);
+  const output = execFileSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
+    cwd: podRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const entries = output.split("\0").filter((entry) => entry.length > 0);
+  const paths: string[] = [];
+  for (const entry of entries) {
+    if (entry.length < 4 || entry.slice(0, 2) !== "??" || entry[2] !== " ") {
+      throw new Error("Fresh pod checkpoint observed staged, renamed, or modified state.");
+    }
+    const path = entry.slice(3).replaceAll("\\", "/");
+    if (!allowedPaths.has(path) || boundary.preexistingPaths.has(path)) {
+      throw new Error(`Fresh pod checkpoint observed an unjournaled path: ${path}`);
+    }
+    paths.push(path);
+  }
+  if (
+    !requiredPaths.every((path) => paths.includes(path)) ||
+    !expectedLedgerPaths.every((path) => paths.includes(path)) ||
+    !paths.includes("pod.yon")
+  ) {
+    throw new Error("Fresh pod checkpoint is missing a required Lyt-authored path.");
+  }
+  return [...new Set(paths)].sort();
 }
 
 interface ResolvedHomeMeshAssignment {
@@ -360,6 +840,7 @@ interface ResolvedHomeMeshAssignment {
   meshRidHex: string;
   meshName: string;
   mainVaultPath: string;
+  mainVaultCheckpointContext?: ReturnType<typeof createInitialCheckpointContext>;
   normalizedName: string;
   autoNormalizedFrom: string | null;
   meshAutoCreated: boolean;
@@ -367,6 +848,8 @@ interface ResolvedHomeMeshAssignment {
   pushTarget: string | null;
   pushKind: string | null;
   ownCreated: boolean;
+  /** Exact child mutation journal when this invocation created the mesh. */
+  meshMutations?: CreationMutationEvidence;
   scaffoldHomeMesh: {
     meshRid: Uint8Array;
     meshName: string;
@@ -413,19 +896,28 @@ async function maybeAssignHomeMesh(
   // without it the mesh is local-only (the prior personal default).
   let meshRow = await getMeshByName(db, resolvedMeshName);
   let meshAutoCreated = false;
+  let mainVaultCheckpointContext: ReturnType<typeof createInitialCheckpointContext> | undefined;
+  let meshMutations: CreationMutationEvidence | undefined;
 
   if (meshRow === null) {
     const pushTo = meshSelfHeal.pushTo;
-    const wantsPush =
-      (pushTo !== undefined && pushTo.length > 0) || meshSelfHeal.pushOnSelfHeal === true;
+    const meshCreation = meshSelfHeal.creation;
+    if (meshCreation === undefined) {
+      throw new Error("Auto-created home mesh requires its own exact creation request and plan.");
+    }
     const meshResult = await meshInitFlow({
       name: resolvedMeshName,
-      noPush: !wantsPush,
+      // Creation never owns an online effect, regardless of legacy flags.
+      noPush: true,
       ...(pushTo !== undefined && pushTo.length > 0 ? { pushTo } : {}),
       // Open-once seam (A.4): thread the open registry so mesh-init reuses it
       // instead of opening a 2nd connection (nested-open SQLITE_BUSY risk).
       db,
       ...(meshSelfHeal.ghClient !== undefined ? { ghClient: meshSelfHeal.ghClient } : {}),
+      creation: meshCreation,
+      noGit: opts.gitInit === false,
+      commitInitial: opts.commitInitial,
+      checkpointMode: "deferred",
     });
     meshRow = await getMeshByName(db, resolvedMeshName);
     if (meshRow === null) {
@@ -435,6 +927,10 @@ async function maybeAssignHomeMesh(
       );
     }
     meshAutoCreated = true;
+    mainVaultCheckpointContext = meshResult.checkpointContext;
+    meshMutations = meshResult.mutations;
+    // Preserve the exact mesh-init scaffold journal; the parent adds its
+    // `@MESH_HOME` mutation and commits this repository once below.
   }
 
   // Resolve the home mesh's main vault path so we can append @MESH_HOME
@@ -459,6 +955,7 @@ async function maybeAssignHomeMesh(
     meshRidHex: meshRow.ridHex,
     meshName: meshRow.name,
     mainVaultPath,
+    ...(mainVaultCheckpointContext === undefined ? {} : { mainVaultCheckpointContext }),
     normalizedName,
     autoNormalizedFrom,
     meshAutoCreated,
@@ -466,11 +963,51 @@ async function maybeAssignHomeMesh(
     pushTarget: meshRow.pushTarget,
     pushKind: meshRow.pushKind,
     ownCreated: meshRow.ownCreated,
+    ...(meshMutations === undefined ? {} : { meshMutations }),
     scaffoldHomeMesh: {
       meshRid: meshRow.rid,
       meshName: meshRow.name,
     },
   };
+}
+
+async function applyVaultCreationPolicy(
+  db: Client,
+  podRid: string,
+  vaultRid: Uint8Array,
+  plan: CreationPlanV1,
+  request: DestinationRequest,
+): Promise<void> {
+  // Provenance follows the Handler's request, never the incidental fact that
+  // this operation also had to create its home mesh. An explicit target/local
+  // request remains a vault override; only `inherit` snapshots mesh policy.
+  const source = request.kind === "inherit" ? "mesh-inherited" : "vault-override";
+  if (plan.destination.kind === "local") {
+    await setCanonicalDestinationPolicy(db, {
+      podRid,
+      subjectKind: "vault",
+      subjectRid: vaultRid,
+      destinationKind: "local",
+      targetOwner: null,
+      targetKind: null,
+      repositoryName: null,
+      source,
+    });
+    return;
+  }
+  const target = parseCanonicalDestinationTarget(plan.destination.target);
+  if (target === null)
+    throw new Error("Vault creation plan contains an invalid canonical GitHub target.");
+  await setCanonicalDestinationPolicy(db, {
+    podRid,
+    subjectKind: "vault",
+    subjectRid: vaultRid,
+    destinationKind: "github",
+    targetOwner: target.targetOwner,
+    targetKind: target.targetKind,
+    repositoryName: plan.subject.repositoryName,
+    source,
+  });
 }
 
 // Self-heal action: takes the predicate's verdict, runs the federation
@@ -495,7 +1032,7 @@ async function maybeSelfHealFederation(
     const r = await federationInitFlow({
       handle: decision.handle,
       visibility: "private",
-      pushToRemote: fed.pushOnSelfHeal ?? false,
+      pushToRemote: false,
       // `vault init` is local-only. The explicit scoped `lyt sync --vault`
       // is the first operation authorized to create a remote or publish data.
       createRemoteIfMissing: false,

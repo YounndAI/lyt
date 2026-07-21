@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -326,8 +326,9 @@ export async function podStatusFlow(args: PodStatusArgs = {}): Promise<PodStatus
 }
 
 // Bounded scan (depth 2: <root>/<mesh>/<vault>) for vault dirs carrying
-// `.lyt/vault.yon` that the registry doesn't know about. lyt-pod-map (the
-// generated pod-map vault) is excluded — it isn't a registered home vault.
+// `.lyt/vault.yon` that the registry doesn't know about. The retired
+// `lyt-pod-map` directory name remains a private legacy discriminator so old
+// local viewer artifacts are diagnosed without treating them as home vaults.
 function scanUnregistered(registeredPaths: ReadonlySet<string>): string[] {
   const root = getDefaultVaultsRoot();
   if (!existsSync(root)) return [];
@@ -342,8 +343,8 @@ function scanUnregistered(registeredPaths: ReadonlySet<string>): string[] {
     return [];
   }
   for (const name of level1) {
-    if (name === "lyt-pod-map") continue;
     const dir = join(root, name);
+    if (name === "lyt-pod-map" && isLegacyPodMapArtifact(dir)) continue;
     if (hasVaultYon(dir) && !registeredPaths.has(dir)) {
       out.push(dir);
       continue;
@@ -365,4 +366,42 @@ function scanUnregistered(registeredPaths: ReadonlySet<string>): string[] {
     }
   }
   return out;
+}
+
+const LEGACY_POD_MAP_MARKER_MAX_BYTES = 4_096;
+
+// A pathname is not evidence. Only the exact historical generator markers
+// identify a retired pod-map artifact; an ordinary vault using that leaf name
+// remains visible as unregistered state.
+export function isLegacyPodMapArtifact(dir: string): boolean {
+  const marker = join(dir, ".lyt", "vault.yon");
+  try {
+    const stat = lstatSync(marker);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > LEGACY_POD_MAP_MARKER_MAX_BYTES) {
+      return false;
+    }
+    const records = readFileSync(marker, "utf8").split(/\r?\n/);
+    const doc = records.find((line) => line.startsWith("@DOC "));
+    const vault = records.find((line) => line.startsWith("@VAULT "));
+    return (
+      hasYonFields(doc, "@DOC", ["ver=1", "created_by=lyt-pod-map-generator"]) &&
+      hasYonFields(vault, "@VAULT", [
+        "kind=pod-map",
+        "writable=false",
+        "generator-managed=true",
+      ])
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasYonFields(
+  line: string | undefined,
+  tag: string,
+  expected: readonly string[],
+): boolean {
+  if (line === undefined || !line.startsWith(`${tag} `)) return false;
+  const fields = [line.slice(tag.length + 1).split(" | ")[0]!, ...line.split(" | ").slice(1)];
+  return expected.every((field) => fields.includes(field));
 }

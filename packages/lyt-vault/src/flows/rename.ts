@@ -374,6 +374,7 @@ async function renameDirWithRetry(from: string, to: string): Promise<void> {
   // Non-Windows takes a single attempt because POSIX rename(2) doesn't return
   // EBUSY for in-use dirs.
   // SEE ALSO: src/flows/registry-reset.ts rmWithRetry — keep budgets in sync (180s).
+  // SEE ALSO: src/scaffold/delete.ts rmWithRetry — keep budgets in sync (180s).
   // SEE ALSO: tests/_helpers/fs-retry.ts rmStrict — keep budgets in sync (180s).
   const attempts = isWindows ? 720 : 1;
   let lastErr: unknown;

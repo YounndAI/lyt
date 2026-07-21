@@ -37,6 +37,16 @@ import { join, dirname } from "node:path";
 import { initVaultFlow } from "../dist/flows/init.js";
 import { rebuildVaultFlow } from "../dist/flows/rebuild-vault.js";
 import { searchCascadeFlow } from "../dist/flows/search-cascade.js";
+import {
+  creationPlanChildV1,
+  mergeCreationIntendedEffectsV1,
+  plannedSingleVaultEffectsV1,
+  resolveCreationPlanV1,
+} from "../dist/flows/creation-plan.js";
+import { openRegistry, closeRegistry } from "../dist/registry/client.js";
+import { upsertFederationState } from "../dist/registry/federation-state.js";
+import { vaultRepoName } from "../dist/util/federation-paths.js";
+import { hexToUuid7Bytes } from "../dist/util/uuid7.js";
 // UNIT 3 (dist parity) — deep-import the BUILT render loader. This is the
 // dist-parity hazard the smoke exists for: the scaffold bodies now live in
 // `templates/*.md` (shipped via the package.json "files" glob), and render.ts
@@ -57,11 +67,49 @@ import {
 
 const TOKEN = "zqxsmoketoken4291"; // distinctive — no collision with scaffold figments
 const SEMANTIC_REL = "identity/identity.md"; // a B-4 semantic folder, NOT notes/
+const SMOKE_ATTEMPT_ID = "dist-smoke:vault:lyt-vault-smoke:local";
+const SMOKE_OPERATION_ID = "019f720b-cb8a-77e1-9bc7-1f2e0820a093";
 
 function writeNote(vaultPath, rel, frontmatter, body) {
   const full = join(vaultPath, rel);
   mkdirSync(dirname(full), { recursive: true });
   writeFileSync(full, `---\n${frontmatter}\n---\n${body}\n`, "utf8");
+}
+
+function smokeCreationPlans(home, destinationRequest, actor) {
+  const meshEffects = plannedSingleVaultEffectsV1({
+    operationId: SMOKE_OPERATION_ID,
+    pod: { kind: "existing", rid: "019f6141e1c077218153c462825a1421" },
+    mesh: { kind: "create", name: "personal" },
+    vaultName: "personal/main",
+    vaultRoot: join(home, "vaults", "personal", "main"),
+  });
+  const mesh = resolveCreationPlanV1({
+    request: destinationRequest,
+    subject: { kind: "mesh", repositoryName: vaultRepoName("personal/main") },
+    actor,
+    intendedEffects: meshEffects,
+  });
+  if (mesh.kind !== "plan") return mesh;
+  const vaultEffects = plannedSingleVaultEffectsV1({
+    operationId: SMOKE_OPERATION_ID,
+    pod: { kind: "existing", rid: "019f6141e1c077218153c462825a1421" },
+    mesh: { kind: "create", name: "personal" },
+    vaultName: "personal/smoke",
+    vaultRoot: join(home, "vaults", "personal", "smoke"),
+    starterFigment: true,
+  });
+  const vault = resolveCreationPlanV1({
+    request: destinationRequest,
+    subject: { kind: "vault", repositoryName: vaultRepoName("personal/smoke") },
+    actor,
+    intendedEffects: mergeCreationIntendedEffectsV1({
+      primary: vaultEffects,
+      children: [meshEffects],
+    }),
+    children: [creationPlanChildV1(mesh.plan)],
+  });
+  return vault.kind === "plan" ? { kind: "plans", mesh: mesh.plan, vault: vault.plan } : vault;
 }
 
 async function main() {
@@ -70,6 +118,35 @@ async function main() {
   process.env["LYT_HOME"] = join(tmpRoot, "lyt-home");
 
   try {
+    // Phase B: built artifact smoke must use the same explicit, local-only
+    // creation binding as the CLI. Seed the smallest valid local pod identity
+    // first; no network client or publication seam is reachable from this path.
+    const registry = await openRegistry();
+    try {
+      await upsertFederationState(registry, {
+        handle: "dist-smoke",
+        fedRidBytes: hexToUuid7Bytes("019f6141e1c077218153c462825a1421"),
+        lastSyncedAt: "2026-07-18T00:00:00.000Z",
+      });
+    } finally {
+      await closeRegistry(registry);
+    }
+    const destinationRequest = { kind: "local" };
+    const actor = {
+      attempt_id: SMOKE_ATTEMPT_ID,
+      observed_at: "2026-07-18T00:00:00.000Z",
+      result: "unknown",
+      actor: null,
+      evidence_class: "unavailable",
+    };
+    const resolvedCreation = smokeCreationPlans(process.env["LYT_HOME"], destinationRequest, actor);
+    if (resolvedCreation.kind !== "plans") {
+      console.error(
+        `[smoke:dist] FAIL — canonical local creation plan refused: ${resolvedCreation.message}`,
+      );
+      return 1;
+    }
+
     // ── UNIT 3: template dist-parity gate ──────────────────────────────────
     // (a) every shipped template resolves + renders from the BUILT loader.
     const SCAFFOLD_TEMPLATES = [
@@ -101,10 +178,25 @@ async function main() {
     }
 
     const init = await initVaultFlow({
-      name: "smoke",
+      name: "personal/smoke",
       gitInit: false,
       commitInitial: false,
-      selfHeal: { federation: { enabled: false } },
+      creation: {
+        destinationRequest,
+        creationPlan: resolvedCreation.vault,
+        attemptId: SMOKE_ATTEMPT_ID,
+      },
+      selfHeal: {
+        federation: { enabled: false },
+        mesh: {
+          enabled: true,
+          creation: {
+            destinationRequest,
+            creationPlan: resolvedCreation.mesh,
+            attemptId: SMOKE_ATTEMPT_ID,
+          },
+        },
+      },
     });
 
     // (b) the scaffold writers (which call render under the hood) actually
@@ -115,10 +207,16 @@ async function main() {
     // 1 + SCAFFOLD_FIGMENT_COUNT invariant) is caught by this gate.
     // agents.md / lyt-overview.md write under `.lyt/` (Phase D); notes/welcome.md
     // stays at notes/. All three still carry the lyt-scaffold:true sentinel.
-    for (const seed of [AGENTS_MD_REL_WRITE_PATH, LYT_OVERVIEW_REL_WRITE_PATH, "notes/welcome.md"]) {
+    for (const seed of [
+      AGENTS_MD_REL_WRITE_PATH,
+      LYT_OVERVIEW_REL_WRITE_PATH,
+      "notes/welcome.md",
+    ]) {
       const seedPath = join(init.vaultPath, seed);
       if (!existsSync(seedPath)) {
-        console.error(`[smoke:dist] FAIL — scaffold did not write ${seed} from the built templates.`);
+        console.error(
+          `[smoke:dist] FAIL — scaffold did not write ${seed} from the built templates.`,
+        );
         return 1;
       }
       const content = readFileSync(seedPath, "utf8");
@@ -148,7 +246,9 @@ async function main() {
     const search = await searchCascadeFlow({ query: TOKEN, scope: "federation" });
     const hits = search.results ?? [];
     const semanticHit = hits.some((r) =>
-      String(r.figment_path ?? "").replace(/\\/g, "/").endsWith(SEMANTIC_REL),
+      String(r.figment_path ?? "")
+        .replace(/\\/g, "/")
+        .endsWith(SEMANTIC_REL),
     );
 
     if (hits.length === 0 || !semanticHit) {

@@ -90,6 +90,66 @@ lyt repair --apply             # heal (idempotent)
 
 An orphan vault needs a mesh: `lyt repair --target <vault> --apply --mesh <mesh>`.
 
+## Editor-localization diagnosis
+
+Supply the complete Handler-declared machine roster explicitly. Repeat
+`--declared-machine` once per machine and supply zero or one receipt file for
+each declared machine:
+
+```bash
+lyt doctor --target editor-localization:<qualified-vault> --emit-machine-receipt --declared-machine <id> --json > <machine-receipt.json>
+lyt doctor --target editor-localization:<qualified-vault> --declared-machine <id> [--declared-machine <id> ...] [--machine-receipt <file> ...] --json
+lyt repair --target editor-localization:<qualified-vault> --dry-run --plan-out <plan.json> --declared-machine <id> [--declared-machine <id> ...] [--machine-receipt <file> ...] --json
+lyt repair --target editor-localization:<qualified-vault> --apply --plan <plan.json> --plan-digest <sha256> --declared-machine <id> [--declared-machine <id> ...] [--machine-receipt <file> ...] --json
+```
+
+An `observed` receipt reports a bounded editor-state digest and item count:
+
+```json
+{
+  "machine_id": "workstation-a",
+  "disposition": "observed",
+  "digest": "<64 lowercase hex SHA-256 characters>",
+  "count": 2,
+  "observed_at": "2026-07-19T12:00:00.000Z"
+}
+```
+
+An `absent` receipt is an explicit assertion that editor state is absent:
+
+```json
+{
+  "machine_id": "workstation-b",
+  "disposition": "absent",
+  "absence_receipt_digest": "<64 lowercase hex SHA-256 characters>",
+  "observed_at": "2026-07-19T12:00:00.000Z"
+}
+```
+
+Receipts must contain exactly the shown fields. `count` is an integer from 0 to
+1,000,000. `observed_at` must be canonical ISO-8601 UTC, no more than five
+minutes old, and no more than 30 seconds in the future. A declared machine with
+no fresh receipt remains in the plan as `unavailable`, which makes apply
+unavailable. The scoped diagnostic reports that machine plus the exact local
+receipt command; collect a fresh receipt and prepare a new plan.
+
+Receipt emission reads only the exact local registered vault and editor tree. It
+does not discover machines, contact a remote, sign evidence, or transport the
+receipt. Prepare writes the immutable bounded plan to `--plan-out`, then emits
+the same terminal Receipt V1 persisted in the operation log. An eligible prepare
+is `no-op` with the plan path and digest in evidence. An unavailable/refused
+prepare is a nonzero `refused` Receipt V1 with its exact corrective next action.
+CLI-schema failures before target resolution emit one bounded refusal and do not
+dispatch the general doctor/repair path.
+
+Plans and Receipt V1 records seal only canonical per-machine
+state/digest/count summaries. They never include receipt paths, editor content,
+or receipt timestamps. This Handler-declared evidence is not cryptographic
+authentication and does not claim complete machine discovery.
+Replaying a completed plan reobserves the target and requires the same fresh,
+explicit roster receipts. Target or receipt drift is refused and requires a new
+prepare; a matching replay is a zero-mutation `replayed` Receipt V1.
+
 ## `.lyt/mesh-context.md` merge conflict on `lyt sync`
 
 ```bash

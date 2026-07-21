@@ -24,34 +24,35 @@
 
 ## What is this?
 
-`@younndai/lyt-skills` is where [Lyt](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: eleven harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can capture notes, search your pod, prime on context, adopt a vault, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
+`@younndai/lyt-skills` is where [Lyt](https://github.com/YounndAI/lyt)'s **AI-first** design becomes tangible: twelve harness skills that let AI agents — Claude Code, Codex, and generic agent runtimes — drive your markdown vaults as **first-class operators**. Install once and your agent can create and adopt vaults, capture notes, search your pod, prime on context, explore meshes, and sync vaults — through the same governed operation set you use, under the same permission semantics. This is the "install once, every agent runtime knows Lyt" layer.
 
-The `/lyt-capture` skill wraps the `knowledge-capture` pattern verb from the `lyt pattern run` runtime, so structured note capture shows up as a first-class agent skill inside any vault; the read/orient + addressing + lifecycle skills (`/lyt-pod`, `/lyt-search`, `/lyt-recall`, `/lyt-primer-context`, `/lyt-mesh-explore`, `/lyt-sync`, `/lyt-alias`, `/lyt-adopt`, `/lyt-update`) wrap the corresponding CLI verbs directly. Pairs with [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault), which ships the bundled `knowledge-capture` pattern the capture/recall skills resolve against (workflow patterns are bring-your-own via `lyt pattern install`).
+The `/lyt-create` skill routes mesh/vault creation and Receipt V1 interpretation. `/lyt-capture` wraps the `knowledge-capture` pattern verb from the `lyt pattern run` runtime; the read/orient + addressing + lifecycle skills (`/lyt-pod`, `/lyt-search`, `/lyt-recall`, `/lyt-primer-context`, `/lyt-mesh-explore`, `/lyt-sync`, `/lyt-alias`, `/lyt-adopt`, `/lyt-update`) wrap the corresponding CLI verbs directly. Pairs with [`@younndai/lyt-vault`](https://www.npmjs.com/package/@younndai/lyt-vault), which ships the bundled `knowledge-capture` pattern the capture/recall skills resolve against (workflow patterns are bring-your-own via `lyt pattern install`).
 
 ## Install
 
 ```bash
 npm install -g @younndai/lyt@alpha   # the meta package bundles lyt-skills
-lyt skills install                   # links the 11 SKILL.md files into your harness(es)
+lyt skills install                   # links the 12 SKILL.md files into your harness(es)
 ```
 
 Tri-runtime: the installer detects Claude Code, Codex, and generic agent runtimes, and installs per-runtime (symlink by default, `--copy` for regular directories).
 
-## The 11 skills
+## The 12 skills
 
-| Skill                 | Wraps                                              | Use it when                                                  |
-| --------------------- | -------------------------------------------------- | ------------------------------------------------------------ |
-| `/lyt-capture`        | knowledge-capture + capture                        | Saving a Figment (markdown note) into a vault.               |
-| `/lyt-recall`         | `lyt search --vault` (tiered cascade)              | Ranked search across a single vault.                         |
-| `/lyt-search`         | `lyt search` (tiered cascade)                      | Ranked search across the whole pod, a mesh, or a vault.      |
-| `/lyt-pod`            | `lyt mesh list` + `lyt vault list`                 | Enumerating every mesh + vault on the machine.               |
-| `/lyt-mesh-explore`   | `lyt mesh info`                                    | Drilling into one mesh's members and metadata.               |
-| `/lyt-alias`          | `lyt alias` set/`--list`/`--remove`                | Managing pod-local vault aliases (name → rid).               |
-| `/lyt-primer-context` | `lyt primer` + `lyt vault info`                    | Priming an agent with vault/mesh/pod context.                |
-| `/lyt-sync`           | gated git pull/commit/push                         | Syncing a vault with its remote under the writable gate.     |
-| `/lyt-adopt`          | `lyt vault adopt`                                  | Bringing an existing Obsidian vault into the pod.            |
-| `/lyt-update`         | `lyt outdated` + `lyt update`                      | Checking for and installing a newer Lyt release.             |
-| `/lyt-pattern`        | meta-skill over `lyt pattern *`                    | Listing, installing, linking patterns from an agent context. |
+| Skill                 | Wraps                                 | Use it when                                                  |
+| --------------------- | ------------------------------------- | ------------------------------------------------------------ |
+| `/lyt-create`         | `lyt mesh init` + `lyt vault init`    | Creating a mesh/vault and interpreting its Receipt V1.       |
+| `/lyt-capture`        | knowledge-capture + capture           | Saving a Figment (markdown note) into a vault.               |
+| `/lyt-recall`         | `lyt search --vault` (tiered cascade) | Ranked search across a single vault.                         |
+| `/lyt-search`         | `lyt search` (tiered cascade)         | Ranked search across the whole pod, a mesh, or a vault.      |
+| `/lyt-pod`            | `lyt mesh list` + `lyt vault list`    | Enumerating every mesh + vault on the machine.               |
+| `/lyt-mesh-explore`   | `lyt mesh info`                       | Drilling into one mesh's members and metadata.               |
+| `/lyt-alias`          | `lyt alias` set/`--list`/`--remove`   | Managing pod-local vault aliases (name → rid).               |
+| `/lyt-primer-context` | `lyt primer` + `lyt vault info`       | Priming an agent with vault/mesh/pod context.                |
+| `/lyt-sync`           | gated git pull/commit/push            | Syncing a vault with its remote under the writable gate.     |
+| `/lyt-adopt`          | `lyt vault adopt`                     | Bringing an existing markdown vault into the pod.            |
+| `/lyt-update`         | `lyt outdated` + `lyt update`         | Checking for and installing a newer Lyt release.             |
+| `/lyt-pattern`        | meta-skill over `lyt pattern *`       | Listing, installing, linking patterns from an agent context. |
 
 Each skill autodetects the active vault via `lyt vault info --by-path`, the `LYT_ACTIVE_VAULT` env var, or an explicit `--vault` flag, then calls the CLI verb (or `lyt pattern run <pattern> <verb>` for `/lyt-capture`) at the resolved path.
 
@@ -80,21 +81,21 @@ Fork any installed pattern (`lyt pattern fork knowledge-capture --as kc-custom`)
 
 ## The Lyt toolchain
 
-| Package | Role |
-| --- | --- |
-| [`@younndai/lyt`](https://github.com/YounndAI/lyt/tree/main/packages/lyt) | The unified `lyt` CLI (meta package) |
-| [`@younndai/lyt-vault`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-vault) | The vault primitive |
-| [`@younndai/lyt-mesh`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mesh) | The mesh layer — multi-vault operations |
+| Package                                                                                 | Role                                    |
+| --------------------------------------------------------------------------------------- | --------------------------------------- |
+| [`@younndai/lyt`](https://github.com/YounndAI/lyt/tree/main/packages/lyt)               | The unified `lyt` CLI (meta package)    |
+| [`@younndai/lyt-vault`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-vault)   | The vault primitive                     |
+| [`@younndai/lyt-mesh`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mesh)     | The mesh layer — multi-vault operations |
 | [`@younndai/lyt-skills`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-skills) | **This package** — agent-harness skills |
-| [`@younndai/lyt-mcp`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mcp) | The MCP server |
-| [`@younndai/lyt-runner`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-runner) | The YON automation runner |
-| [`@younndai/lyt-llm`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-llm) | The LLM gateway |
+| [`@younndai/lyt-mcp`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mcp)       | The MCP server                          |
+| [`@younndai/lyt-runner`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-runner) | The YON automation runner               |
+| [`@younndai/lyt-llm`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-llm)       | The LLM gateway                         |
 
 ---
 
 ## About YounndAI
 
-**YounndAI™ — You and AI, unified.** (pronounced *"yoon-dye"*)
+**YounndAI™ — You and AI, unified.** (pronounced _"yoon-dye"_)
 
 A philosophy of intelligence: building with intention, so humans and machines
 think together without losing what makes either whole.
@@ -113,10 +114,10 @@ Website: [linkyourthink.com](https://linkyourthink.com)
 
 ---
 
-|               |                                                         |
-| ------------- | ------------------------------------------------------- |
-| **Project**   | [Lyt — Link Your Think](https://linkyourthink.com)      |
-| **Author**    | [Alexandru Mareș](https://allemaar.com)                 |
-| **Company**   | [MARLINK TRADING SRL](https://younndai.com) · YounndAI™ |
-| **License**   | [Apache 2.0](./LICENSE) — © 2026 MARLINK TRADING SRL    |
+|               |                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------- |
+| **Project**   | [Lyt — Link Your Think](https://linkyourthink.com)                                       |
+| **Author**    | [Alexandru Mareș](https://allemaar.com)                                                  |
+| **Company**   | [MARLINK TRADING SRL](https://younndai.com) · YounndAI™                                  |
+| **License**   | [Apache 2.0](./LICENSE) — © 2026 MARLINK TRADING SRL                                     |
 | **Trademark** | [YounndAI™ Trademark Guidelines](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md) |

@@ -19,7 +19,7 @@ import type { Client } from "@libsql/client";
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
 import { listMeshes } from "../../registry/meshes-repo.js";
 import { listVaults } from "../../registry/repo.js";
-import { deriveVaultRepoOwner, getFederationRepoDir } from "../../util/federation-paths.js";
+import { getFederationRepoDir } from "../../util/federation-paths.js";
 import { ridsEqual } from "../../util/uuid7.js";
 import type { FederationGhClient } from "../../util/gh-federation.js";
 import {
@@ -28,6 +28,11 @@ import {
   type GitRunner,
   type MaterializeVaultResult,
 } from "./vault-publish.js";
+import {
+  loadDestinationPolicyContext,
+  resolveCanonicalOwnedVaultDestination,
+} from "./destination-policy-service.js";
+import type { PublicationPermissionObserver } from "./publication-permission.js";
 
 // Brief B (B.1) — materialize the WHOLE pod toward a publishable state. The
 // init/adopt path calls this LOCAL-ONLY (push + createRemote held); the
@@ -50,6 +55,7 @@ export interface MaterializePodOptions {
   setRemote?: boolean | undefined;
   ghClient?: FederationGhClient | undefined;
   runGit?: GitRunner | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
 }
 
 export interface MaterializePodResult {
@@ -86,22 +92,31 @@ export async function materializePodLocal(
   if (state === null) return { ...empty, reason: "no-federation-state" };
 
   const vaults = (await listVaults(db)).filter((v) => v.status !== "tombstoned");
-  // B2a — resolve each vault's repo OWNER from its home mesh. A vault homed in
-  // an ORG mesh publishes under the org push_target, not the personal handle.
+  // Resolve outward ownership only from the owned destination projection.
+  // Local/unconfigured policy still permits local materialization, but may not
+  // add a remote or otherwise turn a portable origin hint into authority.
   const meshes = await listMeshes(db);
+  const policyContext = await loadDestinationPolicyContext(db, { podRid: state.fedRidHex });
   const vaultResults: MaterializeVaultResult[] = [];
   for (const v of vaults) {
     const homeMesh =
       v.homeMeshRid === null ? null : (meshes.find((m) => ridsEqual(m.rid, v.homeMeshRid)) ?? null);
-    const repoOwner = deriveVaultRepoOwner(homeMesh, handle);
+    const destination = resolveCanonicalOwnedVaultDestination(v, homeMesh, policyContext);
+    const outwardAllowed = destination.kind === "github";
     const r = await materializeVaultPublishable(v, {
       handle,
-      repoOwner,
-      createRemoteIfMissing: opts.createRemoteIfMissing ?? false,
-      push: opts.push ?? false,
-      setRemote: opts.setRemote ?? true,
+      repoOwner: outwardAllowed ? destination.owner : handle,
+      repoTargetKind: outwardAllowed ? destination.targetKind : "user",
+      repoOwnerAuthority: outwardAllowed ? "effective-owned-destination" : "local-only",
+      createRemoteIfMissing: outwardAllowed && (opts.createRemoteIfMissing ?? false),
+      push: outwardAllowed && (opts.push ?? false),
+      setRemote: outwardAllowed && (opts.setRemote ?? true),
+      registryDb: db,
       ...(opts.ghClient !== undefined ? { ghClient: opts.ghClient } : {}),
       ...(opts.runGit !== undefined ? { runGit: opts.runGit } : {}),
+      ...(opts.permissionObserver !== undefined
+        ? { permissionObserver: opts.permissionObserver }
+        : {}),
     });
     vaultResults.push(r);
   }
@@ -112,7 +127,12 @@ export async function materializePodLocal(
   const podDir = getFederationRepoDir(handle);
   const podCommit = await commitPodRepo(podDir, "chore(lyt): publish pod manifest", {
     push: opts.push ?? false,
+    permissionActor: handle,
+    permissionRepository: `${handle}/lyt-pod`,
     ...(opts.runGit !== undefined ? { runGit: opts.runGit } : {}),
+    ...(opts.permissionObserver !== undefined
+      ? { permissionObserver: opts.permissionObserver }
+      : {}),
   });
 
   return {

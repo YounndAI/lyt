@@ -25,7 +25,7 @@ import { newUuidv7Bytes } from "../../util/uuid7.js";
 // Brief B (B.2) — the resumable publish OUTBOX.
 //
 // The reconcile engine enqueues one durable work-item per outward op
-// (publish-vault:<name>, publish-pod) BEFORE attempting it, and DELETES it on
+// (publish-vault:vault:<rid>, publish-pod) BEFORE attempting it, and DELETES it on
 // success. If a sync is interrupted mid-publish (network kill, gh hiccup,
 // process death), the un-drained items survive in `outbox.db`; the next
 // `lyt sync` re-loads them and completes the round-trip — never a half-publish
@@ -40,13 +40,30 @@ import { newUuidv7Bytes } from "../../util/uuid7.js";
 
 export type OutboxOp = "publish-vault" | "publish-pod";
 
+export const LEGACY_VAULT_OUTBOX_MIGRATION_REQUIRED =
+  "migration-required: legacy name-only publish row has no stable vault RID provenance";
+
 export interface OutboxEntry {
   op: OutboxOp;
-  target: string; // a vault name for publish-vault; "pod" for publish-pod
+  target: string; // `vault:<rid>` for new publish-vault rows; legacy rows may contain a name
   attempts: number;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+const VAULT_TARGET_PREFIX = "vault:";
+
+/** Stable durable identity for newly-enqueued vault publication work. */
+export function vaultOutboxTarget(vaultRidHex: string): string {
+  return `${VAULT_TARGET_PREFIX}${vaultRidHex}`;
+}
+
+/** Null identifies a pre-RID outbox row whose target is a legacy display name. */
+export function parseVaultOutboxTarget(target: string): string | null {
+  return target.startsWith(VAULT_TARGET_PREFIX) && target.length > VAULT_TARGET_PREFIX.length
+    ? target.slice(VAULT_TARGET_PREFIX.length)
+    : null;
 }
 
 const OUTBOX_BUSY_TIMEOUT_MS = 5000;
@@ -142,6 +159,20 @@ export async function markOutboxFailed(
   await db.execute({
     sql: "UPDATE outbox SET attempts = attempts + 1, last_error = ?, updated_at = ? WHERE op = ? AND target = ?",
     args: [error.slice(0, 500), nowIso, op, target],
+  });
+}
+
+/** Retain a non-replayable row without counting quarantine as an outward attempt. */
+export async function holdOutbox(
+  db: Client,
+  op: OutboxOp,
+  target: string,
+  problem: string,
+  nowIso: string,
+): Promise<void> {
+  await db.execute({
+    sql: "UPDATE outbox SET last_error = ?, updated_at = ? WHERE op = ? AND target = ?",
+    args: [problem.slice(0, 500), nowIso, op, target],
   });
 }
 

@@ -72,9 +72,25 @@ function symbol(state: string): string {
 }
 
 function printTable(result: ListSkillsResult): void {
-  const cols = ["Skill", "lyt-version", ...result.runtimes];
+  const cols = [
+    "Skill",
+    "skill-version",
+    "requires-lyt",
+    "contract-version",
+    "compatibility",
+    "refusal-reason",
+    "next-action",
+    "lyt-version",
+    ...result.runtimes,
+  ];
   const rows: string[][] = result.skills.map((row) => [
     row.name,
+    row.skillVersion ?? "-",
+    row.requiresLyt ?? "-",
+    row.contractVersion ?? "-",
+    row.compatibility,
+    row.refusal?.message ?? "-",
+    row.refusal?.nextAction.command ?? "-",
     row.lytVersion ?? "-",
     ...result.runtimes.map((rt) => symbol(row.runtimes[rt])),
   ]);

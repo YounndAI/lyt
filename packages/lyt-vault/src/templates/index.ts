@@ -119,13 +119,15 @@ export function getReadmeContent(vaultName: string): string {
   return renderTemplate("README.md", { vaultName });
 }
 
-export function getVaultGitignore(): string {
+export function getVaultGitignore(options: { includeObsidian?: boolean } = {}): string {
+  const includeObsidian = options.includeObsidian ?? true;
   return [
     "# Lyt — derived state (rebuildable from Git canonical via `lyt vault rebuild-index`)",
     ".lyt/lyt.db",
     ".lyt/lyt.db-shm",
     ".lyt/lyt.db-wal",
     ".lyt/outbox.db",
+    ".lyt/sync-provenance-pending/",
     "",
     "# libSQL ledger caches (rebuilt from `.lyt/ledgers/*.yon` SoT",
     "# via `lyt vault rebuild-index --ledger <name>` or `lyt sync` post-pull).",
@@ -177,10 +179,9 @@ export function getVaultGitignore(): string {
     "!.lyt/canvases/",
     "!.lyt/canvases/**",
     "",
-    "# Obsidian — local workspace state (not committed)",
-    ".obsidian/workspace.json",
-    ".obsidian/workspace-mobile.json",
-    "",
+    ...(includeObsidian
+      ? ["# Obsidian — local editor state (not committed)", ".obsidian/", ""]
+      : []),
     "# OS / editor",
     ".DS_Store",
     "Thumbs.db",

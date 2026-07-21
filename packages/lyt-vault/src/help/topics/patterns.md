@@ -8,9 +8,9 @@
 
 Bundled with `@younndai/lyt-vault` and copied to `~/lyt/patterns/<name>/` by the postinstall hook on `npm install -g`.
 
-| Pattern               | Verbs                                                | What it covers                                                                                                                                                    |
-| --------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **knowledge-capture** | capture · recall                                     | Save a Figment (markdown note with frontmatter); search the vault by keyword. Used by `/lyt-capture` + `/lyt-recall`.                                             |
+| Pattern               | Verbs            | What it covers                                                                                                        |
+| --------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **knowledge-capture** | capture · recall | Save a Figment (markdown note with frontmatter); search the vault by keyword. Used by `/lyt-capture` + `/lyt-recall`. |
 
 > Lyt ships a deliberately small, unopinionated pattern set. It bundles only `knowledge-capture` (the capture/recall substrate). Opinionated workflow patterns — planning, handoffs, decision logs, project lifecycles — are intentionally NOT bundled; install your own with `lyt pattern install --from <dir>`.
 
@@ -50,7 +50,7 @@ List the verbs a pattern declares (from its `pattern.yon`).
 
 ### `lyt pattern run <pattern> <verb> --vault <v> [--project <p>] [--slug <s>] [--vars k=v...]`
 
-Execute a verb: read the template, fill frontmatter tokens (`<date>`, `<slug>`, `<project>`, `<owner>`, plus any `--vars`), resolve the path-glob, write the file. All the `/lyt-*` skills wrap this verb under the hood.
+Execute a verb: read the template, fill frontmatter tokens (`<date>`, `<slug>`, `<project>`, `<owner>`, plus any `--vars`), resolve the path-glob, and write the file. Pattern-backed workflows use this runtime; most `/lyt-*` skills route directly to their corresponding CLI family.
 
 ---
 
@@ -70,4 +70,4 @@ Pattern symlinks live at `<vault>/.lyt/patterns/<name>`. They're **gitignored fr
 - **Verb conflicts are addressed explicitly.** Two installed patterns can both declare the same verb (e.g. a `note` verb). Use `lyt pattern run <pattern-id> note` (explicit pattern qualification). Skills disambiguate by package convention; a second `note`-providing pattern installs as `/lyt-<pattern-id>-note`.
 - **Char-class globs in vault filters are escaped literally.** `lyt vault sync-metadata --vaults "[ab]*"` matches the literal `[ab]*`, not a class. Use comma-separated patterns instead.
 
-See also: `lyt help skills` for the harness skill wrappers. `/lyt-capture` + `/lyt-recall` wrap the bundled `knowledge-capture` verbs directly; any verbs from patterns you install yourself are invoked via the meta `/lyt-pattern run <pattern> <verb>` skill.
+See also: `lyt help skills` for focused harness guidance. `/lyt-capture` uses the bundled `knowledge-capture` write verb; `/lyt-recall` uses search directly. Invoke verbs from patterns you install yourself through `/lyt-pattern run <pattern> <verb>`.

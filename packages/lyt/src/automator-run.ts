@@ -29,7 +29,6 @@
 // and lyt-runner. lyt-vault must not depend on lyt-runner (the reverse
 // already holds), and this seam preserves that invariant.
 
-import { hostname } from "node:os";
 import { readFileSync } from "node:fs";
 
 import type { Client } from "@libsql/client";
@@ -37,6 +36,7 @@ import { createLytRuntime, runFiveStep, type LytRunContext } from "@younndai/lyt
 import {
   buildAutomatorRunPlan,
   closeAutomatorRunPlan,
+  getWriterId,
   newUuidv7Bytes,
   recordCliInvocation,
   type AutomatorRunPlan,
@@ -56,7 +56,7 @@ export interface RunAutomatorArgs {
   dryRun?: boolean;
   noPush?: boolean;
   // Test seam — override machineId for deterministic assertions. Production
-  // callers omit; the runtime defaults to `${os.hostname()}:lyt`.
+  // callers omit; the runtime uses the canonical per-installation machine id.
   machineId?: string;
   // Test seam — inject a clock for deterministic timestamps.
   getNow?: () => number;
@@ -74,6 +74,10 @@ export interface RunAutomatorResult {
   status: string;
   errorSummary: string | null;
   automatorVersion: string;
+}
+
+export function resolveAutomatorMachineId(override?: string): string {
+  return override ?? getWriterId();
 }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +102,7 @@ export async function runAutomator(args: RunAutomatorArgs): Promise<RunAutomator
     }
 
     const automatorVersion = extractAutomatorVersion(plan.automatorYonPath);
-    const machineId = args.machineId ?? `${hostname()}:lyt`;
+    const machineId = resolveAutomatorMachineId(args.machineId);
     const registryDb = args.registryDb ?? plan.registryDb;
     const runtime = createLytRuntime({
       db: registryDb,

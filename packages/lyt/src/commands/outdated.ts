@@ -14,25 +14,52 @@
  * limitations under the License.
  */
 
-import { Command } from "commander";
+import { createRequire } from "node:module";
 
-import { checkCurrency, formatCurrencyLine } from "@younndai/lyt-vault";
+import { Command, InvalidArgumentError } from "commander";
+
+import {
+  checkCurrency,
+  formatCurrencyLine,
+  isUpdateChannel,
+  type UpdateChannel,
+} from "@younndai/lyt-vault";
 
 interface OutdatedCliOpts {
   json?: boolean;
+  channel?: UpdateChannel;
+}
+
+function parseChannel(value: string): UpdateChannel {
+  if (isUpdateChannel(value)) return value;
+  throw new InvalidArgumentError("--channel must be alpha or latest");
+}
+
+function readMetaVersion(): string {
+  return (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 }
 
 // stay-current slice — `lyt outdated`: read-only currency check against the
-// published npm alpha channel. Mirrors `npm outdated` (check, don't install;
-// exit 1 when a newer version exists). Explicit → always a fresh probe.
+// selected npm channel. Mirrors `npm outdated` (check, don't install; exit 1
+// when a newer version exists). An unconfigured channel does not guess: JSON
+// and non-TTY callers receive the structured channel-unconfigured result.
 export function buildOutdatedCommand(): Command {
   return new Command("outdated")
     .description(
-      "Check whether a newer published Lyt version is available (npm alpha channel). Read-only; run `lyt update` to upgrade.",
+      "Check whether a newer published Lyt version is available on the configured channel. Read-only; use --channel alpha|latest for an unconfigured machine.",
     )
     .option("--json", "Emit a JSON result instead of the human-readable line")
+    .option(
+      "--channel <alpha|latest>",
+      "Check one explicit channel without changing the saved selection",
+      parseChannel,
+    )
     .action(async (opts: OutdatedCliOpts) => {
-      const result = await checkCurrency({ force: true });
+      const result = await checkCurrency({
+        force: true,
+        channel: opts.channel,
+        installedVersion: readMetaVersion(),
+      });
       if (opts.json === true) {
         // eslint-disable-next-line no-console
         console.log(JSON.stringify(result, null, 2));
@@ -40,9 +67,9 @@ export function buildOutdatedCommand(): Command {
         // eslint-disable-next-line no-console
         console.log(formatCurrencyLine(result));
       }
-      // npm-outdated convention: non-zero exit when behind. Offline can't
-      // determine currency → exit 0 (never fail a script over an unreachable
-      // registry).
-      process.exitCode = result.stale ? 1 : 0;
+      // `channel-unconfigured` is a deliberate policy refusal, distinct from
+      // an unreachable registry. npm-outdated convention remains exit 1 when
+      // the selected target is newer.
+      process.exitCode = result.channelUnconfigured ? 2 : result.stale ? 1 : 0;
     });
 }

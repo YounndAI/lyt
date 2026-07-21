@@ -16,7 +16,124 @@
 
 import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, posix, relative, resolve, win32 } from "node:path";
+
+export type WindowsGitPathRefusalCode =
+  | "empty-path"
+  | "empty-component"
+  | "dot-component"
+  | "absolute-path"
+  | "path-escape"
+  | "component-too-long"
+  | "invalid-character"
+  | "control-character"
+  | "trailing-dot-or-space"
+  | "reserved-device-name"
+  | "path-too-long";
+
+export interface WindowsGitPathRefusal {
+  readonly code: WindowsGitPathRefusalCode;
+  readonly componentIndex?: number;
+  readonly componentLength?: number;
+}
+
+export interface WindowsGitPathInspection {
+  readonly ok: boolean;
+  readonly requiresGitLongPaths: boolean;
+  readonly resolvedPath: string;
+  readonly fullPathLength: number;
+  readonly refusal?: WindowsGitPathRefusal;
+}
+
+export interface InspectWindowsGitPathOptions {
+  readonly platform?: NodeJS.Platform;
+}
+
+const WINDOWS_GIT_MAX_COMPONENT_LENGTH = 255;
+const WINDOWS_GIT_LEGACY_PATH_LENGTH = 260;
+const WINDOWS_GIT_MAX_PATH_LENGTH = 32_767;
+const WINDOWS_INVALID_PATH_CHARACTER = /[<>:"|?*]/u;
+const WINDOWS_CONTROL_CHARACTER = /[\u0000-\u001f]/u;
+const WINDOWS_RESERVED_DEVICE_NAME =
+  /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu;
+
+/**
+ * Inspect a Git-reported vault-relative path without touching the filesystem.
+ * The platform override keeps impossible Windows names and length boundaries
+ * testable on every host.
+ */
+export function inspectWindowsGitPath(
+  root: string,
+  relativePath: string,
+  options: InspectWindowsGitPathOptions = {},
+): WindowsGitPathInspection {
+  const platform = options.platform ?? process.platform;
+  const pathApi = platform === "win32" ? win32 : posix;
+  const rootPath = pathApi.resolve(root);
+  const resolvedPath = pathApi.resolve(rootPath, relativePath);
+  const fullPathLength = resolvedPath.length;
+  const refuse = (
+    code: WindowsGitPathRefusalCode,
+    detail: Omit<WindowsGitPathRefusal, "code"> = {},
+  ): WindowsGitPathInspection =>
+    Object.freeze({
+      ok: false,
+      requiresGitLongPaths: false,
+      resolvedPath,
+      fullPathLength,
+      refusal: Object.freeze({ code, ...detail }),
+    });
+
+  if (relativePath.length === 0) return refuse("empty-path");
+  if (pathApi.isAbsolute(relativePath)) return refuse("absolute-path");
+
+  const components = relativePath.split(platform === "win32" ? /[\\/]/u : "/");
+  for (let index = 0; index < components.length; index += 1) {
+    const component = components[index]!;
+    if (component.length === 0) return refuse("empty-component", { componentIndex: index });
+    if (component === "." || component === "..") {
+      return refuse("dot-component", { componentIndex: index });
+    }
+  }
+
+  const contained = pathApi.relative(rootPath, resolvedPath);
+  if (contained.length === 0 || contained === ".." || contained.startsWith(`..${pathApi.sep}`)) {
+    return refuse("path-escape");
+  }
+  if (pathApi.isAbsolute(contained)) return refuse("path-escape");
+
+  if (platform === "win32") {
+    for (let index = 0; index < components.length; index += 1) {
+      const component = components[index]!;
+      if (component.length > WINDOWS_GIT_MAX_COMPONENT_LENGTH) {
+        return refuse("component-too-long", {
+          componentIndex: index,
+          componentLength: component.length,
+        });
+      }
+      if (WINDOWS_CONTROL_CHARACTER.test(component)) {
+        return refuse("control-character", { componentIndex: index });
+      }
+      if (WINDOWS_INVALID_PATH_CHARACTER.test(component)) {
+        return refuse("invalid-character", { componentIndex: index });
+      }
+      if (/[. ]$/u.test(component)) {
+        return refuse("trailing-dot-or-space", { componentIndex: index });
+      }
+      if (WINDOWS_RESERVED_DEVICE_NAME.test(component)) {
+        return refuse("reserved-device-name", { componentIndex: index });
+      }
+    }
+    if (fullPathLength > WINDOWS_GIT_MAX_PATH_LENGTH) return refuse("path-too-long");
+  }
+
+  return Object.freeze({
+    ok: true,
+    requiresGitLongPaths: platform === "win32" && fullPathLength >= WINDOWS_GIT_LEGACY_PATH_LENGTH,
+    resolvedPath,
+    fullPathLength,
+  });
+}
 
 export function getLytHome(): string {
   const override = process.env["LYT_HOME"];

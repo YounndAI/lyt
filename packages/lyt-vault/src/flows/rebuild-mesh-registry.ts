@@ -35,6 +35,7 @@ import { getVaultByRid } from "../registry/repo.js";
 import { resolveMainVaultPathByConvention } from "./mesh-link-reconcile.js";
 import { ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
+import { ingestForeignLegacyMeshDestination } from "../registry/destination-policy-projection.js";
 
 // v1.B.2 — `lyt mesh rebuild-registry` flow. The trust-the-disk verb
 // that re-derives every per-machine registry mesh table row from the
@@ -260,16 +261,21 @@ async function rebuildOneMesh(db: Client, mesh: MeshRow): Promise<MeshRebuildOut
       // that points at this mesh. UPDATE keeps the rid stable.
       await db.execute({
         sql: `UPDATE meshes
- SET name = ?, push_target = ?, push_kind = ?, created_at = ?
+ SET name = ?, created_at = ?
               WHERE rid = ?`,
-        args: [
-          parsed.mesh.name,
+        args: [parsed.mesh.name, parsed.mesh.createdAt, mesh.rid],
+      });
+      // mesh.yon carries a portable legacy origin hint only. Preserve that
+      // hint for foreign topology, but never let it overwrite an owned
+      // destination projection.
+      if (!mesh.ownCreated) {
+        await ingestForeignLegacyMeshDestination(
+          db,
+          mesh.rid,
           parsed.mesh.pushTarget ?? null,
           parsed.mesh.pushKind ?? null,
-          parsed.mesh.createdAt,
-          mesh.rid,
-        ],
-      });
+        );
+      }
       // Re-anchor the main_vault_rid in case the parsed mesh.yon has
       // moved it (shouldn't happen in v1, but the SoT wins).
       if (!ridsEqual(parsed.mesh.mainVaultRid, mesh.mainVaultRid)) {

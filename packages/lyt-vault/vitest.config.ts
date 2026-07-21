@@ -45,6 +45,8 @@ const baseTest = {
   // flows-registry-reset stress). 300s here gives ~1.7x headroom over the
   // 180s rm budget so retries can fully drain without the test framework
   // killing the call site mid-loop.
+  // SEE ALSO: tests/_helpers/fs-retry.ts + tests/flows/{mesh-init-flow,
+  // scaffold-init,mesh-adopt-cluster}.test.ts.
   testTimeout: 300000,
   hookTimeout: 300000,
   // Default identity override for all tests — keeps initVault/adoptVault/

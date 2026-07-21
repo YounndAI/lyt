@@ -109,6 +109,7 @@ export function renderFederationYon(doc: FederationDoc): string {
     `@DOC ver=2.0 | id=federation:${doc.federation.handle} | domain=yai.lyt@1.0 | kind=cfg | profile=agent`,
     ``,
     `@FEDERATION rid=fed:${doc.federation.fedRidHex}`,
+    `  | pod_rid=pod:${doc.federation.fedRidHex}`,
     `  | handle="${escapeQuoted(doc.federation.handle)}"`,
     `  | visibility=${doc.federation.visibility}`,
     `  | created_at:ts=${doc.federation.createdAt}`,

@@ -18,6 +18,15 @@ import type { Client } from "@libsql/client";
 
 import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
 import { isValidGhHandle } from "../util/identity.js";
+import {
+  projectLegacyMeshOwnership,
+  projectOwnedMeshDestination,
+} from "./destination-policy-projection.js";
+import type {
+  DestinationKind,
+  DestinationTargetKind,
+  MeshDestinationSource,
+} from "./destination-policy.js";
 
 // v1.A.1 — meshes table is shipped as an empty container. v1.B.1 will
 // populate it via `lyt mesh init`. This module exists so v1.B.1 imports a
@@ -31,6 +40,10 @@ export interface MeshRow {
   name: string;
   pushTarget: string | null;
   pushKind: MeshPushKind | null;
+  destinationKind?: DestinationKind | null;
+  destinationSource?: MeshDestinationSource | null;
+  destinationTarget?: string | null;
+  destinationTargetKind?: DestinationTargetKind | null;
   mainVaultRid: Uint8Array | null;
   mainVaultRidHex: string | null;
   createdAt: string;
@@ -77,18 +90,47 @@ function rowToMesh(row: Record<string, unknown>): MeshRow {
   const pushKindRaw = row["push_kind"];
   const pushKind: MeshPushKind | null =
     pushKindRaw === "handle" || pushKindRaw === "org" ? pushKindRaw : null;
+  const ownCreated = Number(row["own_created"] ?? 0) === 1;
+  const destinationKindRaw = row["destination_kind"];
+  const destinationKind: DestinationKind | null =
+    ownCreated && (destinationKindRaw === "local" || destinationKindRaw === "github")
+      ? destinationKindRaw
+      : null;
+  const destinationSourceRaw = row["destination_source"];
+  const destinationSource: MeshDestinationSource | null =
+    ownCreated &&
+    (destinationSourceRaw === "explicit" ||
+      destinationSourceRaw === "authenticated-default" ||
+      destinationSourceRaw === "auto-fallback-local" ||
+      destinationSourceRaw === "legacy-derived")
+      ? destinationSourceRaw
+      : null;
   return {
     rid,
     ridHex: uuid7BytesToHex(rid),
     name: String(row["name"]),
     pushTarget: row["push_target"] == null ? null : String(row["push_target"]),
     pushKind,
+    destinationKind,
+    destinationSource,
+    destinationTarget:
+      destinationKind === "github" && row["push_target"] != null
+        ? String(row["push_target"])
+        : null,
+    destinationTargetKind:
+      destinationKind === "github"
+        ? pushKind === "handle"
+          ? "user"
+          : pushKind === "org"
+            ? "org"
+            : null
+        : null,
     mainVaultRid: main,
     mainVaultRidHex: main ? uuid7BytesToHex(main) : null,
     createdAt: String(row["created_at"]),
     // MA — back-compat reader: a pre-migration-010 row (no column) reads as
     // NOT own-created (fail-closed). Stored as INTEGER 0/1.
-    ownCreated: Number(row["own_created"] ?? 0) === 1,
+    ownCreated,
   };
 }
 
@@ -121,13 +163,23 @@ export async function insertMesh(db: Client, args: InsertMeshArgs): Promise<void
     args: [
       args.rid,
       args.name,
-      pushTarget,
-      pushKind,
+      // Owned compatibility columns are written only by the projection module
+      // below. A foreign insert retains its declared legacy origin hint.
+      args.ownCreated === true ? null : pushTarget,
+      args.ownCreated === true ? null : pushKind,
       args.mainVaultRid ?? null,
       args.createdAt ?? new Date().toISOString(),
       args.ownCreated === true ? 1 : 0,
     ],
   });
+  if (args.ownCreated === true) {
+    await projectOwnedMeshDestination(db, args.rid, {
+      destinationKind: pushTarget === null ? "local" : "github",
+      targetOwner: pushTarget,
+      targetKind: pushTarget === null ? null : pushKind === "org" ? "org" : "user",
+      source: "legacy-derived",
+    });
+  }
 }
 
 export async function getMeshByRid(db: Client, rid: Uint8Array): Promise<MeshRow | null> {
@@ -175,10 +227,7 @@ export async function updateMeshOwnership(
   if (!isValidGhHandle(args.pushTarget)) {
     throw new Error("updateMeshOwnership: pushTarget must be a valid GitHub owner.");
   }
-  await db.execute({
-    sql: "UPDATE meshes SET push_target = ?, push_kind = ?, own_created = ? WHERE rid = ?",
-    args: [args.pushTarget, args.pushKind, args.ownCreated ? 1 : 0, rid],
-  });
+  await projectLegacyMeshOwnership(db, rid, args);
 }
 
 export async function deleteMesh(db: Client, rid: Uint8Array): Promise<void> {

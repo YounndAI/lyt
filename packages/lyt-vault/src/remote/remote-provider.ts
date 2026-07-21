@@ -64,6 +64,23 @@ export interface PushResult {
 }
 
 /**
+ * The exact destination authorized by the caller. The immutable URL and
+ * refspec are passed to Git explicitly so repository-level pushurl,
+ * pushRemote, or pushDefault configuration cannot redirect an outward write
+ * after the authority check.
+ */
+export interface PushTarget {
+  url: string;
+  refspec: string;
+}
+
+/** The immutable fetch URL + branch ref captured after caller-side validation. */
+export interface PullTarget {
+  url: string;
+  ref: string;
+}
+
+/**
  * The structured outcome of a pull. `code`+`stderr` are preserved so the sync
  * flow's conflict-recovery path (rebase --continue / --abort, mesh-context
  * heal) reads exactly the signals it read from the raw `runGit` result.
@@ -88,35 +105,77 @@ export interface RemoteProvider {
    * it reports the failure in the result (allowFailure semantics) so the caller
    * can classify terminal vs retryable and compute an honest horizon.
    */
-  push(cwd: string): Promise<PushResult>;
+  push(cwd: string, target: PushTarget): Promise<PushResult>;
   /**
    * Pull + rebase remote commit(s) into local. MUST NOT throw on a rebase
    * conflict — it reports the failure in the result so the caller can run its
    * conflict-recovery recipe.
    */
-  pull(cwd: string): Promise<PullResult>;
+  pull(cwd: string, target: PullTarget): Promise<PullResult>;
 }
 
 /**
  * The v1 GitHub-backed provider: a thin, honest wrapper over the firewalled
- * `runGit`. It adds NO new mechanic — `push` is `git push`, `pull` is
- * `git pull --rebase --quiet` — and runs each with `allowFailure` so a
- * rejection resolves to a structured result (the sync flow classifies it)
- * rather than throwing. Byte-for-byte the same git invocations the sync flow
- * ran inline before A.4, so routing through the port is behavior-preserving.
+ * `runGit`. Push receives an authority-checked URL + refspec and passes both
+ * explicitly. Pull fetches the caller-authorized URL/ref explicitly, then
+ * rebases the exact fetched object (`FETCH_HEAD`), so mutable remote/upstream
+ * configuration cannot redirect either network contact or integration after
+ * validation. Each runs with `allowFailure` so a rejection resolves to a
+ * structured result (the sync flow classifies it) rather than throwing.
  */
 export class GitRemoteProvider implements RemoteProvider {
   readonly provider = "github";
 
   constructor(private readonly runGit: GitRunnerFn = defaultRunGit) {}
 
-  async push(cwd: string): Promise<PushResult> {
-    const r = await this.runGit(["push"], { cwd, allowFailure: true });
+  async push(cwd: string, target: PushTarget): Promise<PushResult> {
+    if (!isSafeDestinationUrl(target.url) || !isSafePushRefspec(target.refspec)) {
+      return {
+        pushed: false,
+        code: -1,
+        stderr: "refusing unsafe publication destination",
+      };
+    }
+    const r = await this.runGit(["push", target.url, target.refspec], {
+      cwd,
+      allowFailure: true,
+    });
     return { pushed: r.code === 0, code: r.code, stderr: r.stderr };
   }
 
-  async pull(cwd: string): Promise<PullResult> {
-    const r = await this.runGit(["pull", "--rebase", "--quiet"], { cwd, allowFailure: true });
-    return { pulled: r.code === 0, code: r.code, stderr: r.stderr };
+  async pull(cwd: string, target: PullTarget): Promise<PullResult> {
+    if (!isSafeDestinationUrl(target.url) || !isSafeBranchRef(target.ref)) {
+      return {
+        pulled: false,
+        code: -1,
+        stderr: "refusing unsafe sync source",
+      };
+    }
+    const fetched = await this.runGit(["fetch", "--quiet", target.url, target.ref], {
+      cwd,
+      allowFailure: true,
+    });
+    if (fetched.code !== 0) {
+      return { pulled: false, code: fetched.code, stderr: fetched.stderr };
+    }
+    const rebased = await this.runGit(["rebase", "--quiet", "FETCH_HEAD"], {
+      cwd,
+      allowFailure: true,
+    });
+    return { pulled: rebased.code === 0, code: rebased.code, stderr: rebased.stderr };
   }
+}
+
+function isSafeDestinationUrl(url: string): boolean {
+  return url.length > 0 && !url.startsWith("-") && !/[\0\r\n]/u.test(url);
+}
+
+function isSafeBranchRef(ref: string): boolean {
+  return (
+    ref.startsWith("refs/heads/") && ref.length > "refs/heads/".length && !/[\0\r\n]/u.test(ref)
+  );
+}
+
+function isSafePushRefspec(refspec: string): boolean {
+  return refspec.startsWith("HEAD:") && isSafeBranchRef(refspec.slice("HEAD:".length));
 }

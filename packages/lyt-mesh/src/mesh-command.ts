@@ -17,19 +17,17 @@
 import { Command } from "commander";
 
 import { buildCloneAllCommand } from "./commands/clone-all.js";
-import { buildMeshInitCommand } from "./commands/mesh-init.js";
 import { buildSourceCommand } from "./commands/source.js";
 import { buildStatusCommand } from "./commands/status.js";
 import { buildValidateCommand } from "./commands/validate.js";
 
 export function buildMeshSubcommand(): Command {
   const mesh = new Command("mesh").description(
-    "Multi-org clone-all, vault source management, mesh validate/status, manifest-driven init",
+    "Multi-org clone-all, vault source management, mesh validate and status",
   );
   mesh.addCommand(buildCloneAllCommand());
   mesh.addCommand(buildSourceCommand());
   mesh.addCommand(buildValidateCommand());
   mesh.addCommand(buildStatusCommand());
-  mesh.addCommand(buildMeshInitCommand());
   return mesh;
 }

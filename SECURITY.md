@@ -2,11 +2,11 @@
 
 ## Reporting a vulnerability
 
-If you discover a security vulnerability in Lyt, please report it
+If you discover a security vulnerability in Lyt (Link Your Think™), please report it
 responsibly:
 
 1. **DO NOT** file a public GitHub issue.
-2. Email **office@younndai.com** with:
+2. Email **security@younndai.com** with:
    - A description of the vulnerability and its potential impact
    - Steps to reproduce, or a proof of concept (if safe to share)
    - Affected versions

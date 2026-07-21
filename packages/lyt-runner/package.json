@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-runner",
-  "version": "0.13.5",
+  "version": "0.20.0",
   "description": "Lyt automation runner — a thin layer on @younndai/yon-runner that expands declarative @AUTOMATOR + @DIRECTIVE records into core YON before execution and registers the vault-aware std:vault.* + std:mesh.* + std:lease.* ops.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -40,6 +40,34 @@
     "CONTRIBUTING.md",
     "SECURITY.md"
   ],
+  "lytRelease": {
+    "requiredAssets": [
+      {
+        "path": "./README.md",
+        "kind": "file"
+      },
+      {
+        "path": "./LICENSE",
+        "kind": "file"
+      },
+      {
+        "path": "./NOTICE",
+        "kind": "file"
+      },
+      {
+        "path": "./CONTRIBUTING.md",
+        "kind": "file"
+      },
+      {
+        "path": "./SECURITY.md",
+        "kind": "file"
+      },
+      {
+        "path": "./dist",
+        "kind": "tree"
+      }
+    ]
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -49,8 +77,8 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
-    "@younndai/lyt-llm": "^0.13.5",
-    "@younndai/lyt-vault": "^0.13.5",
+    "@younndai/lyt-llm": "0.20.0",
+    "@younndai/lyt-vault": "0.20.0",
     "@younndai/yon-parser": "^2.0.0",
     "@younndai/yon-runner": "^2.0.0"
   },

@@ -31,6 +31,14 @@ import { homedir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  createSkillMetadataReaderForPackageRoot,
+  readSkillMetadata,
+  type SkillCompatibilityRefusal,
+  type SkillCompatibilityStatus,
+  type SkillMetadataReader,
+} from "./skill-metadata.js";
+
 export type Runtime = "claude" | "codex" | "agents";
 
 export const ALL_RUNTIMES: readonly Runtime[] = ["claude", "codex", "agents"];
@@ -46,13 +54,16 @@ export type SymlinkStatus =
   // renamed aside to `<skill>.local-<ts>` (preserved) and the lyt symlink was
   // installed. Replaces the prior refuse-or-destroy `copy-installed` branch.
   | "renamed-collision"
-  | "target-not-a-directory";
+  | "target-not-a-directory"
+  | "refused-incompatible";
 
 export interface SkillRuntimeResult {
   skill: string;
   runtime: Runtime;
   targetPath: string;
   status: SymlinkStatus;
+  compatibility: SkillCompatibilityStatus;
+  refusal: SkillCompatibilityRefusal | null;
   message?: string;
 }
 
@@ -75,8 +86,7 @@ export interface SymlinkSkillsOptions {
    * Production callers leave this undefined.
    */
   symlinkFnOverride?:
-    | ((target: string, path: string, type: "junction" | "dir") => void)
-    | undefined;
+    ((target: string, path: string, type: "junction" | "dir") => void) | undefined;
   /**
    * Test-only seam: override the collision-rename timestamp. Production
    * callers leave this undefined (real UTC clock). Tests inject a fixed stamp
@@ -144,6 +154,22 @@ const defaultSymlinkFn = (target: string, path: string, type: "junction" | "dir"
 };
 
 export function symlinkSkillsTriRuntime(opts: SymlinkSkillsOptions = {}): SymlinkResult {
+  return symlinkSkillsTriRuntimeWithReader(opts, readSkillMetadata);
+}
+
+export const symlinkSkillsTestDependencies = {
+  runFromPackageRoot(opts: SymlinkSkillsOptions, packageRoot: string): SymlinkResult {
+    return symlinkSkillsTriRuntimeWithReader(
+      opts,
+      createSkillMetadataReaderForPackageRoot(packageRoot),
+    );
+  },
+};
+
+function symlinkSkillsTriRuntimeWithReader(
+  opts: SymlinkSkillsOptions,
+  metadataReader: SkillMetadataReader,
+): SymlinkResult {
   const sourceDir = opts.sourceDir ? resolve(opts.sourceDir) : getBundledSkillsDir();
   const runtimes = opts.runtimes ?? ALL_RUNTIMES;
   const copy = opts.copy ?? false;
@@ -163,14 +189,30 @@ export function symlinkSkillsTriRuntime(opts: SymlinkSkillsOptions = {}): Symlin
   const symlinkFn = opts.symlinkFnOverride ?? defaultSymlinkFn;
   const collisionStampFn = opts.collisionStampFn ?? defaultCollisionStamp;
   const results: SkillRuntimeResult[] = [];
+  const metadata = new Map(
+    skillNames.map((skill) => [skill, metadataReader(join(resolve(sourceDir, skill), "SKILL.md"))]),
+  );
 
   for (const runtime of runtimes) {
     const targetBase = opts.targetDirOverrides?.[runtime] ?? getRuntimeTargetDir(runtime);
-    mkdirSync(targetBase, { recursive: true });
 
     for (const skill of skillNames) {
       const sourceSkillDir = resolve(join(sourceDir, skill));
       const targetSkillDir = join(targetBase, skill);
+      const skillMetadata = metadata.get(skill)!;
+      if (skillMetadata.compatibility === "refused") {
+        results.push({
+          skill,
+          runtime,
+          targetPath: targetSkillDir,
+          status: "refused-incompatible",
+          compatibility: skillMetadata.compatibility,
+          refusal: skillMetadata.refusal,
+          message: skillMetadata.refusal?.message,
+        });
+        continue;
+      }
+      mkdirSync(targetBase, { recursive: true });
       const result = installOne({
         sourceSkillDir,
         targetSkillDir,
@@ -179,7 +221,14 @@ export function symlinkSkillsTriRuntime(opts: SymlinkSkillsOptions = {}): Symlin
         symlinkFn,
         collisionStampFn,
       });
-      results.push({ skill, runtime, targetPath: targetSkillDir, ...result });
+      results.push({
+        skill,
+        runtime,
+        targetPath: targetSkillDir,
+        compatibility: skillMetadata.compatibility,
+        refusal: null,
+        ...result,
+      });
     }
   }
 

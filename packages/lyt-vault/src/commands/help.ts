@@ -32,11 +32,11 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt vault init <mesh>/<name>",
         summary:
-          "Create a vault (create-if-missing: makes the mesh if absent, stops if the vault exists; --mesh, --push-to)",
+          "Create a vault with a destination snapshot (--target, --local, or authenticated-owner default); never publishes",
       },
       {
         verb: "lyt vault adopt <path>",
-        summary: "Upgrade an existing Obsidian vault to Lyt-aware (additive)",
+        summary: "Upgrade an existing markdown vault to Lyt-aware (additive)",
       },
       {
         verb: "lyt vault join <path>",
@@ -73,8 +73,7 @@ const VERB_GROUPS: VerbGroup[] = [
       },
       {
         verb: "lyt vault rebuild-index <name> [--force] [--json]",
-        summary:
-          "Drop + rebuild the per-vault libSQL from the markdown YON source-of-truth",
+        summary: "Drop + rebuild the per-vault libSQL from the markdown YON source-of-truth",
       },
       {
         verb: "lyt vault add-edge <name> --peer <rid> --edge share_with|parent",
@@ -125,6 +124,11 @@ const VERB_GROUPS: VerbGroup[] = [
     name: "mesh",
     verbs: [
       {
+        verb: "lyt mesh init <name> [--target <github-target>|--local]",
+        summary:
+          "Create a named mesh and main vault; the mesh name is independent from its destination",
+      },
+      {
         verb: "lyt mesh clone-all",
         summary: "Walk every configured VaultSource and clone every accessible vault",
       },
@@ -139,11 +143,6 @@ const VERB_GROUPS: VerbGroup[] = [
       {
         verb: "lyt mesh validate",
         summary: "Report unreciprocated share_with edges and parent_vault target gaps",
-      },
-      {
-        verb: "lyt mesh init --from <manifest>",
-        summary:
-          "Stand up an entire mesh (vaults + edges + push) from a YON manifest in one command",
       },
     ],
   },
@@ -161,14 +160,31 @@ const VERB_GROUPS: VerbGroup[] = [
           "Background watcher (chokidar; debounced commit + incremental FTS reconcile; event-driven; foreground in v1)",
       },
       {
-        verb: "lyt sync --check [--json]",
+        verb: "lyt sync --check [--vault <name>] [--json]",
         summary:
-          "Per-vault freshness reporting (clean / dirty / ahead / behind / diverged / no-upstream / frozen)",
+          "Read-only freshness reporting; --vault inspects exactly one vault and no sibling state",
       },
       {
         verb: "lyt sync --resolve-mesh-context",
         summary:
           "On .lyt/mesh-context.md conflict during pull, auto-checkout-theirs + regen-context + continue (off by default)",
+      },
+    ],
+  },
+  {
+    name: "currency",
+    verbs: [
+      {
+        verb: "lyt outdated [--channel alpha|latest] [--json]",
+        summary: "Read-only check of the configured or explicit release channel",
+      },
+      {
+        verb: "lyt update [--channel alpha|latest] [--yes] [--json]",
+        summary: "Stage and install an approved update, then launch new-binary reconciliation",
+      },
+      {
+        verb: "lyt install reconcile [--apply] [--resume <operation-id>] [--json]",
+        summary: "Inspect managed skills/manuals; --apply executes the exact inspected plan",
       },
     ],
   },
@@ -203,8 +219,7 @@ const VERB_GROUPS: VerbGroup[] = [
     verbs: [
       {
         verb: "lyt audit export --since <date> [--until <date>] [--vault <name>] [--output <path>] [--json]",
-        summary:
-          "Render per-vault audit_log window as markdown (handler-shareable via git)",
+        summary: "Render per-vault audit_log window as markdown (handler-shareable via git)",
       },
     ],
   },
@@ -237,8 +252,7 @@ const VERB_GROUPS: VerbGroup[] = [
     verbs: [
       {
         verb: "lyt provenance trace <file|rid> [--vault <name>] [--json]",
-        summary:
-          "Render the chronological chain of @STAMP records from per-vault provenance",
+        summary: "Render the chronological chain of @STAMP records from per-vault provenance",
       },
     ],
   },
@@ -247,8 +261,7 @@ const VERB_GROUPS: VerbGroup[] = [
     verbs: [
       {
         verb: "lyt machine role enable <role>",
-        summary:
-          "Add a per-machine role (client | automator-runner | mesh-syncer | llm-host)",
+        summary: "Add a per-machine role (client | automator-runner | mesh-syncer | llm-host)",
       },
       {
         verb: "lyt machine role disable <role>",
@@ -258,6 +271,10 @@ const VERB_GROUPS: VerbGroup[] = [
         verb: "lyt machine config region <region>",
         summary:
           'Handler-declared region (e.g. "EU", "US", "APAC") — read by memscope.data_residency at automator dispatch',
+      },
+      {
+        verb: "lyt machine alias <alias> [--json]",
+        summary: "Set this machine's synchronized human-readable alias",
       },
       {
         verb: "lyt machine status [--json]",
@@ -272,6 +289,10 @@ const VERB_GROUPS: VerbGroup[] = [
         verb: "lyt federation init [--handle <h>] [--public|--private] [--no-push]",
         summary:
           "Forge Your Pod — create {handle}/lyt-pod (default --private per DQ-7a-extended) + scaffold pod.yon",
+      },
+      {
+        verb: "lyt federation alias [alias] [--json]",
+        summary: "Inspect or update Your Pod's mutable alias without changing its stable RID",
       },
       {
         verb: "lyt federation list [--json]",
@@ -323,7 +344,7 @@ const VERB_GROUPS: VerbGroup[] = [
       },
       {
         verb: "lyt pattern run <pattern> <verb>",
-        summary: "Run a pattern verb (fills the template + writes the resolved path)",
+        summary: "Invoke one declared pattern verb; that pattern defines its effects",
       },
       { verb: "lyt pattern verbs <name>", summary: "List verbs in a pattern" },
       {

@@ -20,6 +20,9 @@ import { defineConfig } from "vitest/config";
 const baseTest = {
   environment: "node" as const,
   env: { LYT_IDENTITY_OVERRIDE: "github:test-fixture" },
+  // Run-level leak backstop. Without an exclusive LYT_TEST_RUN_ROOT it only
+  // reports newly observed lyt-* entries; it never deletes unproven backlog.
+  globalSetup: ["./tests/_helpers/global-temp-sweep.ts"],
   // libsql's native Node binding is not safe to load across worker threads;
   // use a single forked process so file-based registry tests don't compete
   // for Windows file locks. isolate: false shares the module graph across
@@ -35,6 +38,8 @@ const baseTest = {
   // pushes git-integration tests to 13–25s; 45s = ~3× clean worst-case, still
   // tight enough to catch a 2× regression).
   // Keep in sync with packages/lyt-runner/vitest.config.ts (same git-latency class).
+  // SEE ALSO: tests/flows-mesh-init.test.ts MESH_INIT_IDENTITY_POLICY_TIMEOUT_MS —
+  // its intentionally tighter 35s per-instance cap must remain below this ceiling.
   testTimeout: 45000,
   hookTimeout: 45000,
 };

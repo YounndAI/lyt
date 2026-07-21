@@ -1,8 +1,11 @@
 ---
 name: lyt-adopt
 description: >
-  Guided adopt of an existing Obsidian vault into a Lyt pod. Trigger when the user runs /lyt-adopt, or says "adopt this vault", "bring this vault into Lyt", "upgrade this Obsidian vault", "make this folder a Lyt vault", or similar phrasing on an existing local vault directory. Additive-only: it creates `.lyt/` and NEVER touches the user's `.md` files. Gathers {name, mesh (default `personal`), backfill (offer-only), remote (deferred)} then calls `lyt vault adopt <path> [--name <name>] [--mesh <mesh>]`. Homes the vault into `personal/<leaf>` by default instead of leaving it orphan. Companion to /lyt-sync (once a remote exists) and the inverse of `lyt vault abandon`.
+  Guided adopt of an existing editor-neutral markdown directory into a Lyt pod. Trigger when the user runs /lyt-adopt, or says "adopt this vault", "bring this folder into Lyt", or similar phrasing on an existing local directory. Additive-only: it creates `.lyt/` and NEVER touches the user's `.md` files. Brand-new vaults route to /lyt-create.
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.11.0
 capabilities: [write]
 runtimes: [claude, codex, agents]
@@ -11,7 +14,7 @@ requires_writable_vault: false
 
 # /lyt-adopt
 
-Guided adopt of an existing Obsidian vault into the user's Lyt pod. Adopt is **additive-only**: it creates the `.lyt/` derived-state directory and registers the vault, but it **never touches the user's `.md` files**. It is the inverse of `lyt vault abandon` (the clean anti-lock-in leave, which removes only `.lyt/`).
+Guided adopt of an existing editor-neutral markdown directory into the user's Lyt pod. Adopt is **additive-only**: it creates the `.lyt/` derived-state directory and registers the vault, but it **never touches the user's `.md` files**. It is the inverse of `lyt vault abandon`.
 
 Under the hood this wraps `lyt vault adopt <path> [--name <name>] [--mesh <mesh>]`. The verb registers the vault, homes it into a mesh, rebuilds per-machine pattern links under `.lyt/patterns/`, and rebuilds the content caches so `/lyt-search` and `/lyt-recall` hit immediately.
 
@@ -27,7 +30,7 @@ When the user runs `/lyt-adopt`, or says something like:
 ## When NOT to invoke
 
 - The directory is **already a Lyt vault** (`.lyt/vault.yon` exists) — use `lyt vault join <path>` to register an already-Lyt-aware vault instead. Adopt refuses with a clear message in this case.
-- The user wants to **create a brand-new** vault from scratch — use `lyt vault init <mesh>/<vault>` (create-if-missing).
+- The user wants to **create a brand-new** vault from scratch — use `/lyt-create`.
 - The user wants to **clone a remote** vault — use `lyt vault clone <url>`.
 
 ## Phase 1 — Resolve the target path
@@ -43,12 +46,12 @@ If the resolved path does not exist or is not a directory, stop and tell the use
 
 Gather these before calling adopt. Only **name** and **mesh** feed the command today; **backfill** and **remote** are DEFERRED and OFFER-ONLY (see Phase 4).
 
-| Parameter    | Default                                                             | How to resolve                                                                                                                          |
-| ------------ | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Parameter    | Default                                                                | How to resolve                                                                                                                          |
+| ------------ | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | **name**     | owner/repo when the path is under `~/lyt/vaults`, else folder basename | Accept a user-supplied `{mesh}/{vault}` name or leaf. Pass via `--name`. Omit to accept the default.                                    |
-| **mesh**     | `personal`                                                         | The home mesh. A bare adopt homes the vault into `personal/<leaf>` (find-or-create the `personal` mesh). Override with `--mesh <name>`. |
-| **backfill** | OFFER-ONLY (deferred)                                              | Do NOT run it. Only mention it as a possible future step (see Phase 4).                                                                 |
-| **remote**   | OFFER-ONLY (deferred)                                              | Do NOT wire a remote. Adopt never contacts a remote (see Phase 4).                                                                      |
+| **mesh**     | `personal`                                                             | The home mesh. A bare adopt homes the vault into `personal/<leaf>` (find-or-create the `personal` mesh). Override with `--mesh <name>`. |
+| **backfill** | OFFER-ONLY (deferred)                                                  | Do NOT run it. Only mention it as a possible future step (see Phase 4).                                                                 |
+| **remote**   | OFFER-ONLY (deferred)                                                  | Do NOT wire a remote. Adopt never contacts a remote (see Phase 4).                                                                      |
 
 If the user does not signal a non-default mesh or name, use the defaults — do not over-prompt.
 

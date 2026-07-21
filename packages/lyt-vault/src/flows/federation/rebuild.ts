@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 import { closeRegistry, openRegistry } from "../../registry/client.js";
@@ -25,9 +26,18 @@ import {
 } from "../../util/federation-paths.js";
 import { realFederationGhClient, type FederationGhClient } from "../../util/gh-federation.js";
 import { getHandleFromIdentity } from "../../util/identity.js";
+import { resolveRemoteUrl } from "../../util/remote-url.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { renderFederationYon } from "../../yon/federation-write.js";
 import { derivePodManifestDoc, podManifestDocsEqualIgnoringStamp } from "./regenerate.js";
+import {
+  resolveCanonicalPodPublicationAuthority,
+  withCanonicalPodPublicationAttempt,
+} from "./publication-authority.js";
+import {
+  observePublicationPermission,
+  type PublicationPermissionObserver,
+} from "./publication-permission.js";
 
 // `lyt federation rebuild` — re-derives the pod manifest (`pod.yon`) from current
 // registry state. Deterministic per master plan §5 v1.A.0 acceptance item 4:
@@ -51,6 +61,8 @@ export interface FederationRebuildOptions {
   ghClient?: FederationGhClient | undefined;
   identityProvider?: (() => string) | undefined;
   now?: (() => Date) | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
+  permissionAttemptId?: string | undefined;
 }
 
 export interface FederationRebuildResult {
@@ -70,6 +82,8 @@ export async function federationRebuildFlow(
   const identityProvider = opts.identityProvider ?? defaultIdentityProvider;
   const push = opts.pushToRemote ?? false;
   const now = opts.now ?? (() => new Date());
+  const permissionObserver = opts.permissionObserver ?? observePublicationPermission;
+  const permissionAttemptId = opts.permissionAttemptId ?? randomUUID();
 
   const handle = opts.handle ?? identityProvider();
   const fedYonPath = getFederationYonPath(handle);
@@ -126,11 +140,29 @@ export async function federationRebuildFlow(
 
     let pushed = false;
     if (changed && push) {
+      const authority = resolveCanonicalPodPublicationAuthority(handle, state.fedRidHex);
       try {
         await ghClient.commitAndOptionallyPush(
           localDir,
           `chore(federation): rebuild ${federationRepoFullName(handle)}`,
           true,
+          {
+            url: resolveRemoteUrl(
+              authority.destination.owner,
+              authority.destination.repositoryName,
+            ),
+            refspec: "HEAD:refs/heads/main",
+          },
+          (pushChild) =>
+            withCanonicalPodPublicationAttempt({
+              authority,
+              podYonPath: fedYonPath,
+              podRoot: localDir,
+              actor: handle,
+              attemptId: permissionAttemptId,
+              permissionObserver,
+              action: (attempt) => attempt.runOutwardChild(pushChild),
+            }),
         );
         pushed = true;
       } catch (err) {

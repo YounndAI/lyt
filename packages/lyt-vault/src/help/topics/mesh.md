@@ -1,6 +1,7 @@
 # `lyt mesh` — meshes of vaults
 
-A **mesh** is a named group of vaults sharing a GitHub push target. Every vault
+A **mesh** is a named group of vaults. Its name is independent from GitHub
+accounts and organizations. Every vault
 belongs to exactly one mesh — its **home mesh** — and the mesh's source-of-truth
 lives in the main vault's `.lyt/mesh.yon`.
 
@@ -12,21 +13,21 @@ Run `lyt help multi-mesh` for the underlying vault/mesh/federation model and
 
 ## Verbs
 
-| Verb                                                    | What it does                                                                                            |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `lyt mesh init <name> [--push-to <target>] [--no-push]` | Provision a new mesh + scaffold its `<name>/main` vault + write the initial `mesh.yon`.                 |
-| `lyt mesh join <name> --from <gh-target>`               | Join an existing mesh from a GitHub source — clone the main vault, read `mesh.yon`, register locally.   |
-| `lyt mesh list [--json]`                                | List the meshes you participate in; `★` marks each mesh's main vault.                                   |
-| `lyt mesh info <mesh> [--remote] [--json]`              | One mesh's members + metadata. `--remote` peeks at the published `mesh.yon` via `gh` without cloning.   |
-| `lyt mesh status`                                       | Graph view of every registered vault and its edges.                                                     |
-| `lyt mesh subscribe --vault <mesh>/<vault> --from-mesh <mesh>` | Clone-on-subscribe a vault from another mesh; subscribed content joins mesh-scoped search.        |
-| `lyt mesh add-edge --parent <a> --child <b>`            | Declare a parent/child rollup edge between vaults.                                                       |
-| `lyt mesh validate`                                     | Parse every `mesh.yon`; report broken edges, tombstone collisions, missing parents (read-only).         |
-| `lyt mesh adopt`                                         | Recover an orphan mesh (a mesh on disk with no registry record) back into the registry.                 |
-| `lyt mesh rebuild-registry [--mesh <name>]`             | Re-derive the per-machine registry tables from every `mesh.yon` on disk. Safety net for cache drift.    |
-| `lyt mesh rebuild-rollup <mesh>`                        | Recompute cross-vault activity rollups.                                                                  |
-| `lyt mesh canvas`                                       | Generate a JSON-Canvas view of the mesh for visual editors.                                             |
-| `lyt mesh clone-all [--source <name>] [--dry-run]`      | Idempotent clone-or-pull of every configured vault source — stand up a machine in one verb.             |
+| Verb                                                           | What it does                                                                                          |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `lyt mesh init <name> [--target <github-target> \| --local]`   | Provision a new mesh + scaffold its `<name>/main` vault + write the initial `mesh.yon`.               |
+| `lyt mesh join <name> --from <gh-target>`                      | Join an existing mesh from a GitHub source — clone the main vault, read `mesh.yon`, register locally. |
+| `lyt mesh list [--json]`                                       | List the meshes you participate in; `★` marks each mesh's main vault.                                 |
+| `lyt mesh info <mesh> [--remote] [--json]`                     | One mesh's members + metadata. `--remote` peeks at the published `mesh.yon` via `gh` without cloning. |
+| `lyt mesh status`                                              | Graph view of every registered vault and its edges.                                                   |
+| `lyt mesh subscribe --vault <mesh>/<vault> --from-mesh <mesh>` | Clone-on-subscribe a vault from another mesh; subscribed content joins mesh-scoped search.            |
+| `lyt mesh add-edge --parent <a> --child <b>`                   | Declare a parent/child rollup edge between vaults.                                                    |
+| `lyt mesh validate`                                            | Parse every `mesh.yon`; report broken edges, tombstone collisions, missing parents (read-only).       |
+| `lyt mesh adopt`                                               | Recover an orphan mesh (a mesh on disk with no registry record) back into the registry.               |
+| `lyt mesh rebuild-registry [--mesh <name>]`                    | Re-derive the per-machine registry tables from every `mesh.yon` on disk. Safety net for cache drift.  |
+| `lyt mesh rebuild-rollup <mesh>`                               | Recompute cross-vault activity rollups.                                                               |
+| `lyt mesh canvas`                                              | Generate a JSON-Canvas view of the mesh for visual editors.                                           |
+| `lyt mesh clone-all [--source <name>] [--dry-run]`             | Idempotent clone-or-pull of every configured vault source — stand up a machine in one verb.           |
 
 `lyt mesh validate` is read-only; `lyt repair --apply` is the write side that
 heals broken edges, broken subscriptions, `mesh.yon` parse errors (restore from
@@ -39,7 +40,7 @@ Git), and orphan vaults. See `lyt help troubleshooting`.
 ├── registry.db                ← meshes + mesh_vaults + vaults (per-machine cache)
 └── vaults/
     └── <mesh>/
-        └── main/              ← cloned from github.com/<gh-target>/main
+        └── main/              ← local vault; its destination policy is independent from the mesh name
             └── .lyt/
                 ├── vault.yon  ← @VAULT (vault SoT)
                 └── mesh.yon   ← @MESH + @MESH_HOME + @MESH_EDGE (mesh SoT — main vault only)
@@ -51,15 +52,20 @@ of truth. `lyt mesh rebuild-registry` re-derives the cache from them.
 ## `lyt mesh init`
 
 ```bash
-lyt mesh init <name> [--push-to <gh-target>] [--push-kind handle|org] \
-              [--parent <existing-mesh>] [--no-push] [--json]
+lyt mesh init <name> [--target github:user/<owner>|github:org/<owner>|--local] \
+              [--parent <existing-mesh>] [--json]
 ```
 
 Provisions a new mesh and scaffolds its main vault (`<name>/main`). Validates
 `<name>` against the mesh-name rules (bare, slug-safe, no `/`, no Windows-reserved
 names). `--parent <existing-mesh>` records a cross-mesh parent link (the new main
-vault's parent resolves to the parent mesh's main vault). `--no-push` keeps
-everything local.
+vault's parent resolves to the parent mesh's main vault). When no destination
+flag is given, Lyt uses the authenticated GitHub owner when observable and
+otherwise creates a local-only mesh. Creation never publishes. The Receipt V1
+result names its terminal status and records destination, local checkpoint,
+mutation counts, and exact scoped sync guidance in evidence. `next_action` is
+shown only when non-null. Use read-only `lyt mesh info <name> --json` when the
+destination policy source is needed; Receipt V1 has no source field.
 
 ## `lyt mesh join`
 
@@ -74,10 +80,10 @@ cascades the clone to the mesh's other home vaults.
 ## Example — a four-mesh setup
 
 ```bash
-lyt mesh init alex      --no-push                  # mesh "alex"     + vault "alex/main"
-lyt mesh init personal  --parent alex --no-push    # mesh "personal" + vault "personal/main"
-lyt mesh init younndai  --no-push                  # mesh "younndai" + vault "younndai/main"
-lyt mesh init marlink   --no-push                  # mesh "marlink"  + vault "marlink/main"
+lyt mesh init alex      --local                    # mesh "alex"     + vault "alex/main"
+lyt mesh init personal  --parent alex --local      # mesh "personal" + vault "personal/main"
+lyt mesh init research  --target github:org/YounndAI # mesh name != GitHub owner
+lyt mesh init marlink   --target github:org/Marlink-Technologies
 lyt mesh list --json                               # 4 meshes, 4 home vaults
 ```
 

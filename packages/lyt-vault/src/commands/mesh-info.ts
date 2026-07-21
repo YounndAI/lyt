@@ -75,6 +75,10 @@ export function buildMeshInfoSubcommand(): Command {
         console.log(`Mesh '${result.mesh.name}' (${result.source})`);
         // eslint-disable-next-line no-console
         console.log(`  rid:              ${result.mesh.rid}`);
+        // eslint-disable-next-line no-console
+        console.log(`  own created:      ${result.mesh.ownCreated ? "yes" : "no"}`);
+        // eslint-disable-next-line no-console
+        console.log(`  destination:      ${formatDestination(result.mesh.destination)}`);
         if (result.mesh.pushTarget !== null) {
           // eslint-disable-next-line no-console
           console.log(`  push target:      ${result.mesh.pushKind}:${result.mesh.pushTarget}`);
@@ -87,7 +91,7 @@ export function buildMeshInfoSubcommand(): Command {
         console.log(`  home vaults:      ${result.homeVaults.length}`);
         for (const h of result.homeVaults) {
           // eslint-disable-next-line no-console
-          console.log(`    - ${h.vaultName} (${h.vaultRid})`);
+          console.log(`    - ${h.vaultName} (${h.vaultRid}; ${formatDestination(h.destination)})`);
         }
       } catch (err) {
         const status = mapErrorToExitCode(err);
@@ -96,6 +100,16 @@ export function buildMeshInfoSubcommand(): Command {
         process.exitCode = status ?? 1;
       }
     });
+}
+
+function formatDestination(
+  destination: { kind: string; target: { owner: string; kind: string; repository: string | null } | null; source: string | null } | null,
+): string {
+  if (destination === null) return "unknown";
+  if (destination.kind === "github" && destination.target !== null) {
+    return `github:${destination.target.kind}/${destination.target.owner}/${destination.target.repository ?? "-"} (${destination.source ?? "-"})`;
+  }
+  return `${destination.kind}${destination.source === null ? "" : ` (${destination.source})`}`;
 }
 
 function mapErrorToExitCode(err: unknown): number | null {

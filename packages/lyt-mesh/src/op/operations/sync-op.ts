@@ -47,6 +47,7 @@ import {
   type Operation,
   type Preview,
   type PushResult,
+  type PushTarget,
   type Receipt,
   type RemoteProvider,
   type SyncHorizon,
@@ -62,12 +63,18 @@ export interface SyncOperationInput {
    * this was a pull-only sync), so the horizon stays `local`.
    */
   hasOutgoing: boolean;
+  /** Exact remote + branch destination already checked against publication authority. */
+  pushTarget: PushTarget;
 }
 
 /** Injectable seams — the production wiring is the default GitRemoteProvider; tests inject a fake port. */
 export interface SyncOperationDeps {
   /** The git-remote seam. The push runs through this — the honest horizon is read back from its result. */
   remote: RemoteProvider;
+  /** Fresh, attempt-bound authorization that must complete immediately before push. */
+  authorizePush?: () => Promise<void>;
+  /** Holds scoped canonical authority through the actual outward push. */
+  executeAuthorizedPush?: (push: () => Promise<PushResult>) => Promise<PushResult>;
   /** ISO clock — reserved for a future op-log write; defaults to wall time. */
   now?: () => string;
 }
@@ -114,7 +121,49 @@ export class SyncOperation implements Operation {
       });
     }
 
-    const pr = await this.deps.remote.push(this.input.vaultPath);
+    if (this.deps.executeAuthorizedPush === undefined && this.deps.authorizePush === undefined) {
+      this.lastPushResult = {
+        pushed: false,
+        code: -1,
+        stderr: "publication permission was not verified for this sync attempt",
+      };
+      this.horizon = "committed-not-pushed";
+      return makeReceipt({
+        applied: false,
+        verified: false,
+        logline: this.logline(),
+        horizon: this.horizon,
+        envelope: { vault: this.input.vaultName, pushed: false },
+      });
+    }
+    try {
+      if (this.deps.executeAuthorizedPush !== undefined) {
+        this.lastPushResult = await this.deps.executeAuthorizedPush(() =>
+          this.deps.remote.push(this.input.vaultPath, this.input.pushTarget),
+        );
+      } else {
+        await this.deps.authorizePush!();
+        this.lastPushResult = await this.deps.remote.push(
+          this.input.vaultPath,
+          this.input.pushTarget,
+        );
+      }
+    } catch (error) {
+      this.lastPushResult = {
+        pushed: false,
+        code: -1,
+        stderr: error instanceof Error ? error.message : String(error),
+      };
+      this.horizon = "committed-not-pushed";
+      return makeReceipt({
+        applied: false,
+        verified: false,
+        logline: this.logline(),
+        horizon: this.horizon,
+        envelope: { vault: this.input.vaultName, pushed: false },
+      });
+    }
+    const pr = this.lastPushResult!;
     this.lastPushResult = pr;
     // HONEST-NONE: read the horizon back from what ACTUALLY happened. A landed
     // push is the ONLY path to `pushed`; a failed push leaves the local

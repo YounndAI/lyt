@@ -44,8 +44,8 @@ including `capture`, `search`, and `reindex`.
 
 ```bash
 # Create or adopt a vault
-lyt vault init <mesh>/<vault>      # create-if-missing: makes the mesh if absent,
-                                   #   stops if the vault exists (--mesh, --push-to)
+lyt vault init <mesh>/<vault>      # create-if-missing; destination is inherited,
+                                   #   overridden with --target, or explicitly --local
 lyt vault adopt <path>             # bring an existing markdown folder under Lyt
 lyt vault list [--json]            # every registered vault (computed {mesh}/{vault} names)
 lyt vault info <name> [--json]     # status, mesh, writability, origin coordinate
@@ -59,6 +59,8 @@ lyt search "<query>" [--vault <name>] [--mesh <m>] [--no-semantic] [--json]
                                    #   + optional on-device semantic fusion
 lyt reindex [--all|--mesh <m>|--vault <name>]
                                    # rebuild the libSQL search caches from the markdown SoT
+lyt sync --check --vault <mesh>/<vault> --json
+                                   # exact one-vault, zero-mutation inspection
 
 # Your Pod (the per-user view across every mesh you participate in)
 lyt federation init [--public|--private]   # forge {handle}/lyt-pod + the pod.yon manifest
@@ -74,6 +76,12 @@ lyt doctor [--json|--full]         # git/gh/node/npm checks, registry integrity,
 lyt help [<topic>]                 # getting-started, mesh, agents, patterns, troubleshooting…
 lyt pattern list|run|fork|…        # the bundled pattern runtime (1 bundled: knowledge-capture)
 ```
+
+Mesh names are independent from GitHub accounts and organizations. A new vault
+snapshots its mesh destination unless `--target` or `--local` overrides it.
+Creation never publishes; Receipt V1 reports terminal status, effective
+destination, checkpoint/mutation evidence, and exact next-sync evidence. Read
+policy source afterward through read-only vault/mesh info.
 
 The full v1 verb set also includes `vault clone|forget|disconnect|delete|add-edge|verify|regen-context`, the registry verbs, audit export, and friction tracking. Run `lyt help commands` for the complete list.
 
@@ -92,7 +100,7 @@ Every note carries an 8-field frontmatter contract — `title`, `created`, `modi
 
 - **`lyt vault backfill <name>`** fills missing fields in place — title, genuine `created`/`modified` dates (from git history, falling back to file mtime), keyword `tags`, `topic`, and defaults. It never moves files.
 - **`lyt vault reconcile <name> [--apply]`** scans every note against the index, flags files that are present-but-unindexed or missing frontmatter, and with `--apply` backfills then reindexes them — drop a raw `.md` into a vault and it gets healed. Both verbs commit locally by default (`--push` to opt in).
-- **Tags need no model** — keyword extraction runs on any vault, including a freshly imported one. When a local embedding model is present, `topic:` is enriched too: capture *suggests* one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure — ranked against your current on-disk labels and computed on-device. With no model, tags still fill and topic stays blank.
+- **Tags need no model** — keyword extraction runs on any vault, including a freshly imported one. When a local embedding model is present, `topic:` is enriched too: capture _suggests_ one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure — ranked against your current on-disk labels and computed on-device. With no model, tags still fill and topic stays blank.
 - **Your writing is never overwritten** — `purpose` is left blank and flagged rather than guessed, authored values are preserved, and every machine-filled field is provenance-stamped so it stays distinguishable from what you wrote. Nothing is ever sent off your machine.
 - **`lyt doctor`** counts notes with missing or invalid frontmatter (`--full` scans every vault; the default samples).
 
@@ -125,21 +133,21 @@ composes these factories; you can do the same in custom CLI builds.
 
 ## The Lyt toolchain
 
-| Package | Role |
-| --- | --- |
-| [`@younndai/lyt`](https://github.com/YounndAI/lyt/tree/main/packages/lyt) | The unified `lyt` CLI (meta package) |
-| [`@younndai/lyt-vault`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-vault) | **This package** — the vault primitive |
-| [`@younndai/lyt-mesh`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mesh) | The mesh layer — multi-vault operations |
+| Package                                                                                 | Role                                              |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| [`@younndai/lyt`](https://github.com/YounndAI/lyt/tree/main/packages/lyt)               | The unified `lyt` CLI (meta package)              |
+| [`@younndai/lyt-vault`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-vault)   | **This package** — the vault primitive            |
+| [`@younndai/lyt-mesh`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mesh)     | The mesh layer — multi-vault operations           |
 | [`@younndai/lyt-skills`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-skills) | Agent-harness skills (Claude Code, Codex, agents) |
-| [`@younndai/lyt-mcp`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mcp) | The MCP server |
-| [`@younndai/lyt-runner`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-runner) | The YON automation runner |
-| [`@younndai/lyt-llm`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-llm) | The LLM gateway |
+| [`@younndai/lyt-mcp`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mcp)       | The MCP server                                    |
+| [`@younndai/lyt-runner`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-runner) | The YON automation runner                         |
+| [`@younndai/lyt-llm`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-llm)       | The LLM gateway                                   |
 
 ---
 
 ## About YounndAI
 
-**YounndAI™ — You and AI, unified.** (pronounced *"yoon-dye"*)
+**YounndAI™ — You and AI, unified.** (pronounced _"yoon-dye"_)
 
 A philosophy of intelligence: building with intention, so humans and machines
 think together without losing what makes either whole.
@@ -158,10 +166,10 @@ Website: [linkyourthink.com](https://linkyourthink.com)
 
 ---
 
-|               |                                                         |
-| ------------- | ------------------------------------------------------- |
-| **Project**   | [Lyt — Link Your Think](https://linkyourthink.com)      |
-| **Author**    | [Alexandru Mareș](https://allemaar.com)                 |
-| **Company**   | [MARLINK TRADING SRL](https://younndai.com) · YounndAI™ |
-| **License**   | [Apache 2.0](./LICENSE) — © 2026 MARLINK TRADING SRL    |
+|               |                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------- |
+| **Project**   | [Lyt — Link Your Think](https://linkyourthink.com)                                       |
+| **Author**    | [Alexandru Mareș](https://allemaar.com)                                                  |
+| **Company**   | [MARLINK TRADING SRL](https://younndai.com) · YounndAI™                                  |
+| **License**   | [Apache 2.0](./LICENSE) — © 2026 MARLINK TRADING SRL                                     |
 | **Trademark** | [YounndAI™ Trademark Guidelines](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md) |

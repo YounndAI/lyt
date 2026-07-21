@@ -33,6 +33,7 @@ import {
   type VaultRow,
 } from "../registry/repo.js";
 import { gitUrlToCoordinate, vaultLeaf } from "../registry/vault-addressing.js";
+import { resolveEffectiveOwnedMeshDestination } from "../registry/destination-policy.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
 import { newUuidv7Bytes, ridsEqual, uuid7BytesToDashedString } from "../util/uuid7.js";
 import {
@@ -344,8 +345,8 @@ export async function resolveEffectiveCloneOptions(opts: CloneOptions): Promise<
     // MUST NOT occupy the own namespace as its owner key: fall through to the
     // owner-bucket under the REAL (foreign) owner below.
     if (localMesh !== null && localMesh.mainVaultRid !== null) {
-      const meshOwner = localMesh.pushTarget;
-      if (meshOwner !== null && slugifyHandle(meshOwner) === owner) {
+      const destination = resolveEffectiveOwnedMeshDestination(localMesh);
+      if (destination.kind === "github" && slugifyHandle(destination.owner) === owner) {
         return opts; // genuine own re-clone / graduate-a-template
       }
     }

@@ -38,3 +38,19 @@ export type {
 } from "./list.js";
 
 export { buildSkillsCommand } from "./commands/skills.js";
+
+export {
+  getInstalledLytVersion,
+  readSkillMetadata,
+  SUPPORTED_GUIDANCE_CONTRACT_MAJOR,
+} from "./skill-metadata.js";
+export { buildSkillsInstallProviderObjectsV1 } from "./install-provider.js";
+export type { SkillsInstallProviderObjectV1 } from "./install-provider.js";
+export type {
+  SkillCompatibilityNextAction,
+  SkillCompatibilityNextActionCode,
+  SkillCompatibilityRefusal,
+  SkillCompatibilityRefusalCode,
+  SkillCompatibilityStatus,
+  SkillMetadata,
+} from "./skill-metadata.js";

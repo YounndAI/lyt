@@ -20,12 +20,19 @@
 // conformance test without executing. This file only wires argv → parse.
 
 import { buildProgram } from "./build-program.js";
+import { makeRootCliParseReceipt } from "./commands/init.js";
 
-buildProgram()
-  .parseAsync(process.argv)
-  .catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    // eslint-disable-next-line no-console
-    console.error(`lyt: ${message}`);
-    process.exit(1);
-  });
+const program = buildProgram();
+program.exitOverride();
+
+program.parseAsync(process.argv).catch((err: unknown) => {
+  if (typeof err === "object" && err !== null && "exitCode" in err && err.exitCode === 0) {
+    process.exitCode = 0;
+    return;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  // eslint-disable-next-line no-console
+  console.error(`lyt: ${message}`);
+  process.stdout.write(`${JSON.stringify(makeRootCliParseReceipt())}\n`);
+  process.exitCode = 2;
+});

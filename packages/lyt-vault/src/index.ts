@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-export { initVault } from "./scaffold/init.js";
+export { initVault, plannedInitialScaffoldPaths } from "./scaffold/init.js";
 export type { InitOptions, InitResult } from "./scaffold/init.js";
 export { adoptVault } from "./scaffold/adopt.js";
 export type { AdoptOptions, AdoptResult } from "./scaffold/adopt.js";
@@ -23,6 +23,60 @@ export type { DeleteScaffoldResult } from "./scaffold/delete.js";
 
 export { initVaultFlow, HomeMeshNotFoundError, VaultAlreadyExistsError } from "./flows/init.js";
 export type { InitFlowOptions, InitFlowResult, MeshSelfHealOptions } from "./flows/init.js";
+export {
+  deriveCreationOperationIdV1,
+  derivePlannedCreationRid,
+  plannedSingleVaultEffectsV1,
+  resolveCreationPlanV1,
+  withCreationRepositoryEffectsV1,
+} from "./flows/creation-plan.js";
+export type {
+  CreationIntendedEffectsV1,
+  CreationPlanV1,
+  CreationSubjectFacts,
+  DestinationRequest,
+  ResolveCreationPlanV1Result,
+  PlannedPodIdentityEffectV1,
+} from "./flows/creation-plan.js";
+export type { VaultCreationBinding } from "./flows/vault-init-preflight.js";
+export {
+  deriveVaultAliasRecommendation,
+  observeVaultAliasRecommendation,
+} from "./flows/alias-recommendation.js";
+export type {
+  AliasRecommendationReason,
+  VaultAliasRecommendation,
+} from "./flows/alias-recommendation.js";
+export { observeActiveActor } from "./op/active-actor-observation.js";
+export type { ActiveActorObservation } from "./op/active-actor-observation.js";
+export {
+  CreationMutationFailure,
+  CreationMutationJournal,
+  asCreationMutationFailure,
+  cloneCreationMutationEvidence,
+  creationCheckpointPathDigest,
+  creationLocalMutationCount,
+  emptyCreationMutationEvidence,
+} from "./op/creation-mutation-journal.js";
+export type {
+  CreationMutationDelta,
+  CreationMutationEvidence,
+  CreationMutationFailureOptions,
+  CreationRecoveryAction,
+} from "./op/creation-mutation-journal.js";
+export {
+  inspectMeshInitPreflight,
+  inspectRegistryTopologyPreflight,
+  openMeshInitRegistryReadOnly,
+} from "./flows/mesh-init-preflight.js";
+export {
+  finalizeInitialCheckpoint,
+  recordInitialCheckpointPaths,
+} from "./scaffold/local-checkpoint.js";
+export type {
+  InitialCheckpointContext,
+  LocalCheckpointResult,
+} from "./scaffold/local-checkpoint.js";
 export {
   appendMeshHomeToFile,
   removeMeshHomeFromFile,
@@ -168,14 +222,17 @@ export {
   ClusterAlreadyRegisteredError,
   PushPermissionDeniedError,
   meshAdoptClusterFlow,
+  observeMeshAdoptCreationEvidence,
 } from "./flows/mesh-adopt-cluster.js";
 export type {
+  AdoptActorObserver,
   AdoptCloneFn,
   AdoptClusterArgs,
   AdoptClusterCloneArgs,
   AdoptClusterCloneResult,
   AdoptClusterResult,
   AdoptedMemberSummary,
+  MeshAdoptCreationEvidence,
 } from "./flows/mesh-adopt-cluster.js";
 export { buildMeshAdoptSubcommand } from "./commands/mesh-adopt.js";
 export {
@@ -219,6 +276,12 @@ export type {
   AgentManualResult,
   AgentManualRuntime,
 } from "./flows/agent-manual.js";
+export {
+  AGENT_MANUAL_MAX_WORDS,
+  composeManagedManualMarker,
+  countGuidanceWords,
+} from "./flows/agent-guidance.js";
+export type { ManagedMarkerComposition } from "./flows/agent-guidance.js";
 export { buildAgentManualCommand } from "./commands/agent-manual.js";
 // stay-current slice — version-currency core shared by `outdated`/`update`
 // (lyt meta CLI) + doctor + init.
@@ -228,14 +291,23 @@ export {
   CURRENCY_DIST_TAG,
   CURRENCY_PACKAGE,
   formatCurrencyLine,
+  isUpdateChannel,
   isNewerVersion,
+  inspectCurrencyStateV1,
+  normalizeRegistryUrl,
+  readUpdateChannel,
   resolveUpdateAction,
+  UPDATE_CHANNELS,
   updateCommandString,
+  writeUpdateChannel,
 } from "./flows/currency.js";
 export type {
   CommandRunner,
   CurrencyOptions,
   CurrencyResult,
+  CurrencyStateInspectionV1,
+  UpdateChannel,
+  UpdateChannelPreference,
   UpdateAction,
 } from "./flows/currency.js";
 // v1.G.4 — setup wizard surface (runWizard + IPromptHandler default impl).
@@ -243,8 +315,7 @@ export type {
 // Release review Arch-M1 fix-pass: the 10 individual phase functions are NOT
 // exported here — they are wizard-internal. Tests import them via the
 // `../../src/flows/wizard.js` relative path, keeping the public surface
-// minimal (runWizard is the only public entry). v1.G.10 preserves this
-// — `phase9_podMapInit` stays wizard-internal per G.4 Arch-M1 precedent.
+// minimal (runWizard is the only public entry).
 export { ReadlinePromptHandler, runWizard } from "./flows/wizard.js";
 export type {
   AgentRuntimeChoice,
@@ -253,21 +324,6 @@ export type {
   WizardRunOptions,
   WizardRunResult,
 } from "./flows/wizard.js";
-// v1.G.10 — pod-map vault generator (markdown emitter; the Pod Manager
-// Obsidian plugin reads `vault.kind: pod-map` to activate). Generator
-// is invoked by wizard P9 (first-time setup) and is the future surface
-// for /lyt-sync regen hooks (deferred per @DELTA_FROM_BRIEF — no TS
-// sync flow exists today; see retro). `installPodManagerPlugin` is
-// exported for wizard P9b consumption + future post-alpha community-
-// store distribution surface.
-export { generatePodMapFlow, installPodManagerPlugin } from "./flows/pod-map-generate.js";
-export type {
-  InstallPluginArgs,
-  InstallPluginResult,
-  PodMapArgs,
-  PodMapResult,
-  PodMapVaultPaths,
-} from "./flows/pod-map-generate.js";
 export {
   currentPlatform,
   detectTool,
@@ -292,7 +348,7 @@ export { regenContextFlow } from "./flows/regen-context.js";
 export type { RegenContextResult } from "./flows/regen-context.js";
 export { rebuildVaultIndexFlow } from "./flows/rebuild-index.js";
 export type { RebuildIndexArgs, RebuildIndexResult } from "./flows/rebuild-index.js";
-export { migrateVaultGitignoreIndexRule } from "./flows/migrate-gitignore.js";
+export { migrateVaultGitignoreIndexRule, ensureSyncProvenancePendingIgnored } from "./flows/migrate-gitignore.js";
 export type { MigrateGitignoreResult } from "./flows/migrate-gitignore.js";
 export {
   rebuildLanesFlow,
@@ -570,6 +626,41 @@ export {
   countOps,
 } from "./op/operation-log.js";
 export type { OpLogInput, OpLogRow, OpStatus } from "./op/operation-log.js";
+export {
+  OP_LOG_SCHEMA_VERSION,
+  OP_LOG_UPGRADE_REQUIRED,
+  OpLogUpgradeRequiredError,
+  migrateOperationLog,
+} from "./op/operation-log-migrations.js";
+export {
+  ReceiptRepositoryError,
+  beginReceiptAttempt,
+  finalizeReceiptAttempt,
+  readReceiptAttempt,
+  readReceiptAttemptState,
+  resumePendingReceiptAttempt,
+  queryReceiptAttempts,
+  listReceiptAttemptSummaries,
+  countReceiptOperations,
+  countReceiptAttempts,
+} from "./op/receipt-repository.js";
+export type {
+  BeginReceiptAttemptResult,
+  ReceiptAttemptQuery,
+  ReceiptAttemptSummary,
+  StoredReceiptV1,
+} from "./op/receipt-repository.js";
+export {
+  inspectReceiptAttempt,
+  openReceiptAttempt,
+  reopenReceiptAttempt,
+} from "./op/receipt-attempt.js";
+export type {
+  OpenReceiptAttemptResult,
+  ReceiptAttemptAdapterDependencies,
+  ReceiptAttemptSession,
+  ReceiptAttemptWarningCode,
+} from "./op/receipt-attempt.js";
 export { CaptureOperation } from "./op/operations/capture-op.js";
 export type { CaptureInput, CaptureOperationDeps } from "./op/operations/capture-op.js";
 // 0.13.0 — small caller-supplied lifecycle callbacks for programmatic
@@ -587,6 +678,29 @@ export type { UndoDeps, UndoOutcome } from "./op/undo.js";
 // exported so an Operation living in ANOTHER package (A.4 SyncOperation, home =
 // lyt-mesh) can build a Receipt without reaching into op/receipt.ts internals.
 export { makeReceipt } from "./op/receipt.js";
+// Lyt 0.20 Receipt V1 is additive. The legacy Operation Receipt above remains
+// exported unchanged for 0.13 consumers.
+export {
+  RECEIPT_V1_SCHEMA_ID,
+  RECEIPT_V1_MAJOR,
+  RECEIPT_V1_MINOR,
+  ReceiptV1ProducerSchema,
+  ReceiptV1ConsumerSchema,
+  parseReceiptV1ForEmission,
+  consumeReceiptV1,
+} from "./op/receipt-v1.js";
+export type {
+  ReceiptV1,
+  ReceiptV1Consumption,
+  UnsupportedReceiptSchema,
+  InvalidReceipt,
+} from "./op/receipt-v1.js";
+export { PHASE_A_REPLAY_INVENTORY } from "./op/replay-contract.js";
+export type {
+  ReplayCoverage,
+  PhaseALifecycleMutation,
+  ReplayBoundaryDeclaration,
+} from "./op/replay-contract.js";
 // Increment 1 · Phase A firewall-C1 fix-pass — the git-error FIREWALL narrator,
 // barrel-exported so a cross-package boundary renderer (the lyt-mesh sync flow's
 // allowFailure push/pull/fetch paths) can narrate a raw git/gh failure into
@@ -619,6 +733,8 @@ export { GitRemoteProvider } from "./remote/remote-provider.js";
 export type {
   RemoteProvider,
   PushResult,
+  PushTarget,
+  PullTarget,
   PullResult,
   GitRunnerFn,
 } from "./remote/remote-provider.js";
@@ -929,6 +1045,19 @@ export type { GhClient, GhRepoInfo } from "./util/gh.js";
 export { parseOwnerRepoFromUrl } from "./util/gh.js";
 
 export { openRegistry, closeRegistry, getRegistryPath } from "./registry/client.js";
+export {
+  openRegistryReadOnly,
+  RegistryUpgradeRequiredError,
+  resolveVaultSnapshotReadOnly,
+} from "./registry/read-only-client.js";
+export type {
+  ReadOnlyRegistryClient,
+  ReadOnlyRegistryMissing,
+  ReadOnlyRegistryOpenResult,
+  ReadonlyRegistryQueryClient,
+  ResolveVaultSnapshotResult,
+  VaultSnapshot,
+} from "./registry/read-only-client.js";
 
 // Phase D — pod-global discovery nudge engine. Pure policy (util) + the
 // registry.db I/O seam (registry). Exported so the @younndai/lyt meta CLI's
@@ -1088,6 +1217,91 @@ export {
 } from "./registry/meshes-repo.js";
 export type { MeshRow, InsertMeshArgs, MeshPushKind } from "./registry/meshes-repo.js";
 export {
+  DESTINATION_POLICY_SCHEMA_MAJOR,
+  MINIMUM_DESTINATION_POLICY_WRITER_VERSION,
+  destinationPolicyKey,
+  resolveDestinationPolicy,
+  resolveEffectiveOwnedDestination,
+  resolveEffectiveOwnedMeshDestination,
+  validateDestinationPolicyValue,
+  parseCanonicalDestinationTarget,
+  publicationCoordinateOwner,
+  assertSupportedDestinationPolicyWriter,
+  DestinationPolicyValidationError,
+  UnsupportedDestinationPolicySchemaError,
+  DestinationPolicyWriterUpgradeRequiredError,
+} from "./registry/destination-policy.js";
+export type {
+  DestinationSubjectKind,
+  DestinationKind,
+  DestinationTargetKind,
+  MeshDestinationSource,
+  VaultDestinationSource,
+  DestinationSource,
+  DestinationPolicyState,
+  DestinationPolicyValue,
+  DestinationPolicyRecordV1,
+  ResolvedDestinationPolicy,
+  EffectiveOwnedDestination,
+  OwnedDestinationVaultView,
+  OwnedDestinationMeshView,
+  PublicationCoordinateComparison,
+} from "./registry/destination-policy.js";
+export { comparePublicationCoordinates } from "./util/publication-coordinate.js";
+export {
+  parseGithubPublicationTarget,
+  buildPermissionObservation,
+  assertFreshVerifiedPermission,
+  classifyPermissionEvidence,
+  formatLastObservedPermission,
+} from "./util/permission-observation.js";
+export type {
+  PublicationCapability,
+  PermissionObservationResult,
+  GithubPublicationTargetKind,
+  CanonicalGithubPublicationTarget,
+  PermissionEvidence,
+  PermissionEvidenceClass,
+  PermissionObservation,
+  BuildPermissionObservationInput,
+  RequiredPermissionObservation,
+} from "./util/permission-observation.js";
+export {
+  observePublicationPermission,
+  PUBLICATION_PERMISSION_PROMPT_GUARDS,
+} from "./flows/federation/publication-permission.js";
+export type {
+  ObservePublicationPermissionArgs,
+  PublicationPermissionObserver,
+  PublicationPermissionGhRunner,
+} from "./flows/federation/publication-permission.js";
+export {
+  loadDestinationPolicyContext,
+  resolveCanonicalOwnedVaultDestination,
+  resolveCanonicalOwnedVaultPublicationAuthority,
+  resolveCanonicalOwnedMeshDestination,
+  setCanonicalDestinationPolicy,
+  tombstoneCanonicalVaultDestination,
+  transitionVaultSourceWithPolicyFence,
+  withDestinationPolicySubjectLocks,
+} from "./flows/federation/destination-policy-service.js";
+export type {
+  CanonicalVaultPublicationAuthority,
+  DestinationPolicySubjectRef,
+  DestinationPolicyContext,
+  LoadDestinationPolicyContextOptions,
+  SetCanonicalDestinationPolicyArgs,
+} from "./flows/federation/destination-policy-service.js";
+export {
+  withCanonicalVaultPublicationAttempt,
+  withFreshPublicationPermission,
+} from "./flows/federation/publication-authority.js";
+export type {
+  CanonicalVaultPublicationAttemptArgs,
+  CanonicalVaultPublicationAttemptContext,
+  FreshPublicationPermissionArgs,
+} from "./flows/federation/publication-authority.js";
+export {
   addVaultToMesh,
   listVaultsInMesh,
   listMeshesForVault,
@@ -1152,6 +1366,7 @@ export type {
 export { syncPodLedgerFlow } from "./flows/federation/sync-pod-ledger.js";
 export type {
   SyncPodLedgerArgs,
+  SyncPodLedgerDependencies,
   SyncPodLedgerResult,
   PodLedgerSyncStatus,
 } from "./flows/federation/sync-pod-ledger.js";
@@ -1166,6 +1381,84 @@ export type {
 } from "./flows/federation/rebuildFederationCacheFlow.js";
 // Brief B (B.2) — the reconcile/publish engine + the resumable outbox.
 export { reconcilePublishFlow } from "./flows/federation/reconcile-publish.js";
+export {
+  derivePodReconciliationAction,
+  POD_RECONCILIATION_REPAIR_COMMAND,
+  type PodReconciliationDecision,
+  type PodReconciliationState,
+} from "./flows/federation/pod-reconciliation.js";
+export {
+  observeLocalPodGitState,
+  type LocalPodGitEvidence,
+  type LocalPodGitStateObservation,
+} from "./flows/federation/pod-git-state.js";
+export {
+  observePodRemoteState,
+  type PodRemoteCommandRunner,
+  type PodRemoteObservationEvidence,
+  type PodRemoteStateObservation,
+} from "./flows/federation/pod-remote-state.js";
+export {
+  applyEditorLocalizationPlanV1,
+  EDITOR_LOCALIZATION_MACHINE_EVIDENCE_LABEL,
+  parseEditorLocalizationPlanV1,
+  prepareEditorLocalizationPlanV1,
+} from "./flows/editor-localization.js";
+export type {
+  ApplyEditorLocalizationArgs,
+  EditorLocalizationBeforeV1,
+  EditorLocalizationEligibility,
+  EditorLocalizationEligibilityReason,
+  EditorLocalizationMachineEvidenceV1,
+  EditorLocalizationMachineReceiptV1,
+  EditorLocalizationPlanV1,
+  PrepareEditorLocalizationArgs,
+  PrepareEditorLocalizationResult,
+} from "./flows/editor-localization.js";
+export {
+  inspectPodRepair,
+  POD_PRESERVE_BOTH_APPLY_COMMAND,
+  POD_REPAIR_APPLY_PRECONDITION,
+  type PodRepairDecision,
+  type PodRepairInspectionDependencies,
+  type PodRepairInspectionResult,
+  type PodRepairNextAction,
+  type PodRepairObservedState,
+  type PodRepairProvenanceObservation,
+} from "./flows/federation/pod-repair.js";
+export {
+  applyPodRepairPreserveBoth,
+  type PodRepairApplyDependencies,
+  type PodRepairApplyResult,
+} from "./flows/federation/pod-repair-apply.js";
+export {
+  classifyDeterministicLegacyPodProvenance,
+  classifyReceiptBoundPodProvenance,
+  derivePodTransformationProofV1,
+  derivePodTransformationRecordIds,
+  digestPodTransformationEvidenceRecordV1,
+  digestPodTransformationProofV1,
+  isPodGeneratedArtifactPath,
+  parsePodTransformationProofV1,
+  POD_TRANSFORMATION_PROOF_SCHEMA_ID,
+  POD_TRANSFORMATION_PROOF_SCHEMA_VERSION,
+  serializePodTransformationProofV1,
+  type PodGeneratedByteTransitionV1,
+  type DerivePodTransformationProofArgs,
+  type PodTransformationProofV1,
+  type PodTransformationProvenance,
+  type PodTransformationRecordIds,
+} from "./flows/federation/pod-transformation-proof.js";
+export {
+  appendPodTransformationProof,
+  getPodTransformationLedgerPath,
+  getPodTransformationSubjectLedgerPath,
+  readAuthenticatedPodTransformationEvidence,
+  type AppendPodTransformationProofArgs,
+  type AppendPodTransformationProofResult,
+  type AuthenticatedPodTransformationEvidence,
+  type PodTransformationProofDependencies,
+} from "./flows/federation/pod-transformation-proof-ledger.js";
 export type {
   ReconcilePublishArgs,
   ReconcilePublishResult,
@@ -1409,8 +1702,49 @@ export type { AppendLedgerRecordArgs, AppendLedgerRecordResult } from "./yon/led
 export { walkLedger, parseLedgerFile } from "./yon/ledger-read.js";
 export type { WalkLedgerOptions } from "./yon/ledger-read.js";
 export type { LedgerRecord } from "./yon/ledger-read.js";
+export {
+  appendPodAlias,
+  ensurePodAliasAuthority,
+  foldPodAlias,
+  projectPodAlias,
+  readAllPodAliasRecords,
+  readPodAlias,
+} from "./yon/pod-alias-ledger.js";
+export type { PodAliasRecord } from "./yon/pod-alias-ledger.js";
+export {
+  acknowledgePromotedSyncProvenance,
+  getSyncLedgerDir,
+  getSyncPendingDir,
+  getSyncProvenanceStatus,
+  promotePendingSyncProvenance,
+  queueSyncProvenance,
+  readSyncProvenance,
+  sanitizeSyncProvenanceText,
+} from "./yon/sync-provenance.js";
+export type {
+  QueueSyncProvenanceArgs,
+  SyncProvenanceEvent,
+  SyncProvenanceStatus,
+} from "./yon/sync-provenance.js";
 // Fed-v2 Layer-1 (Phase C) — per-writer append-only subscription store.
-export { getWriterId, getWriterIdPath, parseWriterYon } from "./util/writer-id.js";
+export { getMachineId, getWriterId, getWriterIdPath, parseWriterYon } from "./util/writer-id.js";
+export {
+  deriveInitialMachineAlias,
+  fallbackMachineAlias,
+  foldMachines,
+  getMachineLedgerDir,
+  listMachineShards,
+  readAllMachineRecords,
+  readCurrentMachine,
+  recordCurrentMachineSyncSuccess,
+  registerCurrentMachine,
+  sanitizeMachineAlias,
+  updateCurrentMachineAlias,
+  appendSyncObserved,
+  foldSyncObserved,
+  readAllSyncObservedRecords,
+} from "./yon/machine-ledger.js";
+export type { MachineLedgerRecord, PublishedMachineSnapshot, RegisterCurrentMachineArgs, SyncObservedRecord } from "./yon/machine-ledger.js";
 export {
   appendSubscriptionRecord,
   appendSubscriptionActive,
@@ -1596,6 +1930,10 @@ export {
   getPodIdentityPath,
   readPodIdentity,
   writePodIdentity,
+  ensurePodIdentityMetadata,
+  deriveInitialPodAlias,
+  fallbackPodAlias,
+  sanitizePodAlias,
   resolvePodIdentity,
   reconcileIdentity,
   // provisional identity surface (local-first init +
@@ -1607,6 +1945,7 @@ export {
 } from "./util/identity-cache.js";
 export type {
   CachedIdentity,
+  PodIdentity,
   ResolvePodIdentityOptions,
   ReconcileIdentityOutcome,
 } from "./util/identity-cache.js";
@@ -1622,6 +1961,13 @@ export type { RestoreFlowArgs, RestoreFlowResult } from "./flows/restore.js";
 export { listSnapshotsFlow } from "./flows/list-snapshots.js";
 export type { ListSnapshotsArgs, ListSnapshotsResult } from "./flows/list-snapshots.js";
 export { DEFAULT_FREEZE_DURATION, formatRemaining, parseFreezeDuration } from "./util/duration.js";
+export { inspectWindowsGitPath } from "./util/paths.js";
+export type {
+  InspectWindowsGitPathOptions,
+  WindowsGitPathInspection,
+  WindowsGitPathRefusal,
+  WindowsGitPathRefusalCode,
+} from "./util/paths.js";
 export {
   FROZEN_LOCK_BASENAME,
   enforceNotFrozen,
@@ -1636,24 +1982,38 @@ export {
   branchExists,
   getCurrentBranch,
   getDefaultBranch,
+  GIT_COMMAND_TIMEOUT_MS,
+  GitRunTerminatedError,
+  GIT_LOCAL_MUTATION_POLICY,
+  GIT_READ_ONLY_POLICY,
+  GIT_REMOTE_OBSERVATION_POLICY,
   gitStatusPorcelain,
   hasUpstream,
   isGitRepo,
   listBranchesWithPrefix,
   runGit,
+  runGitLocalMutation,
+  runGitReadOnly,
+  runGitRemoteObservation,
   slugify,
   timestampForBranchName,
 } from "./util/git-run.js";
+
+export { PUBLICATION_LOCK_RECOVERY_QUARANTINE_MS } from "./flows/federation/destination-policy-lock.js";
 export type {
   AheadBehind,
   BranchInfo,
+  GitRunPolicy,
+  GitRunPolicyKind,
   GitRunOptions,
   GitRunResult,
+  GitTerminationEvidence,
   PorcelainStatus,
 } from "./util/git-run.js";
 
 export { buildVaultSubcommand, buildRegistrySubcommand } from "./vault-command.js";
 export { registerVaultVerbs } from "./register-verbs.js";
+export { buildReceiptCommand } from "./commands/receipt.js";
 
 // Block-B Commit 6 — automator verb-group surface.
 export { buildAutomatorCommand } from "./commands/automator.js";
@@ -1686,6 +2046,7 @@ export {
   MACHINE_ROLES,
   DEFAULT_MACHINE_ROLES,
   machineRegionConfigFlow,
+  machineAliasUpdateFlow,
   machineRoleDisableFlow,
   machineRoleEnableFlow,
   machineStatusFlow,
@@ -1699,6 +2060,7 @@ export type {
   MachineRegionConfigArgs,
 } from "./flows/machine-state.js";
 export { buildMachineCommand } from "./commands/machine.js";
+export { buildFederationCommand } from "./commands/federation.js";
 
 export { DEFAULT_TEMPLATE } from "./templates/index.js";
 export type { TemplateName } from "./templates/index.js";
@@ -1717,6 +2079,8 @@ export {
   validateFrontmatterBlock,
   gitCommitterDateToIso,
 } from "./templates/contract.js";
+export { buildVaultInstallProviderObjectsV1 } from "./install-provider.js";
+export type { VaultInstallProviderObjectV1 } from "./install-provider.js";
 export type {
   FrontmatterContractField,
   FrontmatterFieldSource,

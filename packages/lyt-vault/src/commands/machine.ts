@@ -18,6 +18,7 @@ import { Command } from "commander";
 
 import {
   MACHINE_ROLES,
+  machineAliasUpdateFlow,
   machineRegionConfigFlow,
   machineRoleDisableFlow,
   machineRoleEnableFlow,
@@ -36,9 +37,7 @@ export function buildMachineCommand(): Command {
     "Inspect + configure per-machine state — roles (client | automator-runner | mesh-syncer | llm-host) + region (handler-declared).",
   );
 
-  const role = new Command("role").description(
-    "Enable / disable a machine role (4-role enum).",
-  );
+  const role = new Command("role").description("Enable / disable a machine role (4-role enum).");
   role
     .command("enable")
     .description(`Add a role. Valid: ${MACHINE_ROLES.join(", ")}`)
@@ -74,6 +73,19 @@ export function buildMachineCommand(): Command {
   cmd.addCommand(config);
 
   cmd
+    .command("alias")
+    .description("Set this machine's synchronized, human-readable alias.")
+    .argument("<alias>", "New machine alias")
+    .option("--json", "Emit the updated machine record as JSON")
+    .action((alias: string, opts: MachineCliOpts) => {
+      const machine = machineAliasUpdateFlow(alias);
+      // eslint-disable-next-line no-console
+      console.log(
+        opts.json === true ? JSON.stringify(machine, null, 2) : `Machine alias: ${machine.alias}`,
+      );
+    });
+
+  cmd
     .command("status")
     .description("Print machine identity + active roles + region. --json emits structured output.")
     .option("--json", "Emit a JSON status object instead of the human-readable summary")
@@ -85,7 +97,17 @@ export function buildMachineCommand(): Command {
         return;
       }
       // eslint-disable-next-line no-console
-      console.log(`identity: ${s.identity}`);
+      console.log(`machine id:       ${s.machineId}`);
+      // eslint-disable-next-line no-console
+      console.log(`account identity: ${s.accountIdentity}`);
+      // eslint-disable-next-line no-console
+      console.log(`alias:            ${s.alias ?? "(unregistered)"}`);
+      // eslint-disable-next-line no-console
+      console.log(`first seen:       ${s.firstSeen ?? "(unregistered)"}`);
+      // eslint-disable-next-line no-console
+      console.log(`last seen:        ${s.lastSeen ?? "(unregistered)"}`);
+      // eslint-disable-next-line no-console
+      console.log(`last sync:        ${s.lastSync ?? "(never)"}`);
       // eslint-disable-next-line no-console
       console.log(`roles:    ${s.roles.join(", ")}`);
       // eslint-disable-next-line no-console

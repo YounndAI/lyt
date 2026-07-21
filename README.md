@@ -17,7 +17,7 @@
   <a href="#install">Install</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="LICENSE">Apache 2.0</a> ·
-  <a href="TRADEMARK.md">Trademark Policy</a> ·
+<a href="TRADEMARK.md">Trademark Policy</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
@@ -33,9 +33,9 @@
 
 ## What is Lyt?
 
-**Lyt** turns a folder of markdown notes into a Git-native vault that can join a mesh of other vaults across people and organizations — **mint vaults you own, weave meshes you share, forge Your Pod.** Each vault is one Git repo. The mesh is the graph of declared edges across vaults. A small libSQL index sits beside the markdown for fast `lyt vault list` / `lyt mesh status` reads and for search, and a YON declaration file (`.lyt/vault.yon`) is the source of truth for the mesh shape.
+**Lyt** turns a folder of markdown notes into a Git-native vault that can join a mesh of other vaults across people and organizations — **mint vaults you own, weave meshes you share, forge Your Pod.** Each vault is one Git repo. The mesh is the graph of declared edges across vaults. A small libSQL index sits beside the markdown for fast `lyt vault list` / `lyt mesh status` reads and for search, and a YON (YounndAI Object Notation™) declaration file (`.lyt/vault.yon`) is the source of truth for the mesh shape.
 
-A vault's identity is its **`rid`** (a UUIDv7 minted on this machine); the human-readable `{mesh}/{vault}` name is *computed* from the vault's home mesh plus its leaf, so renaming or moving a vault updates the name automatically while the `rid` stays stable. Names, bare leaves, pod-local aliases, and `lyt:vault:<host>/<owner>/<repo>` origin coordinates all resolve to the `rid`.
+A vault's identity is its **`rid`** (a UUIDv7 minted on this machine); the human-readable `{mesh}/{vault}` name is _computed_ from the vault's home mesh plus its leaf, so renaming or moving a vault updates the name automatically while the `rid` stays stable. Names, bare leaves, pod-local aliases, and `lyt:vault:<host>/<owner>/<repo>` origin coordinates all resolve to the `rid`.
 
 Lyt is **AI-first by design**: an AI agent is a first-class operator of your knowledge, not a bolted-on feature. Every vault and mesh speaks [YON](https://yon.younndai.com) — structured records any agent reads directly — and the same operation set is exposed to you via the CLI and to agents via harness skills and an MCP server. Lyt is the reference implementation of an AI-first approach we're working out in the open.
 
@@ -64,7 +64,7 @@ npm install -g @younndai/lyt@alpha
 lyt init                   # interactive setup wizard
 ```
 
-The wizard detects and installs Node, the GitHub CLI, and your agent runtime (Claude Code or Codex); runs `gh auth login`; installs the Lyt skills and the agent manual; probes for an existing pod on your handle (cross-machine adopt-detect); creates your `personal` mesh and first vault; initialises your pod repo; and captures a welcome note.
+The wizard verifies prerequisites and existing GitHub authentication, installs the Lyt skills and agent manual, probes for an existing pod (cross-machine adopt-detect), and creates or adopts one local pod/mesh/main-vault checkpoint. It never publishes or creates demo content.
 
 Pass `--dry-run` to preview every phase without filesystem writes or spawn invocations.
 
@@ -73,7 +73,7 @@ Pass `--dry-run` to preview every phase without filesystem writes or spawn invoc
 ```bash
 # 1. Initialize a vault. `{mesh}/{vault}` is create-if-missing: it makes the
 #    `alex` mesh if absent, then the `main` vault.
-lyt vault init alex/main \
+lyt vault init alex/main --target github:user/alex \
     --description "Alex's master vault" \
     --topic personal
 
@@ -83,6 +83,7 @@ lyt search "idea"          # ranked across your whole pod
 
 # 3. Publish only this vault when you are ready.
 lyt sync --vault alex/main
+lyt sync --check --vault alex/main --json # exact one-vault, zero-mutation check
 
 # 4. On another machine, clone your configured vault sources.
 lyt mesh clone-all
@@ -92,6 +93,12 @@ obsidian ~/lyt/vaults/alex/main
 ```
 
 For a deeper tour, run `lyt help getting-started` after install.
+
+Mesh names and GitHub owners are independent. New vaults snapshot their mesh's
+destination policy unless `--target` or `--local` overrides it. Creation never
+publishes: Receipt V1 reports terminal status, effective destination,
+checkpoint/mutation evidence, and exact next-sync evidence. Policy source is
+available afterward through read-only vault/mesh info.
 
 ## Search
 
@@ -132,15 +139,15 @@ Run `lyt help` for the full verb-group view, `lyt help <topic>` for any of the t
 
 ## Packages
 
-| Package | Purpose |
-|---|---|
-| [`@younndai/lyt`](packages/lyt/README.md) | Meta package — pulls in the others and ships the unified `lyt` binary. |
-| [`@younndai/lyt-vault`](packages/lyt-vault/README.md) | Vault primitive: `init`, `adopt`, `capture`, `search`, the libSQL index, `help`, `doctor`, `pattern`, the priming-file scaffold. |
-| [`@younndai/lyt-mesh`](packages/lyt-mesh/README.md) | Mesh layer: `mesh status`, `clone-all`, `subscribe`, `validate`, `init`/`join`. |
-| [`@younndai/lyt-skills`](packages/lyt-skills/README.md) | Harness skills (Claude Code, Codex, MCP clients) wrapping the pattern runtime. |
-| [`@younndai/lyt-mcp`](packages/lyt-mcp/README.md) | MCP server exposing the operation set as MCP tools for local agent use. |
-| [`@younndai/lyt-runner`](packages/lyt-runner/README.md) | Automator runtime — the operation registry the CLI and skills dispatch against. |
-| [`@younndai/lyt-llm`](packages/lyt-llm/README.md) | LLM gateway — multi-source routing behind a single surface. |
+| Package                                                 | Purpose                                                                                                                          |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| [`@younndai/lyt`](packages/lyt/README.md)               | Meta package — pulls in the others and ships the unified `lyt` binary.                                                           |
+| [`@younndai/lyt-vault`](packages/lyt-vault/README.md)   | Vault primitive: `init`, `adopt`, `capture`, `search`, the libSQL index, `help`, `doctor`, `pattern`, the priming-file scaffold. |
+| [`@younndai/lyt-mesh`](packages/lyt-mesh/README.md)     | Mesh layer: `mesh status`, `clone-all`, `subscribe`, `validate`, `init`/`join`.                                                  |
+| [`@younndai/lyt-skills`](packages/lyt-skills/README.md) | Harness skills (Claude Code, Codex, MCP clients) wrapping the pattern runtime.                                                   |
+| [`@younndai/lyt-mcp`](packages/lyt-mcp/README.md)       | MCP server exposing the operation set as MCP tools for local agent use.                                                          |
+| [`@younndai/lyt-runner`](packages/lyt-runner/README.md) | Automator runtime — the operation registry the CLI and skills dispatch against.                                                  |
+| [`@younndai/lyt-llm`](packages/lyt-llm/README.md)       | LLM gateway — multi-source routing behind a single surface.                                                                      |
 
 ## License
 
@@ -154,7 +161,7 @@ Contributions are welcome under a signed Contributor License Agreement. See [CON
 
 ## About YounndAI
 
-**YounndAI™ — You and AI, unified.** (pronounced *"yoon-dye"*)
+**YounndAI™ — You and AI, unified.** (pronounced _"yoon-dye"_)
 
 A philosophy of intelligence: building with intention, so humans and machines
 think together without losing what makes either whole.

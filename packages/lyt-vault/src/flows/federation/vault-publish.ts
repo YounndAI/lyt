@@ -15,9 +15,10 @@
  */
 
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import type { Client } from "@libsql/client";
 
 import { resolveConfig } from "../../util/config.js";
-import { vaultRepoName } from "../../util/federation-paths.js";
 import { resolveRemoteUrl } from "../../util/remote-url.js";
 import { isValidGhHandle } from "../../util/identity.js";
 import {
@@ -31,7 +32,23 @@ import {
   type GitRunResult,
 } from "../../util/git-run.js";
 import { BRAND_TOPICS, formatRepoDescription } from "../../scaffold/github-defaults.js";
-import type { VaultRow } from "../../registry/repo.js";
+import { closeRegistry, openRegistry } from "../../registry/client.js";
+import { getMeshByRid } from "../../registry/meshes-repo.js";
+import { getVaultByRid, type VaultRow } from "../../registry/repo.js";
+import {
+  observePublicationPermission,
+  type PublicationPermissionObserver,
+} from "./publication-permission.js";
+import {
+  loadDestinationPolicyContext,
+  resolveCanonicalOwnedVaultPublicationAuthority,
+  type CanonicalVaultPublicationAuthority,
+} from "./destination-policy-service.js";
+import {
+  withCanonicalVaultPublicationAttempt,
+  type CanonicalVaultPublicationAttemptContext,
+} from "./publication-authority.js";
+import { withFreshPublicationPermission } from "./publication-authority.js";
 
 // Brief B (§3-§6) — the SHARED vault-publish materialization, used by both
 // init/adopt (B.1, LOCAL only — push + gh-create held) and `lyt sync` (B.2,
@@ -61,6 +78,15 @@ export interface MaterializeVaultOptions {
   // never the commit author. Validated against isValidGhHandle before it can
   // reach a git-remote/gh spawn.
   repoOwner?: string | undefined;
+  /** Exact semantic owner kind from the effective destination-policy winner. */
+  repoTargetKind?: "user" | "org" | undefined;
+  // Phase A authority label. Existing 0.13 library callers may omit it for the
+  // compatibility window; every lifecycle caller in this tree supplies it.
+  repoOwnerAuthority?:
+    | "effective-owned-destination"
+    | "legacy-origin-hint"
+    | "local-only"
+    | undefined;
   // Outward gh-create. B.1 = false (held); B.2 = true (post-consent). Default false.
   createRemoteIfMissing?: boolean | undefined;
   // Outward push. B.1 = false (held); B.2 = true (post-consent). Default false.
@@ -77,6 +103,13 @@ export interface MaterializeVaultOptions {
   visibility?: FederationRepoVisibility | undefined;
   ghClient?: FederationGhClient | undefined;
   runGit?: GitRunner | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
+  /** One id binds every fresh observation to this materialization attempt. */
+  permissionAttemptId?: string | undefined;
+  /** Reuse an already-open registry connection; policy is still resolved here. */
+  registryDb?: Client | undefined;
+  /** RID-addressed pod-manifest mapping; display name is never publication identity. */
+  repoName?: string | undefined;
 }
 
 export interface MaterializeVaultResult {
@@ -118,8 +151,11 @@ export async function materializeVaultPublishable(
   const { handle } = opts;
   // B2a — the repo owner (gh-create + origin URL). Defaults to the federation
   // handle; an org-mesh vault passes the mesh's org push_target.
-  const repoOwner = opts.repoOwner ?? handle;
-  const repoName = vaultRepoName(vault.name);
+  let repoName = opts.repoName ?? "";
+  let repoOwner = opts.repoOwner ?? handle;
+  let repoTargetKind = opts.repoTargetKind ?? (repoOwner === handle ? "user" : "org");
+  const permissionObserver = opts.permissionObserver ?? observePublicationPermission;
+  const permissionAttemptId = opts.permissionAttemptId ?? randomUUID();
   const warnings: string[] = [];
 
   const result: MaterializeVaultResult = {
@@ -161,7 +197,68 @@ export async function materializeVaultPublishable(
     return { ...result, skipped: true, skippedReason: "path-missing" };
   }
 
+  const targetMutation = setRemote || createRemote || push;
+  let publicationAuthority:
+    | { authority: CanonicalVaultPublicationAuthority; podRid: string; podRoot?: string }
+    | undefined;
+  if (targetMutation) {
+    publicationAuthority = await resolveMaterializeDestinationPolicy(vault, opts.registryDb);
+    if (publicationAuthority === undefined) {
+      return { ...result, skipped: true, skippedReason: "destination-policy-required" };
+    }
+    const { destination } = publicationAuthority.authority;
+    if (
+      (opts.repoOwner !== undefined &&
+        opts.repoOwner.toLowerCase() !== destination.owner.toLowerCase()) ||
+      (opts.repoTargetKind !== undefined && opts.repoTargetKind !== destination.targetKind) ||
+      (opts.repoName !== undefined &&
+        opts.repoName.toLowerCase() !== destination.repositoryName.toLowerCase()) ||
+      (opts.repoOwnerAuthority !== undefined &&
+        opts.repoOwnerAuthority !== "effective-owned-destination")
+    ) {
+      return { ...result, skipped: true, skippedReason: "destination-policy-drift" };
+    }
+    repoOwner = destination.owner;
+    repoTargetKind = destination.targetKind;
+    repoName = destination.repositoryName;
+    result.repoName = repoName;
+  }
+  if (targetMutation && repoName.length === 0) {
+    return { ...result, skipped: true, skippedReason: "destination-policy-required" };
+  }
+  const repository = `${repoOwner}/${repoName}`;
+  const permissionTarget = `github:${repoTargetKind}/${repoOwner}`;
+  const authorized = <T>(
+    capability: "repository-create" | "repository-push",
+    action: (context: CanonicalVaultPublicationAttemptContext) => Promise<T>,
+  ) => {
+    if (publicationAuthority === undefined) {
+      throw new Error("Publication refused: canonical destination policy is unavailable.");
+    }
+    return withCanonicalVaultPublicationAttempt({
+      ...(opts.registryDb === undefined ? {} : { db: opts.registryDb }),
+      vaultRid: vault.rid,
+      podRid: publicationAuthority.podRid,
+      ...(publicationAuthority.podRoot === undefined
+        ? {}
+        : { podRoot: publicationAuthority.podRoot }),
+      authority: publicationAuthority.authority,
+      expectedRepository: repository,
+      capability,
+      target: permissionTarget,
+      repository,
+      actor: handle,
+      attemptId: permissionAttemptId,
+      permissionObserver,
+      action,
+    });
+  };
+
   const expectedCoordinate = `${repoOwner}/${repoName}`;
+  // Capture the immutable publication destination from the canonical policy
+  // winner. The push below uses this URL directly: repository-local pushurl,
+  // pushRemote, and pushDefault configuration are never consulted.
+  const canonicalPushUrl = resolveRemoteUrl(repoOwner, repoName);
   // Shared-boundary guard: every caller (scoped or pod-wide) passes through
   // this materializer. Validate an existing origin before any GitHub action or
   // remote mutation, so a vault accidentally wired to another repository can
@@ -223,7 +320,19 @@ export async function materializeVaultPublishable(
   // not a merely intended URL.
   if (setRemote && initialOrigin.code !== 0) {
     const originUrl = resolveRemoteUrl(repoOwner, repoName);
-    await git(["remote", "add", "origin", originUrl], { cwd: vault.path });
+    try {
+      const capability = createRemote ? "repository-create" : "repository-push";
+      await authorized(capability, () =>
+        git(["remote", "add", "origin", originUrl], { cwd: vault.path }),
+      );
+    } catch (error) {
+      return {
+        ...result,
+        skipped: true,
+        skippedReason: "permission-unverified",
+        warnings: [errMsg(error)],
+      };
+    }
     result.remoteSet = true;
     const installed = await git(["remote", "get-url", "origin"], {
       cwd: vault.path,
@@ -250,10 +359,25 @@ export async function materializeVaultPublishable(
       // not the personal `handle`.
       const exists = await gh.repoExists(repoOwner, repoName);
       if (!exists) {
-        await gh.createRepo(repoOwner, repoName, visibility, formatRepoDescription(vault.name));
+        try {
+          await authorized("repository-create", (attempt) =>
+            attempt.runOutwardChild(() =>
+              gh.createRepo(repoOwner, repoName, visibility, formatRepoDescription(vault.name)),
+            ),
+          );
+        } catch (error) {
+          return {
+            ...result,
+            skipped: true,
+            skippedReason: "permission-unverified",
+            warnings: [errMsg(error)],
+          };
+        }
         result.repoCreated = true;
         try {
-          await gh.setRepoTopics(repoOwner, repoName, BRAND_TOPICS);
+          await authorized("repository-push", (attempt) =>
+            attempt.runOutwardChild(() => gh.setRepoTopics(repoOwner, repoName, BRAND_TOPICS)),
+          );
         } catch (err) {
           warnings.push(`topic-set failed for ${repoOwner}/${repoName}: ${errMsg(err)}`);
         }
@@ -273,10 +397,7 @@ export async function materializeVaultPublishable(
     });
     const currentCoordinate =
       currentOrigin.code === 0 ? normalizeGitHubRepoCoordinate(currentOrigin.stdout) : null;
-    if (
-      currentCoordinate === null ||
-      !sameRepoCoordinate(currentCoordinate, expectedCoordinate)
-    ) {
+    if (currentCoordinate === null || !sameRepoCoordinate(currentCoordinate, expectedCoordinate)) {
       return {
         ...result,
         skipped: true,
@@ -285,23 +406,84 @@ export async function materializeVaultPublishable(
       };
     }
     result.remoteCoordinate = currentCoordinate;
-    const pushed = await git(["push", "-u", "origin", "main"], {
-      cwd: vault.path,
-      allowFailure: true,
-    });
-    if (pushed.code === 0) {
-      result.pushed = true;
-    } else {
-      warnings.push(`push failed for ${vault.name}: ${pushed.stderr.trim().slice(0, 200)}`);
+    try {
+      const pushed = await authorized("repository-push", (attempt) =>
+        attempt.runOutwardChild(() =>
+          git(["push", canonicalPushUrl, "HEAD:refs/heads/main"], {
+            cwd: vault.path,
+            allowFailure: true,
+          }),
+        ),
+      );
+      if (pushed.code === 0) {
+        result.pushed = true;
+        // `-u` would reintroduce a mutable remote-name dependency into the
+        // outward command. Establish ordinary-sync tracking metadata only
+        // after the immutable-URL push succeeds and only when no upstream is
+        // already configured. Ordinary sync revalidates this binding before
+        // every fetch/pull.
+        const upstream = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
+          cwd: vault.path,
+          allowFailure: true,
+        });
+        if (upstream.code !== 0) {
+          await git(["config", "branch.main.remote", "origin"], {
+            cwd: vault.path,
+            allowFailure: true,
+          });
+          await git(["config", "branch.main.merge", "refs/heads/main"], {
+            cwd: vault.path,
+            allowFailure: true,
+          });
+        }
+      } else {
+        warnings.push(`push failed for ${vault.name}: ${pushed.stderr.trim().slice(0, 200)}`);
+      }
+    } catch (error) {
+      return {
+        ...result,
+        skipped: true,
+        skippedReason: "permission-unverified",
+        warnings: [errMsg(error)],
+      };
     }
   }
 
   return result;
 }
 
+async function resolveMaterializeDestinationPolicy(
+  suppliedVault: VaultRow,
+  suppliedDb?: Client,
+): Promise<
+  { authority: CanonicalVaultPublicationAuthority; podRid: string; podRoot?: string } | undefined
+> {
+  const db = suppliedDb ?? (await openRegistry());
+  try {
+    const vault = await getVaultByRid(db, suppliedVault.rid);
+    if (vault === null) return undefined;
+    const mesh = vault.homeMeshRid === null ? null : await getMeshByRid(db, vault.homeMeshRid);
+    const context = await loadDestinationPolicyContext(db);
+    if (context.podRid === null) return undefined;
+    const authority = resolveCanonicalOwnedVaultPublicationAuthority(vault, mesh, context);
+    return authority === null
+      ? undefined
+      : {
+          authority,
+          podRid: context.podRid,
+          ...(context.podRoot === undefined ? {} : { podRoot: context.podRoot }),
+        };
+  } finally {
+    if (suppliedDb === undefined) await closeRegistry(db);
+  }
+}
+
 /** Normalize supported GitHub HTTPS/SSH/git URL forms to owner/repo. */
 export function normalizeGitHubRepoCoordinate(url: string): string | null {
-  const value = url.trim().replace(/[\\/]+$/, "").replace(/\.git$/i, "");
+  const value = url
+    .trim()
+    .replace(/[\\/]+$/, "")
+    .replace(/\.git$/i, "");
   const match =
     /^(?:https?|git):\/\/github\.com\/([^/]+)\/([^/]+)$/i.exec(value) ??
     /^ssh:\/\/(?:git@)?github\.com\/([^/]+)\/([^/]+)$/i.exec(value) ??
@@ -316,6 +498,10 @@ function sameRepoCoordinate(actual: string, expected: string): boolean {
 export interface CommitPodRepoOptions {
   push?: boolean | undefined; // B.1 = false (held); B.2 = true. Default false.
   runGit?: GitRunner | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
+  permissionActor?: string | undefined;
+  permissionRepository?: string | undefined;
+  permissionAttemptId?: string | undefined;
 }
 
 export interface CommitPodRepoResult {
@@ -367,6 +553,31 @@ export async function commitPodRepo(
   }
 
   if (push) {
+    const actor = opts.permissionActor;
+    const repository = opts.permissionRepository;
+    const repositoryParts = repository?.split("/") ?? [];
+    const owner = repositoryParts.length === 2 ? repositoryParts[0] : undefined;
+    if (
+      actor === undefined ||
+      repository === undefined ||
+      owner === undefined ||
+      owner.toLowerCase() !== actor.toLowerCase() ||
+      repositoryParts[1] !== "lyt-pod"
+    ) {
+      warnings.push("pod push held: publication policy was not bound to this pod destination");
+      return result;
+    }
+    const canonicalUrl = `https://github.com/${repository}.git`;
+    const originBefore = await git(["remote", "get-url", "origin"], {
+      cwd: podDir,
+      allowFailure: true,
+    });
+    const originCoordinate =
+      originBefore.code === 0 ? normalizeGitHubRepoCoordinate(originBefore.stdout) : null;
+    if (originCoordinate === null || !sameRepoCoordinate(originCoordinate, repository)) {
+      warnings.push(`pod push held: origin does not match ${repository}`);
+      return result;
+    }
     const hasUpstream = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
       cwd: podDir,
       allowFailure: true,
@@ -378,14 +589,37 @@ export async function commitPodRepo(
     // parse fails SAFE: an unreadable rev-list (code != 0) is treated as
     // possibly-behind (→ attempt pull-rebase) rather than assume-not-behind.
     if (hasUpstream.code === 0) {
-      await git(["fetch", "--quiet"], { cwd: podDir, allowFailure: true });
-      const ab = await git(["rev-list", "--left-right", "--count", "HEAD...@{u}"], {
+      const fetched = await withFreshPublicationPermission({
+        capability: "repository-push",
+        target: `github:user/${owner}`,
+        repository,
+        actor,
+        attemptId: opts.permissionAttemptId ?? randomUUID(),
+        policyEpoch: 0,
+        permissionObserver: opts.permissionObserver ?? observePublicationPermission,
+        publicationSubject: {
+          identity: `pod:${repository.toLowerCase()}`,
+          podRoot: podDir,
+        },
+        action: (attempt) =>
+          attempt.runOutwardChild(() =>
+            git(["fetch", "--quiet", canonicalUrl, "refs/heads/main"], {
+              cwd: podDir,
+              allowFailure: true,
+            }),
+          ),
+      });
+      if (fetched.code !== 0) {
+        warnings.push(`pod fetch failed: ${fetched.stderr.trim().slice(0, 200)}`);
+        return result;
+      }
+      const ab = await git(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], {
         cwd: podDir,
         allowFailure: true,
       });
       const behind = ab.code === 0 ? Number(ab.stdout.trim().split(/\s+/)[1] ?? 0) || 0 : 1;
       if (behind > 0) {
-        const rebased = await git(["pull", "--rebase", "--quiet"], {
+        const rebased = await git(["rebase", "--quiet", "FETCH_HEAD"], {
           cwd: podDir,
           allowFailure: true,
         });
@@ -398,12 +632,70 @@ export async function commitPodRepo(
         }
       }
     }
-    const args = hasUpstream.code === 0 ? ["push"] : ["push", "-u", "origin", "main"];
-    const pushed = await git(args, { cwd: podDir, allowFailure: true });
-    if (pushed.code === 0) {
-      result.pushed = true;
-    } else {
-      warnings.push(`pod push failed: ${pushed.stderr.trim().slice(0, 200)}`);
+    const attemptId = opts.permissionAttemptId ?? randomUUID();
+    try {
+      const pushed = await withFreshPublicationPermission({
+        capability: "repository-push",
+        target: `github:user/${owner}`,
+        repository,
+        actor,
+        attemptId,
+        policyEpoch: 0,
+        permissionObserver: opts.permissionObserver ?? observePublicationPermission,
+        publicationSubject: {
+          identity: `pod:${repository.toLowerCase()}`,
+          podRoot: podDir,
+        },
+        action: async (attempt) => {
+          const currentOrigin = await git(["remote", "get-url", "origin"], {
+            cwd: podDir,
+            allowFailure: true,
+          });
+          const currentCoordinate =
+            currentOrigin.code === 0 ? normalizeGitHubRepoCoordinate(currentOrigin.stdout) : null;
+          if (currentCoordinate === null || !sameRepoCoordinate(currentCoordinate, repository)) {
+            throw new Error(`pod origin changed before push; expected ${repository}`);
+          }
+          return attempt.runOutwardChild(() =>
+            git(["push", canonicalUrl, "HEAD:refs/heads/main"], {
+              cwd: podDir,
+              allowFailure: true,
+            }),
+          );
+        },
+      });
+      if (pushed.code === 0) {
+        result.pushed = true;
+        const originAfter = await git(["remote", "get-url", "origin"], {
+          cwd: podDir,
+          allowFailure: true,
+        });
+        const originAfterCoordinate =
+          originAfter.code === 0 ? normalizeGitHubRepoCoordinate(originAfter.stdout) : null;
+        if (
+          originAfterCoordinate !== null &&
+          sameRepoCoordinate(originAfterCoordinate, repository)
+        ) {
+          const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"], {
+            cwd: podDir,
+            allowFailure: true,
+          });
+          const branchName = branch.stdout.trim();
+          if (branch.code === 0 && branchName.length > 0 && !branchName.startsWith("-")) {
+            await git(["config", `branch.${branchName}.remote`, "origin"], {
+              cwd: podDir,
+              allowFailure: true,
+            });
+            await git(["config", `branch.${branchName}.merge`, "refs/heads/main"], {
+              cwd: podDir,
+              allowFailure: true,
+            });
+          }
+        }
+      } else warnings.push(`pod push failed: ${pushed.stderr.trim().slice(0, 200)}`);
+    } catch (error) {
+      warnings.push(`pod push held: ${errMsg(error)}`);
+      return result;
     }
   }
 

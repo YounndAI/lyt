@@ -97,6 +97,16 @@ function parseFederation(content: string): FederationRecord {
     throw new Error("pod.yon is missing a @FEDERATION rid=fed:... declaration");
   }
   const fedRidHex = ridMatch[1]!;
+  const podRidDeclared = /\|\s*pod_rid=/.test(content);
+  const podRidMatch = content.match(/\|\s*pod_rid=pod:([0-9a-f]{32})(?=\s|\||$)/);
+  if (podRidDeclared && podRidMatch === null) {
+    throw new Error("pod.yon has a malformed pod_rid declaration");
+  }
+  if (podRidMatch !== null && podRidMatch[1] !== fedRidHex) {
+    throw new Error(
+      `pod.yon identity mismatch: @FEDERATION rid ${fedRidHex} does not match pod_rid ${podRidMatch[1]}`,
+    );
+  }
 
   const handle = readQuotedField(content, "handle") ?? "";
   const visibilityRaw = readBareField(content, "visibility");

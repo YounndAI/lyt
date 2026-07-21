@@ -15,18 +15,33 @@
  */
 
 import type { Client } from "@libsql/client";
+import { dirname, join } from "node:path";
 
-import { closeRegistry, openRegistry } from "../registry/client.js";
+import { closeRegistry, getRegistryPath, openRegistry } from "../registry/client.js";
+import { listFederationStates, upsertFederationState } from "../registry/federation-state.js";
 import { getMeshByName } from "../registry/meshes-repo.js";
 import { getVaultByExactName } from "../registry/repo.js";
-import { assertSafeCloneName } from "../util/federation-paths.js";
-import { uuid7BytesToHex } from "../util/uuid7.js";
+import { assertSafeCloneName, getFederationRoot, vaultRepoName } from "../util/federation-paths.js";
+import { getHandleFromIdentity } from "../util/identity.js";
+import { resolveVaultPath } from "../util/paths.js";
+import {
+  hexToUuid7Bytes,
+  newUuidv7Bytes,
+  uuid7BytesToDashedString,
+  uuid7BytesToHex,
+} from "../util/uuid7.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
-import { checkPushPermission, type GhExecutor } from "../util/gh-discover.js";
+import type { GhExecutor } from "../util/gh-discover.js";
+import { observeActiveActor, type ActiveActorObservation } from "../op/active-actor-observation.js";
+import {
+  observePublicationPermission,
+  type PublicationPermissionObserver,
+} from "./federation/publication-permission.js";
 import type { MeshPushKind } from "../yon/mesh-write.js";
 import { cloneVaultFlow } from "./clone.js";
 import { discoverFlow, UNCLUSTERED_MESH_NAME, type Cluster } from "./discover.js";
 import { meshInitFlow, type MeshInitOptions } from "./mesh-init.js";
+import { derivePlannedCreationRid, resolveCreationPlanV1 } from "./creation-plan.js";
 
 // v1.C.3 — `lyt mesh adopt --cluster <name>`.
 //
@@ -35,10 +50,8 @@ import { meshInitFlow, type MeshInitOptions } from "./mesh-init.js";
 // 1. Resolve the cluster (caller-supplied or via discoverFlow walk).
 // 2. Refuse if the cluster's main vault is already registered locally
 // (ClusterAlreadyRegisteredError → exit 2 per the ratified default).
-// 3. Refuse if the user lacks push permission to `{owner}/main`
-// (PushPermissionDeniedError → exit 2). Falls back to a live probe
-// when the cluster's pushPermitted flag is null (e.g. caller
-// supplied a Cluster from a non-probing source).
+// 3. Observe fresh attempt-bound actor/permission evidence for diagnostics,
+// but never treat it (or cached discover evidence) as local-create authority.
 // 4. Scaffold the missing main vault via meshInitFlow per the ratified default
 // (v1.B.1 mesh-init primitive — composition over write-side machinery).
 // 5. For each non-main cluster member, clone via cloneVaultFlow with
@@ -79,6 +92,37 @@ export interface AdoptClusterCloneResult {
 // Injectable seam for cluster-member clones (default = cloneVaultFlow).
 // Tests provide a fake that materialises the vault locally without git.
 export type AdoptCloneFn = (args: AdoptClusterCloneArgs) => Promise<AdoptClusterCloneResult>;
+export type AdoptActorObserver = (args: { attemptId: string }) => Promise<ActiveActorObservation>;
+
+export interface MeshAdoptCreationEvidence {
+  actor: ActiveActorObservation;
+  permission: Awaited<ReturnType<PublicationPermissionObserver>> | null;
+}
+
+export async function observeMeshAdoptCreationEvidence(args: {
+  attemptId: string;
+  target: string;
+  repository: string;
+  actorObserver: AdoptActorObserver;
+  permissionObserver: PublicationPermissionObserver;
+}): Promise<MeshAdoptCreationEvidence> {
+  const actor = await args.actorObserver({ attemptId: args.attemptId });
+  const permission =
+    actor.result === "verified"
+      ? await args.permissionObserver({
+          capability: "repository-create",
+          target: args.target,
+          repository: args.repository,
+          actor: actor.actor,
+          attemptId: args.attemptId,
+          policyEpoch: 0,
+        })
+      : null;
+  if (actor.attempt_id !== args.attemptId || permission?.attempt_id !== args.attemptId) {
+    throw new Error("Mesh adoption evidence is not bound to the current attempt.");
+  }
+  return { actor, permission };
+}
 
 export interface AdoptClusterArgs {
   clusterName: string;
@@ -92,6 +136,10 @@ export interface AdoptClusterArgs {
   registryDb?: Client | undefined;
   // Test seam for the discoverFlow walk + push-permission probe.
   ghExecutor?: GhExecutor | undefined;
+  actorObserver?: AdoptActorObserver | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
+  /** Stable logical operation id supplied by resumable command adapters. */
+  operationId?: string | undefined;
   // Forwarded to meshInitFlow for the main-vault scaffold.
   meshGhClient?: MeshGhClient | undefined;
   // Test seam for cluster member clones.
@@ -158,8 +206,7 @@ export class ClusterAlreadyRegisteredError extends Error {
   // safe member is already adopted (a plain idempotent re-run).
   readonly missingMembers: string[];
   constructor(clusterName: string, missingMembers: string[] = []) {
-    const base =
-      `lyt mesh adopt: cluster '${clusterName}' is already registered locally; main vault present.`;
+    const base = `lyt mesh adopt: cluster '${clusterName}' is already registered locally; main vault present.`;
     // B′ — when members are still missing, name them + how to add each one so
     // the user is never left STUCK ("already registered", no path forward). A
     // clean auto-resume was deliberately NOT chosen: it would rewrite the
@@ -249,10 +296,8 @@ function isTransientCloneError(err: unknown): boolean {
   ) {
     return false;
   }
-  return (
-    /git clone failed|clone target already exists|could not resolve host|could not read from remote|remote end hung up|connection (?:refused|reset|timed out)|failed to connect|network is (?:unreachable|down)|early eof|rpc failed|the remote repository|repository not found|operation timed out/i.test(
-      err.message,
-    )
+  return /git clone failed|clone target already exists|could not resolve host|could not read from remote|remote end hung up|connection (?:refused|reset|timed out)|failed to connect|network is (?:unreachable|down)|early eof|rpc failed|the remote repository|repository not found|operation timed out/i.test(
+    err.message,
   );
 }
 
@@ -314,17 +359,16 @@ export async function meshAdoptClusterFlow(args: AdoptClusterArgs): Promise<Adop
   const startedAt = Date.now();
   const callerSupplied = args.registryDb !== undefined;
   const db = args.registryDb ?? (await openRegistry());
-  const owner = args.owner ?? args.clusterName;
+  const discoveryOwner = args.owner ?? args.clusterName;
   const pushKind: MeshPushKind = args.pushKind ?? "handle";
   const cloneFn = args.cloneFn ?? defaultAdoptCloneFn;
-  const noPush = args.noPush === true;
 
   try {
     // 1. Resolve the cluster (caller-supplied or via internal discoverFlow).
     let cluster: Cluster | undefined = args.cluster;
     if (cluster === undefined) {
       const discover = await discoverFlow({
-        owner,
+        owner: discoveryOwner,
         registryDb: db,
         ...(args.ghExecutor !== undefined ? { ghExecutor: args.ghExecutor } : {}),
       });
@@ -335,6 +379,10 @@ export async function meshAdoptClusterFlow(args: AdoptClusterArgs): Promise<Adop
     }
     if (cluster.isUnclustered || cluster.meshName === UNCLUSTERED_MESH_NAME) {
       throw new AdoptClusterNotFoundError(args.clusterName);
+    }
+    const owner = args.owner ?? cluster.owner;
+    if (owner === null) {
+      throw new Error(`Discovered cluster '${args.clusterName}' has no canonical GitHub owner.`);
     }
 
     // 2. Pre-check: cluster-already-registered (cluster flag + live DB check).
@@ -358,26 +406,124 @@ export async function meshAdoptClusterFlow(args: AdoptClusterArgs): Promise<Adop
       );
     }
 
-    // 3. Pre-check: push-permission. cluster.pushPermitted may be null
-    // (probe skipped at discover time); fall back to a live probe.
-    let pushPermitted: boolean | null = cluster.pushPermitted;
-    if (pushPermitted === null) {
-      pushPermitted = await checkPushPermission({
-        owner,
-        repo: "main",
-        ...(args.ghExecutor !== undefined ? { gh: args.ghExecutor } : {}),
-      });
-    }
-    if (pushPermitted === false) {
-      throw new PushPermissionDeniedError(owner, args.clusterName);
-    }
+    // 3. Observe current identity/capability for this attempt. Cached
+    // discover-time pushPermitted is display evidence only and never gates
+    // local adoption. Adoption's durable destination intent remains local.
+    const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+    const operationId = args.operationId ?? attemptId;
+    const targetOwner = owner.toLowerCase();
+    const target = `github:${pushKind === "org" ? "org" : "user"}/${targetOwner}`;
+    const evidence = await observeMeshAdoptCreationEvidence({
+      attemptId,
+      target,
+      repository: `${targetOwner}/${vaultRepoName(`${args.clusterName}/main`)}`,
+      actorObserver:
+        args.actorObserver ??
+        ((input) =>
+          observeActiveActor({
+            ...input,
+            ...(args.ghExecutor === undefined
+              ? {}
+              : { runner: { run: (argv: readonly string[]) => args.ghExecutor!(argv) } }),
+          })),
+      permissionObserver:
+        args.permissionObserver ??
+        ((input) => observePublicationPermission(input, args.ghExecutor)),
+    });
+    const { actor, permission } = evidence;
+    const destinationRequest = { kind: "local" } as const;
 
-    // 4. Scaffold the missing main vault via meshInitFlow.
+    const podIdentities = await listFederationStates(db);
+    if (podIdentities.length > 1) {
+      throw new Error("Mesh adoption requires exactly one local pod identity.");
+    }
+    const mainVaultName = `${args.clusterName}/main`;
+    const mainVaultPath = resolveVaultPath(mainVaultName);
+    const podHandle = podIdentities[0]?.handle ?? getHandleFromIdentity();
+    const podRid =
+      podIdentities[0]?.fedRidHex ?? derivePlannedCreationRid(operationId, `pod:${podHandle}`);
+    const meshRid = derivePlannedCreationRid(operationId, `mesh:${args.clusterName}`);
+    const vaultRid = derivePlannedCreationRid(operationId, `vault:${mainVaultName}`);
+    const memscopeRid = derivePlannedCreationRid(operationId, `memscope:${mainVaultName}`);
+    const planned = resolveCreationPlanV1({
+      request: destinationRequest,
+      subject: {
+        kind: "mesh",
+        repositoryName: vaultRepoName(mainVaultName),
+      },
+      actor,
+      permission,
+      intendedEffects: {
+        operation_id: operationId,
+        identity:
+          podIdentities.length === 0
+            ? { kind: "create", rid: podRid, handle: podHandle }
+            : { kind: "existing", rid: podRid },
+        mesh: { kind: "create", rid: meshRid, name: args.clusterName },
+        primary_vault_rid: vaultRid,
+        vaults: [
+          {
+            kind: "create",
+            rid: vaultRid,
+            memscope_rid: memscopeRid,
+            name: mainVaultName,
+            root: mainVaultPath,
+          },
+        ],
+        local_writes: [
+          {
+            root: mainVaultPath,
+            exact_paths: [
+              join(mainVaultPath, ".lyt", "vault.yon"),
+              join(mainVaultPath, ".lyt", "mesh.yon"),
+            ],
+            bounded_path_classes: ["vault-scaffold", "git-metadata"],
+          },
+          {
+            root: dirname(getRegistryPath()),
+            exact_paths: [getRegistryPath()],
+            bounded_path_classes: ["registry"],
+          },
+          {
+            root: getFederationRoot(),
+            exact_paths: [],
+            bounded_path_classes: ["destination-policy-ledger"],
+          },
+        ],
+        registry_rows: [
+          ...(podIdentities.length === 0
+            ? [{ table: "federation_state" as const, key: podRid }]
+            : []),
+          { table: "meshes", key: meshRid },
+          { table: "vaults", key: vaultRid },
+          { table: "mesh_vaults", key: `${meshRid}:${vaultRid}` },
+        ],
+        topology_bindings: [{ mesh_rid: meshRid, vault_rid: vaultRid, role: "main" }],
+        checkpoints: [
+          { repository_root: mainVaultPath, exact_paths: [".lyt/mesh.yon", ".lyt/vault.yon"] },
+        ],
+        remote_effects: [],
+      },
+    });
+    if (planned.kind === "refusal") throw new Error(planned.message);
+
+    // Planning and all refusal gates above are read-only. Only now establish
+    // the local pod identity required by mesh destination-policy creation.
+    // Reuse an adopted identity when present; when absent, bind the canonical
+    // ambient local identity. Never derive the pod identity from the cluster
+    // owner and never create a second federation row.
+    if (podIdentities.length === 0) {
+      await upsertFederationState(db, { handle: podHandle, fedRidBytes: hexToUuid7Bytes(podRid) });
+    }
     const meshInitOpts: MeshInitOptions = {
       name: args.clusterName,
-      pushTo: owner,
-      pushKind,
-      noPush,
+      noPush: true,
+      creation: {
+        destinationRequest,
+        creationPlan: planned.plan,
+        attemptId,
+      },
+      db,
       ...(args.meshGhClient !== undefined ? { ghClient: args.meshGhClient } : {}),
     };
     const meshInit = await meshInitFlow(meshInitOpts);

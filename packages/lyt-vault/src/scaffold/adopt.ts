@@ -160,7 +160,10 @@ export function adoptVault(opts: AdoptOptions): AdoptResult {
 // survives the `.lyt/`-only delete).
 function ensureVaultGitignore(vaultPath: string): "created" | "appended" | "present" {
   const gitignorePath = join(vaultPath, ".gitignore");
-  const block = getVaultGitignore();
+  // Existing vaults retain their current editor tracking posture. The full
+  // `.obsidian/` ignore belongs only to fresh scaffolds; adding it here could
+  // turn a handler's previously untracked editor files into ignored files.
+  const block = getVaultGitignore({ includeObsidian: false });
   if (!existsSync(gitignorePath)) {
     writeFileSync(gitignorePath, block, "utf8");
     return "created";

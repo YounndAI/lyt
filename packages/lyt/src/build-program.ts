@@ -38,6 +38,8 @@ import {
   registerVaultVerbs,
   buildAgentManualCommand,
   buildDiscoverCommand,
+  buildDoctorCommand,
+  doctorFlow,
   buildRepairCommand,
 } from "@younndai/lyt-vault";
 
@@ -47,6 +49,8 @@ import { buildBenchCommand } from "./commands/bench.js";
 import { buildCaptureCommand } from "./commands/capture.js";
 import { buildContractCommand } from "./commands/contract.js";
 import { buildLytInitCommand } from "./commands/init.js";
+import { buildInstallCommand } from "./commands/install.js";
+import { checkInstallHealthV1 } from "./install/doctor-health.js";
 import { buildModelCommand } from "./commands/model.js";
 import { buildOutdatedCommand } from "./commands/outdated.js";
 import { buildPrimerCommand } from "./commands/primer.js";
@@ -56,12 +60,22 @@ import { buildSearchCommand } from "./commands/search.js";
 import { buildUndoCommand } from "./commands/undo.js";
 import { buildUpdateCommand } from "./commands/update.js";
 
+export interface BuildProgramOptions {
+  readonly topLevelVersion?: string;
+  readonly doctor?: typeof doctorFlow;
+  readonly doctorHealth?: typeof checkInstallHealthV1;
+  /** @internal Focused dependency seam for editor-localization doctor dispatch tests. */
+  readonly editorLocalizationDoctorDependencies?: Parameters<typeof buildDoctorCommand>[0];
+  /** @internal Focused dependency seam for editor-localization repair dispatch tests. */
+  readonly editorLocalizationRepairDependencies?: Parameters<typeof buildRepairCommand>[0];
+}
+
 /**
  * Assemble the full `lyt` meta-CLI command tree WITHOUT parsing argv. Pure +
  * side-effect-free (safe to import from a test); the caller (cli.ts) drives argv
  * into `.parseAsync()`. The composition rationale for each attach point is inline.
  */
-export function buildProgram(): Command {
+export function buildProgram(options: BuildProgramOptions = {}): Command {
   const program = new Command();
 
   program
@@ -84,7 +98,33 @@ export function buildProgram(): Command {
   // block-B Commit 7 delta: same composition shape applies to `automator` — the
   // meta CLI attaches `run` here (runFiveStep + metadata-filler depend on
   // lyt-vault, so registering inside lyt-vault would cycle).
+  const topLevelVersion =
+    options.topLevelVersion ??
+    (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+  const baseDoctor = options.doctor ?? doctorFlow;
+  const healthCheck = options.doctorHealth ?? checkInstallHealthV1;
   registerVaultVerbs(program);
+  const inheritedDoctorIndex = program.commands.findIndex((command) => command.name() === "doctor");
+  if (inheritedDoctorIndex < 0) {
+    throw new Error(
+      "@younndai/lyt meta CLI: expected registerVaultVerbs to register a 'doctor' command but none was found.",
+    );
+  }
+  // The shared vault command deliberately defaults to its own package version.
+  // Replace that one registration only in the meta CLI so doctor instead grades
+  // the actual installed `lyt` CLI and its seven-package graph.
+  (program.commands as Command[]).splice(inheritedDoctorIndex, 1);
+  program.addCommand(
+    buildDoctorCommand({
+      ...options.editorLocalizationDoctorDependencies,
+      doctor: (doctorOptions) =>
+        baseDoctor({
+          ...doctorOptions,
+          agentManualVersionOverride: topLevelVersion,
+          hooks: { doctorChecks: () => healthCheck({ topLevelVersion }) },
+        }),
+    }),
+  );
   const meshCmd = program.commands.find((c) => c.name() === "mesh");
   if (meshCmd === undefined) {
     throw new Error(
@@ -143,13 +183,14 @@ export function buildProgram(): Command {
   // that moved registration off the thin cli entrypoint (integration reconcile).
   program.addCommand(buildOutdatedCommand());
   program.addCommand(buildUpdateCommand());
+  program.addCommand(buildInstallCommand());
 
   // v1.B.4 / v1.C.3 / v1.C.4 — `lyt init` | `discover` | `repair` at the meta-CLI
   // top level per federation-design §5-6 (init composes mesh+federation bootstrap;
   // discover is a read-only GH walk; repair is the write side of validate/repair).
   program.addCommand(buildLytInitCommand());
   program.addCommand(buildDiscoverCommand());
-  program.addCommand(buildRepairCommand());
+  program.addCommand(buildRepairCommand(options.editorLocalizationRepairDependencies));
 
   // v1.F.3 / v1.G.5 — `lyt skills` | `agent-manual` at the meta-CLI top level
   // (skills = tri-runtime symlink surface; agent-manual = the ~150-line manual

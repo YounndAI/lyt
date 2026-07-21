@@ -17,6 +17,8 @@
 import { Command } from "commander";
 
 import { KNOWN_LEDGERS, housekeepFlow, type LedgerName } from "../flows/housekeep.js";
+import { DEFAULT_LYT_CONFIG } from "../util/config.js";
+import { resolvePublishedMachineAuthorityForHousekeep } from "../flows/federation/sync-pod-ledger.js";
 
 interface HousekeepCliOpts {
   vault?: string;
@@ -24,9 +26,13 @@ interface HousekeepCliOpts {
   rotateNow?: boolean;
   dryRun?: boolean;
   json?: boolean;
+  retention?: string;
 }
 
-export function buildHousekeepCommand(): Command {
+export function buildHousekeepCommand(dependencies: {
+  housekeepFlow?: typeof housekeepFlow;
+  resolvePublishedMachineAuthority?: typeof resolvePublishedMachineAuthorityForHousekeep;
+} = {}): Command {
   return new Command("housekeep")
     .description(
       "Month-boundary rotation for per-vault YON ledger files. Default: every active vault, every known ledger (audit, provenance). Idempotent — re-runs the same month skip silently. Deterministic --json.",
@@ -38,6 +44,10 @@ export function buildHousekeepCommand(): Command {
       "Force rotation regardless of month boundary (for testing or manual archive cuts)",
     )
     .option("--dry-run", "Report proposed rotations without mutating any files")
+    .option(
+      "--retention <days|never>",
+      `Sync archive retention (default: ${DEFAULT_LYT_CONFIG.syncLedgerRetentionDays} days; 'never' disables GC)`,
+    )
     .option("--json", "Emit a deterministic JSON result instead of human-readable text")
     .action(async (opts: HousekeepCliOpts) => {
       if (
@@ -51,11 +61,20 @@ export function buildHousekeepCommand(): Command {
         process.exitCode = 2;
         return;
       }
-      const result = await housekeepFlow({
+      const retentionDays = opts.retention === undefined ? undefined : parseRetention(opts.retention);
+      const authority = opts.ledger !== undefined && opts.ledger !== "sync" || retentionDays === "never"
+        ? undefined
+        : await (dependencies.resolvePublishedMachineAuthority ?? resolvePublishedMachineAuthorityForHousekeep)();
+      const result = await (dependencies.housekeepFlow ?? housekeepFlow)({
         ...(opts.vault !== undefined ? { vault: opts.vault } : {}),
         ...(opts.ledger !== undefined ? { ledger: opts.ledger as LedgerName } : {}),
         ...(opts.rotateNow === true ? { rotateNow: true } : {}),
         ...(opts.dryRun === true ? { dryRun: true } : {}),
+        ...(retentionDays === undefined ? {} : { retentionDays }),
+        ...(authority === undefined ? {} : {
+          publishedMachineSnapshot: authority.snapshot,
+          verifyPublishedSnapshot: authority.revalidate,
+        }),
       });
       if (opts.json === true) {
         // eslint-disable-next-line no-console
@@ -84,5 +103,20 @@ export function buildHousekeepCommand(): Command {
           );
         }
       }
+      for (const entry of result.gc) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `  [gc:${entry.outcome}] ${entry.vaultName}: ${entry.path}${entry.reason ? ` (${entry.reason})` : ""}`,
+        );
+      }
     });
+}
+
+function parseRetention(value: string): number | "never" {
+  if (value === "never") return value;
+  const days = Number(value);
+  if (!Number.isInteger(days) || days < 0) {
+    throw new Error("--retention must be a non-negative integer or 'never'.");
+  }
+  return days;
 }

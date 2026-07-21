@@ -19,6 +19,15 @@ import type { Client } from "@libsql/client";
 import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getMeshByName } from "../registry/meshes-repo.js";
 import { setVaultHomeMesh } from "../registry/repo.js";
+import { getFederationRepoDir, vaultRepoName } from "../util/federation-paths.js";
+import { newUuidv7Bytes, uuid7BytesToDashedString } from "../util/uuid7.js";
+import {
+  deriveCreationOperationIdV1,
+  plannedSingleVaultEffectsV1,
+  resolveCreationPlanV1,
+  withCreationRepositoryEffectsV1,
+} from "./creation-plan.js";
+import { resolveVaultPath } from "../util/paths.js";
 import { meshInitFlow } from "./mesh-init.js";
 
 // G1 — guided-adopt mesh default. A bare `lyt vault adopt <path>` used to land
@@ -68,9 +77,15 @@ export async function ensurePersonalMesh(
   let mesh = await getMeshByName(db, meshName);
   let created = false;
   if (mesh === null) {
+    const creation = await localMeshCreation(db, meshName);
     await meshInitFlow({
       name: meshName,
       db,
+      creation: {
+        destinationRequest: creation.request,
+        creationPlan: creation.plan,
+        attemptId: creation.attemptId,
+      },
       ...(args.noPush !== undefined ? { noPush: args.noPush } : {}),
     });
     mesh = await getMeshByName(db, meshName);
@@ -96,4 +111,45 @@ export async function ensurePersonalMesh(
     created,
     assigned: true,
   };
+}
+
+async function localMeshCreation(db: Client, meshName: string) {
+  const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+  const request = { kind: "local" } as const;
+  const podRows = await db.execute(
+    "SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle LIMIT 2",
+  );
+  if (podRows.rows.length !== 1) {
+    throw new Error("Personal mesh creation requires exactly one real local pod identity.");
+  }
+  const handle = String(podRows.rows[0]!["handle"]);
+  const subject = { kind: "mesh" as const, repositoryName: vaultRepoName(`${meshName}/main`) };
+  const operationId = deriveCreationOperationIdV1({
+    request,
+    subject,
+    scope: `ensure:${meshName}/main\0${resolveVaultPath(`${meshName}/main`)}`,
+  });
+  const resolved = resolveCreationPlanV1({
+    request,
+    subject,
+    actor: {
+      attempt_id: attemptId,
+      observed_at: new Date().toISOString(),
+      result: "unknown",
+      actor: null,
+      evidence_class: "unavailable",
+    },
+    intendedEffects: withCreationRepositoryEffectsV1(
+      plannedSingleVaultEffectsV1({
+        operationId,
+        pod: { kind: "existing", rid: String(podRows.rows[0]!["rid"]) },
+        mesh: { kind: "create", name: meshName },
+        vaultName: `${meshName}/main`,
+        vaultRoot: resolveVaultPath(`${meshName}/main`),
+      }),
+      [{ repositoryRoot: getFederationRepoDir(handle), exactPaths: ["pod.yon"] }],
+    ),
+  });
+  if (resolved.kind === "refusal") throw new Error(resolved.message);
+  return { request, plan: resolved.plan, attemptId };
 }

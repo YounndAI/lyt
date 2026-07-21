@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
+import { existsSync } from "node:fs";
+
 import {
   applyGhPrefix,
-  closeRegistry,
-  listVaults,
-  openRegistry,
+  getRegistryPath,
+  openMeshInitRegistryReadOnly,
   type ManifestShareWith,
   type ManifestVault,
   type ParsedManifest,
@@ -155,12 +156,22 @@ export async function validateMeshInit(opts: ValidateOptions): Promise<ValidateO
 
 async function getRegistryNames(opts: ValidateOptions): Promise<Set<string>> {
   if (opts.registryVaultNames) return new Set(opts.registryVaultNames);
-  const db = await openRegistry();
+  const registryPath = getRegistryPath();
+  if (!existsSync(registryPath)) return new Set();
+  const db = openMeshInitRegistryReadOnly(registryPath);
   try {
-    const rows = await listVaults(db);
-    return new Set(rows.map((r) => r.name));
+    const table = db
+      .prepare(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'vaults' LIMIT 1",
+      )
+      .get();
+    if (table === undefined) return new Set();
+    const rows = db
+      .prepare<[], { name: string }>("SELECT name FROM vaults ORDER BY name")
+      .all();
+    return new Set(rows.map((row) => row.name));
   } finally {
-    await closeRegistry(db);
+    db.close();
   }
 }
 

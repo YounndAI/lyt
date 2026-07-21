@@ -60,6 +60,8 @@ export interface LytConfig {
   // available). Read via embeddingsEnabled() (config OR LYT_EMBEDDINGS env
   // override: LYT_EMBEDDINGS=0 forces it off, =1 forces it on).
   embeddingsEnabled: boolean;
+  /** Days to retain monthly sync-provenance archives, or never remove them. */
+  syncLedgerRetentionDays: number | "never";
 }
 
 export const DEFAULT_LYT_CONFIG: LytConfig = {
@@ -71,6 +73,7 @@ export const DEFAULT_LYT_CONFIG: LytConfig = {
   // identical lexical cascade when the model can't load or no vectors exist
   // (ARC-D2 preserved). Force off with LYT_EMBEDDINGS=0.
   embeddingsEnabled: true,
+  syncLedgerRetentionDays: 365,
 };
 
 // feat/microrag-semantic + resolve whether the embeddings arm is ON.

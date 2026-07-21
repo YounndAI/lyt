@@ -14,10 +14,15 @@
  * limitations under the License.
  */
 
+import type { Client } from "@libsql/client";
+
+import { backfillLegacyDestinationProjections } from "./destination-policy-projection.js";
+
 export interface Migration {
   version: number;
   name: string;
   sql: string;
+  afterApply?: (db: Client, options?: { podRid?: string; podRoot?: string }) => Promise<void>;
 }
 
 // v1.A.1b — `001-init` base migration. Pre-release clean-slate posture per
@@ -1031,6 +1036,245 @@ PRAGMA foreign_keys=ON;
 `,
 };
 
+// Lyt 0.20.0 Phase A — destination policy registry projections. The canonical
+// policy lives in the separate per-writer destination-policy ledger; these
+// columns are a local materialized view. The pre-existing mesh push columns
+// remain the 0.13 compatibility projection and are intentionally preserved.
+//
+// Both circular-FK tables are rebuilt in one FK-off transaction so the
+// migration is crash-retry safe. A replay discards only the *_new scratch
+// tables and copies every durable column from the surviving tables.
+const migration011DestinationPolicyProjection: Migration = {
+  version: 11,
+  name: "destination-policy-projection",
+  sql: `
+DROP TABLE IF EXISTS meshes_new;
+DROP TABLE IF EXISTS vaults_new;
+
+PRAGMA foreign_keys=OFF;
+BEGIN;
+
+CREATE TABLE meshes_new (
+  rid BLOB PRIMARY KEY,
+  name TEXT NOT NULL,
+  push_target TEXT,
+  push_kind TEXT CHECK (push_kind IN ('handle', 'org')),
+  main_vault_rid BLOB,
+  created_at TEXT NOT NULL,
+  own_created INTEGER NOT NULL DEFAULT 0 CHECK (own_created IN (0, 1)),
+  destination_kind TEXT CHECK (destination_kind IN ('local', 'github')),
+  destination_source TEXT CHECK (
+    destination_source IN ('explicit', 'authenticated-default', 'auto-fallback-local', 'legacy-derived')
+  ),
+  CHECK (
+    (own_created = 0 AND destination_kind IS NULL AND destination_source IS NULL)
+    OR
+    (own_created = 1 AND (
+      (destination_kind IS NULL
+        AND (destination_source IS NULL OR destination_source = 'legacy-derived'))
+      OR
+      (destination_kind = 'local' AND destination_source IS NOT NULL
+        AND push_target IS NULL AND push_kind IS NULL)
+      OR
+      (destination_kind = 'github' AND destination_source IS NOT NULL
+        AND push_target IS NOT NULL AND length(trim(push_target)) > 0
+        AND push_kind IN ('handle', 'org'))
+    ))
+  ),
+  FOREIGN KEY (main_vault_rid) REFERENCES vaults(rid) ON DELETE SET NULL
+);
+
+INSERT INTO meshes_new (
+  rid, name, push_target, push_kind, main_vault_rid, created_at, own_created,
+  destination_kind, destination_source
+)
+SELECT
+  rid, name, push_target, push_kind, main_vault_rid, created_at, own_created,
+  CASE
+    WHEN own_created = 0 THEN NULL
+    WHEN push_target IS NULL AND push_kind IS NULL THEN 'local'
+    WHEN length(trim(push_target)) > 0 AND push_kind IN ('handle', 'org') THEN 'github'
+    ELSE NULL
+  END,
+  CASE WHEN own_created = 1 THEN 'legacy-derived' ELSE NULL END
+FROM meshes;
+
+CREATE TABLE vaults_new (
+  rid BLOB PRIMARY KEY,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  memscope_rid BLOB,
+  parent_vault BLOB,
+  home_mesh_rid BLOB,
+  tier_hint TEXT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disconnected', 'missing', 'tombstoned', 'access_lost')),
+  git_url TEXT,
+  created_at TEXT,
+  registered_at TEXT NOT NULL,
+  last_verified_at TEXT,
+  verify_fail_count INTEGER NOT NULL DEFAULT 0,
+  leaf TEXT GENERATED ALWAYS AS (
+    CASE
+      WHEN instr(name, '/') = 0 THEN name
+      ELSE replace(name, rtrim(name, replace(name, '/', '')), '')
+    END
+  ) VIRTUAL,
+  source TEXT NOT NULL DEFAULT 'own' CHECK (source IN ('own', 'shared', 'subscribed')),
+  destination_kind TEXT CHECK (destination_kind IN ('local', 'github')),
+  destination_source TEXT CHECK (
+    destination_source IN ('mesh-inherited', 'vault-override', 'legacy-derived')
+  ),
+  destination_target TEXT,
+  destination_target_kind TEXT CHECK (destination_target_kind IN ('user', 'org')),
+  CHECK (
+    (source <> 'own' AND destination_kind IS NULL AND destination_source IS NULL
+      AND destination_target IS NULL AND destination_target_kind IS NULL)
+    OR
+    (source = 'own' AND (
+      (destination_kind IS NULL
+        AND (destination_source IS NULL OR destination_source = 'legacy-derived')
+        AND destination_target IS NULL AND destination_target_kind IS NULL)
+      OR
+      (destination_kind = 'local' AND destination_source IS NOT NULL
+        AND destination_target IS NULL AND destination_target_kind IS NULL)
+      OR
+      (destination_kind = 'github' AND destination_source IS NOT NULL
+        AND destination_target IS NOT NULL AND length(trim(destination_target)) > 0
+        AND destination_target_kind IN ('user', 'org'))
+    ))
+  ),
+  FOREIGN KEY (parent_vault) REFERENCES vaults(rid) ON DELETE SET NULL,
+  FOREIGN KEY (home_mesh_rid) REFERENCES meshes(rid) ON DELETE SET NULL
+);
+
+INSERT INTO vaults_new (
+  rid, name, path, memscope_rid, parent_vault, home_mesh_rid, tier_hint,
+  status, git_url, created_at, registered_at, last_verified_at, verify_fail_count,
+  source, destination_kind, destination_source, destination_target,
+  destination_target_kind
+)
+SELECT
+  v.rid, v.name, v.path, v.memscope_rid, v.parent_vault, v.home_mesh_rid,
+  v.tier_hint, v.status, v.git_url, v.created_at, v.registered_at,
+  v.last_verified_at, v.verify_fail_count, v.source,
+  CASE
+    WHEN v.source <> 'own' THEN NULL
+    WHEN v.git_url IS NULL AND m.destination_kind IS NOT NULL THEN m.destination_kind
+    ELSE NULL
+  END,
+  CASE
+    WHEN v.source <> 'own' THEN NULL
+    WHEN v.git_url IS NULL AND m.destination_kind IS NOT NULL THEN 'mesh-inherited'
+    WHEN v.git_url IS NOT NULL THEN 'legacy-derived'
+    ELSE NULL
+  END,
+  CASE
+    WHEN v.source = 'own' AND v.git_url IS NULL AND m.destination_kind = 'github'
+      THEN m.push_target
+    ELSE NULL
+  END,
+  CASE
+    WHEN v.source = 'own' AND v.git_url IS NULL AND m.destination_kind = 'github'
+      THEN CASE m.push_kind WHEN 'handle' THEN 'user' WHEN 'org' THEN 'org' ELSE NULL END
+    ELSE NULL
+  END
+FROM vaults v
+LEFT JOIN meshes_new m ON m.rid = v.home_mesh_rid;
+
+DROP TABLE vaults;
+DROP TABLE meshes;
+ALTER TABLE meshes_new RENAME TO meshes;
+ALTER TABLE vaults_new RENAME TO vaults;
+
+CREATE INDEX IF NOT EXISTS idx_meshes_name ON meshes(name);
+CREATE INDEX IF NOT EXISTS idx_vaults_name ON vaults(name);
+CREATE INDEX IF NOT EXISTS idx_vaults_status ON vaults(status);
+CREATE INDEX IF NOT EXISTS idx_vaults_home_mesh_rid ON vaults(home_mesh_rid);
+CREATE INDEX IF NOT EXISTS idx_vaults_leaf ON vaults(leaf);
+CREATE INDEX IF NOT EXISTS idx_vaults_git_url ON vaults(git_url);
+CREATE INDEX IF NOT EXISTS idx_vaults_source ON vaults(source);
+
+COMMIT;
+PRAGMA foreign_keys=ON;
+`,
+};
+
+// Lyt 0.20.0 Phase A exact repository binding. Migration 011 captured the
+// owner-level destination projection; 012 adds the vault-RID-bound repository
+// snapshot without changing the mesh compatibility columns. Existing online
+// vaults derive it only from git_url; unpublished owned GitHub vaults snapshot
+// the deterministic current name once in the semantic backfill.
+const migration012DestinationRepositorySnapshot: Migration = {
+  version: 12,
+  name: "destination-repository-snapshot",
+  sql: `SELECT 1`,
+  afterApply: async (db, options) => {
+    const columns = await db.execute("PRAGMA table_info(vaults)");
+    if (!columns.rows.some((row) => row["name"] === "destination_repository_name")) {
+      await db.execute("ALTER TABLE vaults ADD COLUMN destination_repository_name TEXT");
+    }
+    await backfillLegacyDestinationProjections(db);
+    const { backfillCanonicalOwnedVaultPolicySnapshots } =
+      await import("../flows/federation/destination-policy-service.js");
+    await backfillCanonicalOwnedVaultPolicySnapshots(db, options);
+  },
+};
+
+// Phase B preserves an unavailable implicit GitHub observation as distinct
+// local policy provenance. SQLite cannot widen a CHECK in place, so rebuild
+// only the meshes projection table while preserving every existing row.
+const migration013AutoFallbackLocalProvenance: Migration = {
+  version: 13,
+  name: "mesh-auto-fallback-local-provenance",
+  sql: `
+PRAGMA foreign_keys=OFF;
+BEGIN;
+CREATE TABLE meshes_new (
+  rid BLOB PRIMARY KEY,
+  name TEXT NOT NULL,
+  push_target TEXT,
+  push_kind TEXT CHECK (push_kind IN ('handle', 'org')),
+  main_vault_rid BLOB,
+  created_at TEXT NOT NULL,
+  own_created INTEGER NOT NULL DEFAULT 0 CHECK (own_created IN (0, 1)),
+  destination_kind TEXT CHECK (destination_kind IN ('local', 'github')),
+  destination_source TEXT CHECK (
+    destination_source IN ('explicit', 'authenticated-default', 'auto-fallback-local', 'legacy-derived')
+  ),
+  CHECK (
+    (own_created = 0 AND destination_kind IS NULL AND destination_source IS NULL)
+    OR
+    (own_created = 1 AND (
+      (destination_kind IS NULL
+        AND (destination_source IS NULL OR destination_source = 'legacy-derived'))
+      OR
+      (destination_kind = 'local' AND destination_source IS NOT NULL
+        AND push_target IS NULL AND push_kind IS NULL)
+      OR
+      (destination_kind = 'github' AND destination_source IS NOT NULL
+        AND push_target IS NOT NULL AND length(trim(push_target)) > 0
+        AND push_kind IN ('handle', 'org'))
+    ))
+  ),
+  FOREIGN KEY (main_vault_rid) REFERENCES vaults(rid) ON DELETE SET NULL
+);
+INSERT INTO meshes_new (
+  rid, name, push_target, push_kind, main_vault_rid, created_at, own_created,
+  destination_kind, destination_source
+)
+SELECT
+  rid, name, push_target, push_kind, main_vault_rid, created_at, own_created,
+  destination_kind, destination_source
+FROM meshes;
+DROP TABLE meshes;
+ALTER TABLE meshes_new RENAME TO meshes;
+CREATE INDEX IF NOT EXISTS idx_meshes_name ON meshes(name);
+COMMIT;
+PRAGMA foreign_keys=ON;
+`,
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   migration001Init,
   migration002Aliases,
@@ -1042,4 +1286,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration008VaultSource,
   migration009VaultSourceTernary,
   migration010MeshOwnCreated,
+  migration011DestinationPolicyProjection,
+  migration012DestinationRepositorySnapshot,
+  migration013AutoFallbackLocalProvenance,
 ];

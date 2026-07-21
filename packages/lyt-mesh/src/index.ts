@@ -83,26 +83,6 @@ export type {
 export { statusFlow } from "./flows/status.js";
 export type { StatusOutcome, StatusOptions, StatusCluster } from "./flows/status.js";
 
-export { meshInitFlow, traverseMeshFromRoot } from "./flows/mesh-init.js";
-export type {
-  MeshInitOptions,
-  MeshInitOutcome,
-  MeshInitResult,
-  MeshInitBlocked,
-  MeshInitVaultResult,
-  MeshInitEdgeResult,
-} from "./flows/mesh-init.js";
-
-export { validateMeshInit } from "./flows/mesh-init-validate.js";
-export type {
-  ValidateIssue,
-  ValidateOutcome as MeshInitValidateOutcome,
-  ValidateOptions as MeshInitValidateOptions,
-  ValidateSeverity,
-} from "./flows/mesh-init-validate.js";
-
-export { buildMeshInitCommand } from "./commands/mesh-init.js";
-
 export { syncFlow, classifyCheckStatus } from "./flows/sync.js";
 export type {
   SyncFlowArgs,
@@ -114,6 +94,28 @@ export type {
 
 export { syncCheckFlow } from "./flows/sync-check.js";
 export type { SyncCheckArgs, SyncCheckResult, VaultCheckReport } from "./flows/sync-check.js";
+
+export {
+  collectScopedSyncCheckObservations,
+  evaluateScopedSyncCheck,
+  inspectScopedSyncCheck,
+  planScopedSyncCheck,
+  scopedSyncCheckFlow,
+} from "./flows/scoped-sync-check.js";
+export type {
+  LocalObservation,
+  OneVaultSyncCheckScope,
+  RemoteObservation,
+  ScopedCheckSummary,
+  ScopedRemoteObservation,
+  ScopedSyncCheckKernelResult,
+  ScopedSyncCheckDependencies,
+  ScopedSyncCheckOutcome,
+  ScopedSyncCheckPlan,
+  ScopedSyncCheckRefusal,
+  ScopedSyncCheckSuccess,
+  ScopedVaultCheckReport,
+} from "./flows/scoped-sync-check.js";
 
 export { syncWatchFlow, DEFAULT_COMMIT_DEBOUNCE_MS } from "./flows/sync-watch.js";
 export type { SyncWatchHandle, SyncWatchOptions } from "./flows/sync-watch.js";

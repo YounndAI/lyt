@@ -21,7 +21,10 @@ import { MIGRATIONS, type Migration } from "./migrations.js";
 // SEE ALSO: src/registry/vault-db-migrations.ts (per-vault equivalent). The
 // two runners share an algorithm + helper; keep them in lock-step until a
 // generalised shared runner is introduced (plan Open Q1).
-export async function migrate(db: Client): Promise<readonly Migration[]> {
+export async function migrate(
+  db: Client,
+  options?: { podRid?: string; podRoot?: string },
+): Promise<readonly Migration[]> {
   await db.execute(`
  CREATE TABLE IF NOT EXISTS schema_migrations (
  version INTEGER PRIMARY KEY,
@@ -42,6 +45,7 @@ export async function migrate(db: Client): Promise<readonly Migration[]> {
     for (const stmt of statements) {
       await db.execute(stmt);
     }
+    if (m.afterApply !== undefined) await m.afterApply(db, options);
     await db.execute({
       sql: "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
       args: [m.version, m.name, new Date().toISOString()],

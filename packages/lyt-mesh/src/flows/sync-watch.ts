@@ -32,7 +32,12 @@ import {
   type VaultRow,
 } from "@younndai/lyt-vault";
 
-import { syncFlow, type VaultSyncReport } from "./sync.js";
+import {
+  syncFlow,
+  type SyncFlowArgs,
+  type SyncOnlineVaultAuthority,
+  type VaultSyncReport,
+} from "./sync.js";
 
 export interface SyncWatchOptions {
   commitDebounceMs?: number;
@@ -50,6 +55,15 @@ export interface SyncWatchOptions {
   onReconcile?: (vaultName: string, op: ReconcileFigmentOp, relPath: string) => void;
   // Returns once the watcher is set up; the watcher keeps running until stop() is called.
   signal?: AbortSignal;
+  /** Canonical policy-approved online authority, keyed only by stable vault RID. */
+  onlineAuthorityByVaultRid?: Readonly<Record<string, SyncOnlineVaultAuthority>>;
+  /** Re-resolve policy at each debounced/flush attempt; long-lived watchers never cache authority. */
+  resolveOnlineAuthority?: () => Promise<{
+    onlineAuthorityByVaultRid: Readonly<Record<string, SyncOnlineVaultAuthority>>;
+  }>;
+  networkMode?: "online" | "local-only";
+  /** Test seam for proving watcher isolation without spawning network work. */
+  syncFlowFn?: (args?: SyncFlowArgs) => ReturnType<typeof syncFlow>;
 }
 
 export interface SyncWatchHandle {
@@ -152,18 +166,18 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
     return next;
   };
 
-  const scheduleCommit = (vaultName: string): void => {
-    const existing = debounceTimers.get(vaultName);
+  const scheduleCommit = (vaultRidHex: string): void => {
+    const existing = debounceTimers.get(vaultRidHex);
     if (existing) clearTimeout(existing);
     const t = setTimeout(() => {
-      debounceTimers.delete(vaultName);
+      debounceTimers.delete(vaultRidHex);
       // M1 — the debounced full-sync (which runs the full-walk FTS reconcile
       // inside syncFlow) goes through the SAME per-vault chain as the
       // incremental reconcile, so the two never run concurrently for one
       // vault. Tracked so whenIdle() awaits an in-flight sync.
-      track(serialize(vaultName, () => runSyncForVault(vaultName, opts)));
+      track(serialize(vaultRidHex, () => runSyncForVault(vaultRidHex, opts)));
     }, commitDebounceMs);
-    debounceTimers.set(vaultName, t);
+    debounceTimers.set(vaultRidHex, t);
   };
 
   const resolveVaultForPath = (changedPath: string): VaultRow | null => {
@@ -221,7 +235,7 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
     if (!v) return;
 
     // Commit-debounce fires for ANY change in the vault (unchanged behavior).
-    scheduleCommit(v.name);
+    scheduleCommit(v.ridHex);
 
     // B-4 (figment-roots, A2) — the FTS reconcile pre-filter is now the SHARED
     // inclusion predicate, not a notes/**-only gate. A live edit under any
@@ -255,8 +269,7 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
         } catch {
           flooredNowMs = null;
         }
-        const echoed =
-          flooredNowMs !== null && lastStampedFlooredMs.get(absPath) === flooredNowMs;
+        const echoed = flooredNowMs !== null && lastStampedFlooredMs.get(absPath) === flooredNowMs;
         if (!echoed) {
           const res = maintainModifiedFromMtime(absPath);
           if (res.changed && res.stampedMtimeMs !== null) {
@@ -298,7 +311,13 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
     await whenIdle();
     // Flush: run sync one last time so any pending changes get committed.
     try {
-      await syncFlow({ resolveMeshContext: opts.resolveMeshContext === true });
+      const authority = await resolveWatchAuthority(opts);
+      await (opts.syncFlowFn ?? syncFlow)({
+        resolveMeshContext: opts.resolveMeshContext === true,
+        networkMode: opts.networkMode ?? "online",
+        enforceOnlineAuthority: true,
+        ...authority,
+      });
     } catch {
       // Best-effort flush.
     }
@@ -320,17 +339,23 @@ export async function syncWatchFlow(opts: SyncWatchOptions = {}): Promise<SyncWa
   }
 
   const triggerChange = (vaultName: string): void => {
-    scheduleCommit(vaultName);
+    for (const vault of activeVaults) {
+      if (vault.name === vaultName || vault.ridHex === vaultName) scheduleCommit(vault.ridHex);
+    }
   };
 
   return { stop, triggerChange, whenIdle };
 }
 
-async function runSyncForVault(vaultName: string, opts: SyncWatchOptions): Promise<void> {
+async function runSyncForVault(vaultRidHex: string, opts: SyncWatchOptions): Promise<void> {
   try {
-    const result = await syncFlow({
-      vaultNames: [vaultName],
+    const authority = await resolveWatchAuthority(opts);
+    const result = await (opts.syncFlowFn ?? syncFlow)({
+      vaultRids: [vaultRidHex],
       resolveMeshContext: opts.resolveMeshContext === true,
+      networkMode: opts.networkMode ?? "online",
+      enforceOnlineAuthority: true,
+      ...authority,
     });
     if (opts.onTick && result.reports.length > 0) {
       opts.onTick(result.reports[0]!);
@@ -338,4 +363,17 @@ async function runSyncForVault(vaultName: string, opts: SyncWatchOptions): Promi
   } catch {
     // Swallow — watcher must keep running.
   }
+}
+
+async function resolveWatchAuthority(opts: SyncWatchOptions): Promise<{
+  onlineAuthorityByVaultRid: Readonly<Record<string, SyncOnlineVaultAuthority>>;
+}> {
+  if (opts.networkMode === "local-only") {
+    return { onlineAuthorityByVaultRid: {} };
+  }
+  return opts.resolveOnlineAuthority === undefined
+    ? {
+        onlineAuthorityByVaultRid: opts.onlineAuthorityByVaultRid ?? {},
+      }
+    : opts.resolveOnlineAuthority();
 }

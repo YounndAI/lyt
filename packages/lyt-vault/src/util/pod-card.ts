@@ -17,7 +17,7 @@
 // v1.GP WS4 — end-of-init pod summary card + OSC 8 clickable links.
 //
 // Replaces the terse end-of-init lines with a box summarising what was
-// minted (mesh · vault · {handle}/lyt-pod · lyt-pod-map), each with local
+// minted (mesh · vault · {handle}/lyt-pod), each with local
 // paths + GitHub URLs, plus a Next-steps trio. Per the card LEADS with
 // "pod" and bridges "federation" exactly once (pod = federation gloss).
 //
@@ -32,7 +32,7 @@
 // practice). The card now ALWAYS emits the honest affordance: the `file://`
 // vault-FOLDER path + the instruction "To open in Obsidian: Open folder as
 // vault → <path>". No verified-file plumbing, no deep-link branch, no
-// `openFile`/`podMapOpenFile` fields. `renderPodCard` stays pure (no IO).
+// `openFile` fields. `renderPodCard` stays pure (no IO).
 
 import { pathToFileURL } from "node:url";
 
@@ -64,7 +64,7 @@ export interface PodCardMeshRow {
 }
 
 export interface PodCardData {
-  // The handle/owner the pod is keyed under (drives the pod + pod-map names).
+  // The handle/owner the pod is keyed under.
   handle: string;
   // The user's first mesh + vault (e.g. personal / personal/main or the
   // wizard's chosen first vault).
@@ -74,13 +74,6 @@ export interface PodCardData {
   podRepoFullName: string;
   // Local path of the pod (federation) cache, when known.
   podLocalPath?: string;
-  // The pod-map vault local path, when generated. on-disk dir is FLAT
-  // at `~/lyt/vaults/lyt-pod-map/` (no `<owner>` segment); `vault.kind: pod-map`
-  // stays the internal discriminator the Pod Manager plugin keys on.
-  podMapVaultPath?: string;
-  // The owner slug. Retained for content/identity; drops it from the
-  // pod-map display + on-disk path (the vault is flat at `vaults/lyt-pod-map`).
-  ownerSlug?: string;
   // Whether OSC 8 hyperlinks should be emitted (TTY + not piped).
   hyperlinksEnabled: boolean;
   // Brief B (B.3) — the HONEST publish posture. "staged" (default) means the
@@ -167,14 +160,6 @@ export function renderPodCard(data: PodCardData): string {
   );
   if (data.podLocalPath !== undefined && data.podLocalPath.length > 0) {
     lines.push(`│   path:    ${link(data.podLocalPath, data.podLocalPath)}`);
-  }
-
-  // Pod-map vault (display name lyt-pod-map; on-disk dir is FLAT at
-  // `~/lyt/vaults/lyt-pod-map/` — no `<owner>` path segment).
-  if (data.podMapVaultPath !== undefined && data.podMapVaultPath.length > 0) {
-    lines.push("│");
-    lines.push(`│ lyt-pod-map: lyt-pod-map (pod-map vault)`);
-    lines.push(...openAffordance(data.podMapVaultPath));
   }
 
   lines.push("└──────────────────────────────────────────────────");

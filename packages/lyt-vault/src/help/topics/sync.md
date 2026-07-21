@@ -10,11 +10,17 @@ lyt sync                              # commit + pull --rebase + push every acti
 lyt sync --check                      # read-only: report per-vault freshness, no writes
 lyt sync --check --json               # machine-readable freshness report
 lyt sync --check --quiet              # exit code only (0 clean, 1 needs-sync)
+lyt sync --check --vault personal/notes --json # exactly one vault; zero mutations
 lyt sync --vault personal/notes --json # scoped sync + scoped-publication receipt
 lyt sync --watch                      # foreground daemon: watch + auto-commit + incremental search reindex
 lyt sync --no-publish                 # local sync only; hold scoped and pod-wide publication
 lyt sync --message "<summary>"        # override the inferred per-vault commit message
 ```
+
+`--check --vault` resolves one registered vault through the normal address
+resolver, inspects only that vault, and makes zero filesystem, registry, index,
+Git, repository, or sibling-vault mutations. Its JSON Receipt V1 result includes
+the resolved canonical name/RID and a stable `next_action` when work is needed.
 
 ## Per-vault sequence
 
@@ -53,7 +59,7 @@ manual edit, `git rebase --continue`).
 
 ### `.lyt/mesh-context.md` conflicts
 
-`.lyt/mesh-context.md` is committed *and* auto-regenerated, so concurrent edge
+`.lyt/mesh-context.md` is committed _and_ auto-regenerated, so concurrent edge
 mutations on different machines can conflict on it. The content is deterministic
 from the current edge state, so either side resolves identically:
 

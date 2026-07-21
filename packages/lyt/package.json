@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt",
-  "version": "0.13.5",
+  "version": "0.20.0",
   "description": "Lyt — federated markdown-vault mesh CLI. Meta package: pulls in @younndai/lyt-vault + @younndai/lyt-mesh + @younndai/lyt-skills, and ships a unified `lyt` binary.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -43,6 +43,34 @@
     "CONTRIBUTING.md",
     "SECURITY.md"
   ],
+  "lytRelease": {
+    "requiredAssets": [
+      {
+        "path": "./README.md",
+        "kind": "file"
+      },
+      {
+        "path": "./LICENSE",
+        "kind": "file"
+      },
+      {
+        "path": "./NOTICE",
+        "kind": "file"
+      },
+      {
+        "path": "./CONTRIBUTING.md",
+        "kind": "file"
+      },
+      {
+        "path": "./SECURITY.md",
+        "kind": "file"
+      },
+      {
+        "path": "./dist",
+        "kind": "tree"
+      }
+    ]
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -52,11 +80,11 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
-    "@younndai/lyt-mcp": "^0.13.5",
-    "@younndai/lyt-mesh": "^0.13.5",
-    "@younndai/lyt-runner": "^0.13.5",
-    "@younndai/lyt-skills": "^0.13.5",
-    "@younndai/lyt-vault": "^0.13.5",
+    "@younndai/lyt-mcp": "0.20.0",
+    "@younndai/lyt-mesh": "0.20.0",
+    "@younndai/lyt-runner": "0.20.0",
+    "@younndai/lyt-skills": "0.20.0",
+    "@younndai/lyt-vault": "0.20.0",
     "commander": "^12.1.0"
   },
   "devDependencies": {

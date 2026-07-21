@@ -58,8 +58,7 @@ const CR = "\r";
 // create=Forging · push=Unfurling (→Publishing→Syncing on >3s) ·
 // clone=Summoning · git-init/commit=Scaffolding/Committing · index/lanes=
 // Weaving · federation rebuild=Crystallizing · adopt-detect probe=Scouting ·
-// skills symlink=Linking · agent-manual inject=Inscribing · pod-map gen=
-// Mapping · install=Installing.
+// skills symlink=Linking · agent-manual inject=Inscribing · install=Installing.
 export type SpinnerOp =
   | "create"
   | "push"
@@ -72,7 +71,6 @@ export type SpinnerOp =
   | "probe"
   | "skills-link"
   | "agent-manual"
-  | "pod-map"
   | "install"
   // V-DX-1 — consumer/maintenance command ops (generalize F7 across the
   // command surface). Each gerund stays HONEST to the op the user invoked.
@@ -97,7 +95,6 @@ const OP_WORDS: Record<SpinnerOp, readonly string[]> = {
   probe: ["Scouting", "Probing"],
   "skills-link": ["Linking", "Symlinking"],
   "agent-manual": ["Inscribing", "Injecting"],
-  "pod-map": ["Mapping", "Charting"],
   install: ["Installing", "Fetching"],
   // V-DX-1 — see SpinnerOp note above. First word shows immediately; the
   // rest rotate on >3s ops (all scoped to THAT op — never off-topic).

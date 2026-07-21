@@ -41,28 +41,25 @@
 // by passing `recordType="@MY_TYPE"` at the call site. The writer is
 // vocabulary-agnostic.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { withDestinationPolicyLock } from "../flows/federation/destination-policy-lock.js";
+import { assertNoReparsePointInPath } from "../util/write-path-guard.js";
 import { escapeQuoted, sha256 } from "./_helpers.js";
 
-// v1.A.3 (CR-4 / E1) per-process content-and-hash cache. The prior shape
-// read the full ledger file on every append to compute the chain-hash
-// (sha256 of prior bytes) — O(N) per write. Cache caps the read cost to
-// once-per-process per ledgerPath, with size-based invalidation when
-// another process appends concurrently between writes.
+// v1.A.3 (CR-4 / E1) per-process post-write cache. It is bookkeeping only:
+// once the cross-process destination lock is held, every append re-reads the
+// authoritative current bytes. File size is not a content discriminator — a
+// same-length replacement must never let a stale cached preimage erase records.
 //
 // Memory: grows with total cached ledger content (bounded by monthly
 // rotation = typically <1MB per active ledger per process). Cache is
-// invalidated on size mismatch detected via stat (cheap) before each
-// append, and explicitly cleared on rotation via `clearLedgerCache`.
-//
-// Single-process correctness: writes within one process serialize via
-// node's event loop — cache is always consistent. Cross-process: stat
-// catches divergence; falls back to full re-read on mismatch.
+// explicitly cleared on rotation via `clearLedgerCache`.
 interface LedgerCacheEntry {
-  // The full content of the ledger file as it was after our last write.
-  // Used as `prior` in the next append (avoiding the readFileSync call).
+  // The full content of the ledger file as it was after our last successful
+  // atomic replace. It is never authoritative for a later append.
   content: string;
   // sha256 hex of `content`. Used as the chain-hash for the next record.
   contentSha: string;
@@ -109,54 +106,85 @@ export interface AppendLedgerRecordResult {
   initialised: boolean;
 }
 
+export interface RotateLedgerFileArgs {
+  ledgerPath: string;
+  archivedPath: string;
+  ledgerName: string;
+  fromMonth: string;
+  toMonth: string;
+  stampSrc: string;
+}
+
+/** Rotate and recreate one shard while holding the exact lock used by append. */
+export function rotateLedgerFile(args: RotateLedgerFileArgs): boolean {
+  assertNoReparsePointInPath(args.ledgerPath);
+  assertNoReparsePointInPath(args.archivedPath);
+  return withDestinationPolicyLock(`${args.ledgerPath}.append.lock`, () => {
+    assertNoReparsePointInPath(args.ledgerPath);
+    assertNoReparsePointInPath(args.archivedPath);
+    // Two housekeepers may make the same rotation decision before either gets
+    // the append lock. The first archive generation is authoritative; a later
+    // claimant must not replace it with the freshly recreated current shard.
+    if (existsSync(args.archivedPath)) return false;
+    mkdirSync(dirname(args.archivedPath), { recursive: true });
+    renameSync(args.ledgerPath, args.archivedPath);
+    const tmpPath = `${args.ledgerPath}.${process.pid}-${randomUUID()}.tmp`;
+    assertNoReparsePointInPath(tmpPath);
+    writeFileSync(tmpPath, renderHeader(args.ledgerName, args.toMonth), { encoding: "utf8", flag: "wx" });
+    assertNoReparsePointInPath(args.ledgerPath);
+    assertNoReparsePointInPath(args.archivedPath);
+    assertNoReparsePointInPath(tmpPath);
+    renameSync(tmpPath, args.ledgerPath);
+    clearLedgerCache(args.ledgerPath);
+    appendLedgerRecordLocked({
+      ledgerPath: args.ledgerPath,
+      ledgerName: args.ledgerName,
+      recordType: "ROTATION",
+      fields: [
+        ["from_month", args.fromMonth],
+        ["to_month", args.toMonth],
+        ["archived_path", args.archivedPath],
+      ],
+      stampSrc: args.stampSrc,
+    });
+    return true;
+  }, { acquireTimeoutMs: 5_000, leaseMs: 30_000, subject: args.ledgerPath });
+}
+
 // Append a single ledger record + its @STAMP to the current-month file.
 // Atomic via tmp+rename. Initialises an empty file with a header on first
 // write. Throws on I/O failure — callers MUST treat YON-write failure as
 // fatal (it's the SoT contract per Lock 0.2).
 //
-// v1.A.3 (CR-4 / E1): chain-hash is computed against a per-process content
-// cache (LEDGER_CACHE) when fresh — drops the O(N) readFileSync + sha256
-// to O(1) cache lookup per same-process write. Cache invalidates on
-// size-mismatch detected via stat (cheap), or when housekeep rotation
-// fires `clearLedgerCache`. Tamper detection unchanged: rebuild-index
-// walker re-derives the chain from scratch as the authority.
+// The authoritative preimage is always read fresh while holding the same-shard
+// destination lock. The post-write cache is updated only after atomic replace.
 export function appendLedgerRecord(args: AppendLedgerRecordArgs): AppendLedgerRecordResult {
+  assertNoReparsePointInPath(args.ledgerPath);
   ensureParentDir(args.ledgerPath);
+  assertNoReparsePointInPath(args.ledgerPath);
+  return withDestinationPolicyLock(
+    `${args.ledgerPath}.append.lock`,
+    () => appendLedgerRecordLocked(args),
+    { acquireTimeoutMs: 5_000, leaseMs: 30_000, subject: args.ledgerPath },
+  );
+}
+
+function appendLedgerRecordLocked(args: AppendLedgerRecordArgs): AppendLedgerRecordResult {
+  assertNoReparsePointInPath(args.ledgerPath);
   const ts = args.ts ?? new Date().toISOString();
   const monthKey = monthKeyFromIsoTs(ts);
 
-  let prior = "";
-  let priorSha: string | null = null;
+  let prior = existsSync(args.ledgerPath) ? readFileSync(args.ledgerPath, "utf8") : "";
   let initialised = false;
-
-  const cached = LEDGER_CACHE.get(args.ledgerPath);
-  if (cached !== undefined && existsSync(args.ledgerPath)) {
-    // Size-based cache validation — cheap stat call. If another process
-    // appended between our writes, file size diverges from cached
-    // content length → fall through to full re-read.
-    const onDisk = statSync(args.ledgerPath).size;
-    if (onDisk === Buffer.byteLength(cached.content, "utf8")) {
-      prior = cached.content;
-      priorSha = cached.contentSha;
-    } else {
-      LEDGER_CACHE.delete(args.ledgerPath);
-    }
-  }
-
   if (prior.length === 0) {
-    if (existsSync(args.ledgerPath)) {
-      prior = readFileSync(args.ledgerPath, "utf8");
-    }
-    if (prior.length === 0) {
-      prior = renderHeader(args.ledgerName, monthKey);
-      initialised = true;
-    }
+    prior = renderHeader(args.ledgerName, monthKey);
+    initialised = true;
   }
 
   // Chain-hash: sha256 of the prior file's bytes (header-only on first
   // write → still produces a stable hash; tamper detection works from
   // record #1 forward).
-  const hash = initialised ? "-" : (priorSha ?? sha256(prior));
+  const hash = initialised ? "-" : sha256(prior);
 
   const recordBody = renderRecord(args.recordType, args.fields);
   const stampBody = renderStamp({ src: args.stampSrc, ts, hash });
@@ -167,11 +195,12 @@ export function appendLedgerRecord(args: AppendLedgerRecordArgs): AppendLedgerRe
   // (libSQL file-lock semantics on Windows further serialise — but the
   // YON layer is fs-only so we provide our own guard.)
   const tmpPath = `${args.ledgerPath}.${process.pid}-${tmpCounter()}.tmp`;
+  assertNoReparsePointInPath(tmpPath);
   writeFileSync(tmpPath, appended, "utf8");
+  assertNoReparsePointInPath(args.ledgerPath);
   renameSync(tmpPath, args.ledgerPath);
 
-  // E1 cache update — the next same-process append uses these without
-  // re-reading or re-hashing the file.
+  // Post-write bookkeeping only. A later append still fresh-reads under lock.
   LEDGER_CACHE.set(args.ledgerPath, {
     content: appended,
     contentSha: sha256(appended),
@@ -187,13 +216,20 @@ export function ensureLedgerHeader(
   ledgerName: string,
   monthKey: string,
 ): boolean {
+  assertNoReparsePointInPath(ledgerPath);
   ensureParentDir(ledgerPath);
-  if (existsSync(ledgerPath)) {
-    const existing = readFileSync(ledgerPath, "utf8");
-    if (existing.length > 0) return false;
-  }
-  writeFileSync(ledgerPath, renderHeader(ledgerName, monthKey), "utf8");
-  return true;
+  assertNoReparsePointInPath(ledgerPath);
+  return withDestinationPolicyLock(`${ledgerPath}.append.lock`, () => {
+    assertNoReparsePointInPath(ledgerPath);
+    if (existsSync(ledgerPath)) {
+      const existing = readFileSync(ledgerPath, "utf8");
+      if (existing.length > 0) return false;
+    }
+    const tmpPath = `${ledgerPath}.${process.pid}-${tmpCounter()}.tmp`;
+    writeFileSync(tmpPath, renderHeader(ledgerName, monthKey), "utf8");
+    renameSync(tmpPath, ledgerPath);
+    return true;
+  }, { acquireTimeoutMs: 5_000, leaseMs: 30_000, subject: ledgerPath });
 }
 
 // Rendered as an opening @DOC + a `@META key=ledger_name | value=<name>`

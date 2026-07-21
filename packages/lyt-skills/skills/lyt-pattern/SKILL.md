@@ -1,8 +1,11 @@
 ---
 name: lyt-pattern
 description: >
-  Manage Lyt patterns from the agent harness — list/install/uninstall/link/unlink/fork/verbs/run via the `lyt pattern *` CLI verb set. Trigger when the user runs /lyt-pattern, or says "list my patterns", "install a pattern", "link this pattern into my vault", "fork this pattern", "run a pattern verb directly". Meta-skill: every other /lyt-* skill calls `lyt pattern run` under the hood; this skill exposes the full management surface.
+  Manage Lyt patterns from the agent harness — list/install/uninstall/link/unlink/fork/verbs/run via the `lyt pattern *` CLI verb set. Trigger when the user runs /lyt-pattern, or says "list my patterns", "install a pattern", "link this pattern into my vault", "fork this pattern", "run a pattern verb directly". This skill exposes the pattern management surface; other Lyt skills may call ordinary CLI verbs directly.
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.2.0
 capabilities: [manage]
 runtimes: [claude, codex, agents]
@@ -67,4 +70,4 @@ If two installed patterns both declare the same verb (e.g. a `note` verb), addre
 
 ## Companion skills
 
-All `/lyt-*` skills above are pattern-verb wrappers that this meta-skill manages.
+Only pattern-backed workflows are pattern-verb wrappers. Other `/lyt-*` skills call their supported CLI verbs directly.

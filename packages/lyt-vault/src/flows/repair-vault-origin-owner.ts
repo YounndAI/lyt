@@ -21,7 +21,12 @@ import type { Client } from "@libsql/client";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { listVaults } from "../registry/repo.js";
-import { deriveVaultRepoOwner, vaultRepoName } from "../util/federation-paths.js";
+import { destinationPolicyKey } from "../registry/destination-policy.js";
+import {
+  loadDestinationPolicyContext,
+  resolveCanonicalOwnedVaultDestination,
+} from "./federation/destination-policy-service.js";
+import { vaultRepoName } from "../util/federation-paths.js";
 import { isValidGhHandle } from "../util/identity.js";
 import { parseOwnerRepoFromUrl } from "../util/gh.js";
 import { resolveRemoteUrl } from "../util/remote-url.js";
@@ -99,6 +104,7 @@ export async function repairVaultOriginOwnerFlow(
 
   try {
     const meshes = await listMeshes(db);
+    const policyContext = await loadDestinationPolicyContext(db);
     const meshByRid = (rid: Uint8Array | null): MeshRow | null =>
       rid === null ? null : (meshes.find((m) => ridsEqual(m.rid, rid)) ?? null);
 
@@ -113,16 +119,17 @@ export async function repairVaultOriginOwnerFlow(
 
     for (const vault of ownVaults) {
       const homeMesh = meshByRid(vault.homeMeshRid);
-      // Only ORG-mesh vaults can be mis-owned; a personal-mesh vault's derived
-      // owner IS the federation handle (no change possible).
-      if (homeMesh === null || homeMesh.pushKind !== "org") {
+      const hasCanonicalAuthority =
+        policyContext.winners.has(destinationPolicyKey("vault", vault.ridHex)) ||
+        (homeMesh !== null &&
+          policyContext.winners.has(destinationPolicyKey("mesh", homeMesh.ridHex)));
+      if (!hasCanonicalAuthority) {
+        skipped.push({ name: vault.name, reason: "missing-canonical-policy" });
         continue;
       }
-      const derivedOwner = deriveVaultRepoOwner(homeMesh, "");
-      if (derivedOwner.length === 0) {
-        // org mesh with an empty push_target — nothing to derive to.
-        continue;
-      }
+      const destination = resolveCanonicalOwnedVaultDestination(vault, homeMesh, policyContext);
+      if (destination.kind !== "github") continue;
+      const derivedOwner = destination.owner;
       // C1 (release review, defense-in-depth) — `derivedOwner` (the org push_target
       // from an [lyt.untrusted] joined mesh.yon) feeds resolveRemoteUrl → a
       // `git remote set-url origin <url>` spawn. Refuse a non-handle owner before

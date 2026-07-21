@@ -33,9 +33,18 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
 import {
+  closeRegistry,
   initVaultFlow,
+  newUuidv7Bytes,
+  openRegistry,
+  plannedSingleVaultEffectsV1,
   rebuildVaultFlow,
+  resolveCreationPlanV1,
+  resolveVaultPath,
   searchCascadeFlow,
+  upsertFederationState,
+  uuid7BytesToDashedString,
+  vaultRepoName,
   type SearchCascadeArgs,
   type SearchCascadeResult,
 } from "@younndai/lyt-vault";
@@ -113,15 +122,38 @@ export function setupBenchPod(): BenchPod {
   // is what makes it truly offline + safe to run anywhere. Mirrors how every
   // init-touching test pins LYT_IDENTITY_OVERRIDE.
   process.env["LYT_IDENTITY_OVERRIDE"] = "github:lyt-bench";
+  let podReady: Promise<void> | null = null;
+
+  function ensureBenchPodIdentity(): Promise<void> {
+    if (podReady !== null) return podReady;
+    podReady = createBenchPodIdentity();
+    return podReady;
+  }
+
+  async function createBenchPodIdentity(): Promise<void> {
+    const db = await openRegistry();
+    try {
+      await upsertFederationState(db, {
+        handle: "lyt-bench",
+        fedRidBytes: newUuidv7Bytes(),
+        lastSyncedAt: new Date().toISOString(),
+      });
+    } finally {
+      await closeRegistry(db);
+    }
+  }
 
   return {
     home,
 
     async seedVault(name, notes): Promise<void> {
+      const creation = localVaultCreation(name);
+      await ensureBenchPodIdentity();
       const init = await initVaultFlow({
         name,
         gitInit: false,
         commitInitial: false,
+        creation,
         selfHeal: { federation: { enabled: false } },
       });
       for (const note of notes) {
@@ -156,4 +188,29 @@ export function setupBenchPod(): BenchPod {
       }
     },
   };
+}
+
+function localVaultCreation(name: string) {
+  const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+  const destinationRequest = { kind: "local" } as const;
+  const planned = resolveCreationPlanV1({
+    request: destinationRequest,
+    subject: { kind: "vault", repositoryName: vaultRepoName(name) },
+    actor: {
+      attempt_id: attemptId,
+      observed_at: new Date().toISOString(),
+      result: "unknown",
+      actor: null,
+      evidence_class: "unavailable",
+    },
+    intendedEffects: plannedSingleVaultEffectsV1({
+      operationId: attemptId,
+      podRid: attemptId.replaceAll("-", ""),
+      mesh: { kind: "existing", name: name.slice(0, name.indexOf("/")) },
+      vaultName: name,
+      vaultRoot: resolveVaultPath(name),
+    }),
+  });
+  if (planned.kind === "refusal") throw new Error(planned.message);
+  return { destinationRequest, creationPlan: planned.plan, attemptId };
 }

@@ -20,6 +20,7 @@ import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { firewall } from "./git-error-firewall.js";
+import { GIT_COMMAND_TIMEOUT_MS } from "./git-run.js";
 import { resolveRemoteUrl } from "./remote-url.js";
 import { withSpinner, type SpinnerOp } from "./spinner.js";
 
@@ -35,6 +36,13 @@ const execFileAsync = promisify(execFile);
 // pass a fake that records calls + simulates filesystem effects.
 
 export type FederationRepoVisibility = "private" | "public";
+
+export interface FederationPushTarget {
+  url: string;
+  refspec: string;
+}
+
+export type FederationBeforePush = (push: () => Promise<void>) => Promise<void>;
 
 export interface FederationGhClient {
   repoExists(handle: string, repoName: string): Promise<boolean>;
@@ -66,7 +74,13 @@ export interface FederationGhClient {
   // local-repo commit identity (user.name/email), never a remote URL.
   initLocalNoRemote(handle: string, localDir: string): Promise<void>;
   cloneExisting(handle: string, repoName: string, localDir: string): Promise<void>;
-  commitAndOptionallyPush(localDir: string, message: string, push: boolean): Promise<void>;
+  commitAndOptionallyPush(
+    localDir: string,
+    message: string,
+    push: boolean,
+    pushTarget?: FederationPushTarget,
+    beforePush?: FederationBeforePush,
+  ): Promise<void>;
   // Phase C amendment-5 content-probe. Fetch the RAW `pod.yon` from the
   // remote pod repo's default branch WITHOUT cloning it. Returns the file text,
   // or `null` when the file is absent (HTTP 404) — i.e. an empty / partial
@@ -180,6 +194,8 @@ function spawnArgvVerbatim(
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
     stdio: opts.stdio as ("ignore" | "pipe")[],
     ...(opts.encoding !== undefined ? { encoding: opts.encoding } : {}),
+    timeout: GIT_COMMAND_TIMEOUT_MS,
+    killSignal: "SIGKILL" as const,
   };
 
   // A.1 firewall: narrate any spawn failure at the boundary. The invocation
@@ -281,6 +297,8 @@ async function spawnArgvVerbatimAsync(
   const baseOpts = {
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
     ...(opts.env !== undefined ? { env: opts.env } : {}),
+    timeout: GIT_COMMAND_TIMEOUT_MS,
+    killSignal: "SIGKILL" as const,
   };
 
   // A.1 firewall: narrate any spawn failure at the boundary (invocation path
@@ -531,16 +549,33 @@ export const realFederationGhClient: FederationGhClient = {
     }
   },
 
-  async commitAndOptionallyPush(localDir, message, push): Promise<void> {
+  async commitAndOptionallyPush(localDir, message, push, pushTarget, beforePush): Promise<void> {
     // add + commit are local + fast — keep sync (no spinner overhead).
     runGit(localDir, ["add", "."]);
     // Allow empty diff (re-running init with no changes is a no-op, not a
     // failure). `--allow-empty` keeps idempotency.
     runGit(localDir, ["commit", "--allow-empty", "-m", message]);
     if (push) {
+      if (pushTarget === undefined) {
+        throw new Error("Federation push requires an immutable URL and explicit refspec.");
+      }
+      if (beforePush === undefined) {
+        throw new Error("Federation push requires an immediate authority callback.");
+      }
       // F7: push is the network op (op=push → Unfurling, →Publishing→Syncing
       // on >3s). Wrapped so it never freezes silently.
-      await spinGit("push", "your pod to GitHub", localDir, ["push", "-u", "origin", "main"]);
+      await beforePush(() =>
+        spinGit("push", "your pod to GitHub", localDir, [
+          "push",
+          pushTarget.url,
+          pushTarget.refspec,
+        ]),
+      );
+      // Upstream metadata is local configuration, so establish it only after
+      // the immutable push succeeds. This never lets repository-local pushurl
+      // or pushDefault settings choose the network destination.
+      runGit(localDir, ["config", "branch.main.remote", "origin"]);
+      runGit(localDir, ["config", "branch.main.merge", "refs/heads/main"]);
     }
   },
 };

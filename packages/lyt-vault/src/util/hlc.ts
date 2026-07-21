@@ -14,18 +14,21 @@
  * limitations under the License.
  */
 
+import { randomUUID } from "node:crypto";
 import {
-  closeSync,
   existsSync,
+  linkSync,
   mkdirSync,
-  openSync,
   readFileSync,
+  renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { getLytHome } from "./paths.js";
+import { assertNoReparsePointInPath } from "./write-path-guard.js";
 
 // Fed-v2 convergence-hardening (Slice 1a) — a small Hybrid Logical Clock.
 //
@@ -230,8 +233,22 @@ export function loadPersistedSeq(path?: string): number {
 }
 
 function persistHlc(hlc: Hlc, seq: number, path: string): void {
+  assertNoReparsePointInPath(path);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, renderHlcYon(hlc, seq), "utf8");
+  assertNoReparsePointInPath(path);
+  const pendingPath = `${path}.pending.${process.pid}.${randomUUID()}`;
+  assertNoReparsePointInPath(pendingPath);
+  writeFileSync(pendingPath, renderHlcYon(hlc, seq), { encoding: "utf8", flag: "wx" });
+  try {
+    assertNoReparsePointInPath(path);
+    renameSync(pendingPath, path);
+  } finally {
+    try {
+      unlinkSync(pendingPath);
+    } catch {
+      // A leftover pending file is inert: only the canonical path is authoritative.
+    }
+  }
 }
 
 // A stamped clock: the HLC merge key + the per-writer monotonic `seq` (the final
@@ -267,12 +284,28 @@ export interface StampNextOpts {
 // guarantee even if a lock ever fails to hold.
 
 const LOCK_SUFFIX = ".lock";
-const LOCK_MAX_RETRIES = 100;
+const LOCK_ACQUIRE_TIMEOUT_MS = 500;
 const LOCK_RETRY_SLEEP_MS = 5;
 
+interface HlcLockPayload {
+  schemaMajor: 1;
+  pid: number;
+  nonce: string;
+  acquiredAt: string;
+}
+
+interface HlcLockLease {
+  path: string;
+  nonce: string;
+}
+
+export class HlcLockUnavailableError extends Error {
+  readonly errorCode = "hlc-lock-unavailable";
+}
+
 // Busy-wait sleep (sync) — stampNext is a synchronous API on a fs-only path; a
-// short bounded spin is acceptable for a low-frequency (alias) write. Bounded by
-// LOCK_MAX_RETRIES so it can never spin unboundedly.
+// short bounded spin is acceptable for a low-frequency (alias) write. The
+// absolute acquisition deadline keeps it bounded even if retries are frequent.
 function sleepSyncMs(ms: number): void {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -280,41 +313,133 @@ function sleepSyncMs(ms: number): void {
   }
 }
 
-// Acquire an exclusive lock by O_EXCL-creating `<path>.lock`. Bounded retry; on
-// exhaustion we STEAL the lock (a crashed holder left a stale lockfile — better
-// to proceed than to wedge every future stamp). Returns the lock path to release.
-function acquireHlcLock(path: string): string {
+// Acquire by O_EXCL. A live or unverifiable owner is never displaced: callers
+// receive a bounded error after 500ms. Recovery is allowed only for a valid
+// payload whose PID is demonstrably dead, serialized by a recovery claim.
+function acquireHlcLock(path: string): HlcLockLease {
   const lockPath = `${path}${LOCK_SUFFIX}`;
+  assertNoReparsePointInPath(path);
+  assertNoReparsePointInPath(lockPath);
   mkdirSync(dirname(path), { recursive: true });
-  for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt += 1) {
+  assertNoReparsePointInPath(path);
+  assertNoReparsePointInPath(lockPath);
+  const nonce = randomUUID();
+  const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
+  for (;;) {
     try {
-      // 'wx' = O_CREAT | O_EXCL — fails if the lockfile already exists, so only
-      // ONE process holds it at a time.
-      const fd = openSync(lockPath, "wx");
-      closeSync(fd);
-      return lockPath;
+      publishExclusiveLock(lockPath, nonce);
+      return { path: lockPath, nonce };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "EEXIST") throw err;
-      sleepSyncMs(LOCK_RETRY_SLEEP_MS);
+      if (tryRecoverDeadHlcLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        throw new HlcLockUnavailableError(
+          `HLC state is locked by a live or unverifiable owner at ${lockPath}.`,
+        );
+      }
+      sleepSyncMs(Math.min(LOCK_RETRY_SLEEP_MS, Math.max(1, deadline - Date.now())));
     }
   }
-  // Retries exhausted — assume a crashed holder left a stale lock; steal it.
-  try {
-    rmSync(lockPath, { force: true });
-  } catch {
-    // ignore — best effort
-  }
-  const fd = openSync(lockPath, "w");
-  closeSync(fd);
-  return lockPath;
 }
 
-function releaseHlcLock(lockPath: string): void {
+function publishExclusiveLock(lockPath: string, nonce: string): void {
+  const payload: HlcLockPayload = {
+    schemaMajor: 1,
+    pid: process.pid,
+    nonce,
+    acquiredAt: new Date().toISOString(),
+  };
+  assertNoReparsePointInPath(lockPath);
+  const pendingPath = `${lockPath}.pending.${process.pid}.${randomUUID()}`;
+  assertNoReparsePointInPath(pendingPath);
+  writeFileSync(pendingPath, `${JSON.stringify(payload)}\n`, { encoding: "utf8", flag: "wx" });
   try {
-    rmSync(lockPath, { force: true });
+    linkSync(pendingPath, lockPath);
+  } finally {
+    try {
+      unlinkSync(pendingPath);
+    } catch {
+      // Pending files never grant lock authority.
+    }
+  }
+}
+
+function readHlcLockPayload(path: string): HlcLockPayload | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<HlcLockPayload>;
+    if (
+      raw.schemaMajor !== 1 ||
+      !Number.isSafeInteger(raw.pid) ||
+      raw.pid! <= 0 ||
+      typeof raw.nonce !== "string" ||
+      raw.nonce.length === 0 ||
+      typeof raw.acquiredAt !== "string" ||
+      !Number.isFinite(Date.parse(raw.acquiredAt))
+    )
+      return null;
+    return raw as HlcLockPayload;
   } catch {
-    // ignore — best effort; a leftover lockfile is stolen on next contention.
+    return null;
+  }
+}
+
+function processIsDemonstrablyDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+function tryRecoverDeadHlcLock(lockPath: string): boolean {
+  const claimPath = `${lockPath}.recovery`;
+  const claimNonce = randomUUID();
+  if (!acquireHlcRecoveryClaim(claimPath, claimNonce)) return false;
+  try {
+    const observed = readHlcLockPayload(lockPath);
+    if (observed === null || !processIsDemonstrablyDead(observed.pid)) return false;
+    const current = readHlcLockPayload(lockPath);
+    if (current === null || current.pid !== observed.pid || current.nonce !== observed.nonce)
+      return false;
+    rmSync(lockPath);
+    return true;
+  } finally {
+    releaseHlcLock({ path: claimPath, nonce: claimNonce });
+  }
+}
+
+function acquireHlcRecoveryClaim(claimPath: string, claimNonce: string): boolean {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      publishExclusiveLock(claimPath, claimNonce);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const observed = readHlcLockPayload(claimPath);
+    if (observed === null || !processIsDemonstrablyDead(observed.pid)) return false;
+    const current = readHlcLockPayload(claimPath);
+    if (current === null || current.pid !== observed.pid || current.nonce !== observed.nonce) {
+      return false;
+    }
+    try {
+      rmSync(claimPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return false;
+}
+
+function releaseHlcLock(lease: HlcLockLease): void {
+  const current = readHlcLockPayload(lease.path);
+  if (current === null || current.pid !== process.pid || current.nonce !== lease.nonce) return;
+  try {
+    rmSync(lease.path);
+  } catch {
+    // A verified owner may already have lost the path to an external cleanup.
   }
 }
 
@@ -335,8 +460,9 @@ function releaseHlcLock(lockPath: string): void {
 // writerId tiebreak).
 export function stampNext(_writerId: string, opts?: StampNextOpts): StampedClock {
   const p = opts?.path ?? getHlcPath();
+  assertNoReparsePointInPath(p);
   const observedMaxHlc = opts?.observedMaxHlc ?? null;
-  const lockPath = acquireHlcLock(p);
+  const lock = acquireHlcLock(p);
   try {
     const localHwm = loadPersistedHlc(p);
     // RECEIVE RULE: seed = MAX(local HWM, observedMaxHlc). nextHlc strictly
@@ -351,6 +477,6 @@ export function stampNext(_writerId: string, opts?: StampNextOpts): StampedClock
     persistHlc(next, seq, p);
     return { hlc: next, seq };
   } finally {
-    releaseHlcLock(lockPath);
+    releaseHlcLock(lock);
   }
 }

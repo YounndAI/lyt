@@ -3,6 +3,9 @@ name: lyt-pod
 description: >
   Overview of the user's Lyt pod — enumerates all meshes and vaults on this machine, grouped by mesh, with orphan vaults surfaced separately and summary stats (mesh count, vault count, pushable/subscriber/orphan breakdown). Trigger when the user runs /lyt-pod, or says "what's in my pod", "show me my pod", "give me a pod overview", "list all my vaults", "what meshes do I have", "show me everything in my pod", or similar phrasing on a pod-scoped enumeration. Composes `lyt mesh list --json` (mesh-level records) + `lyt vault list --json` (vault-level records) into one agent-facing summary. Read-only; pairs with /lyt-primer-context (agent priming with active arcs + writable status) and /lyt-search (query across the pod).
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.7.0
 capabilities: [read]
 runtimes: [claude, codex, agents]
@@ -132,6 +135,7 @@ The CLI emits stable, deterministically key-ordered JSON on stdout:
       "verifyFailCount": 0
     }
   ],
+  "destinations": { "<ridHex>": { "acquisitionSource": "...", "destination": { "kind": "local|github|unconfigured", "target": "...", "source": "..." }, "onlineState": "unknown", "upstreamState": "unknown" } },
   "displayNames": { "<ridHex>": "<mesh>/<vault>" },   // ridHex → canonical qualified display name
   "rollupTombstones": { ... },        // only when --include-tombstones is passed
   "rollupThresholdDays": <int>,       // only when --include-tombstones is passed
@@ -179,6 +183,7 @@ Synthesis rules:
 - **Summary line.** `N meshes` = `meshes.length` from Phase 2. `M vaults` = `vaults.length` from Phase 3 (filter out `status='tombstoned'` unless the user explicitly asked for tombstoned inclusion). The `(P pushable · S subscriber · O orphan)` breakdown counts each vault **once** by primary role, with precedence **home > subscriber > orphan** (a vault appearing in BOTH a `home_vaults` array AND any `subscribed_vaults` array is counted as **home**, not subscriber): a vault is **pushable** if it appears in any mesh's `home_vaults` AND that mesh has a non-null `push_target`; **subscriber** if it appears ONLY in `subscribed_vaults` arrays across all meshes (never as a home vault); **orphan** if its `homeMeshRidHex === null` (no mesh role at all).
 - **Mesh grouping.** Sort meshes by name (alphabetical) for stable rendering. Within each mesh: main vault first (marked `★`), then other home vaults sorted alphabetically (exclude the main-vault entry from this alphabetic list — it already rendered above with `★`; `home_vaults` includes the main vault per Phase 2 shape, so an LLM iterating the array verbatim would otherwise double-render the main vault), then subscribed vaults grouped at the end with a "subscribed (cross-mesh)" hint.
 - **Push-target hint.** Surface `push target: <push_kind>:<push_target>` next to the main vault when `push_target !== null`. Skip the hint when null (mesh is local-only).
+- **Per-vault destination.** Read `destinations[ridHex].destination`; show its effective kind/target and policy source. Do not infer a vault destination from the mesh name or legacy push-target prose.
 - **Orphan section.** Always include the heading even when empty (rendering "(none)" under it) — handlers parsing the output can rely on the section's presence. Each orphan vault gets a one-line heal suggestion: `lyt repair --target <orphan-vault-name> --apply --mesh <mesh>` (the canonical heal — binds a registered vault to a known mesh). A vault that is _registered-but-mesh-unlinked_ (the adopt mesh-link drift) heals via `lyt repair --apply` with **no args** (`lyt doctor` flags it). `lyt mesh adopt` remains for gh **cluster-discovery** of un-registered repos — not for re-linking an already-registered vault.
 - **User narrow framing.** If the user signaled a single mesh in Phase 1, render only that mesh's section under `## Meshes` plus the orphan section. Surface a one-line "(showing 1 of N meshes — re-invoke /lyt-pod for full overview)" hint.
 - **Large pod truncation.** If the combined vault count exceeds ~50 across all meshes, render the summary line + per-mesh counts and offer a "show all with `lyt vault list`" follow-up rather than dumping every vault inline. Do not silently drop entries.

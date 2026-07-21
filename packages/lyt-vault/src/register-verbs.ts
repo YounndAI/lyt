@@ -30,6 +30,7 @@ import { buildMachineCommand } from "./commands/machine.js";
 import { buildMeshCommand } from "./commands/mesh.js";
 import { buildPatternCommand } from "./commands/pattern.js";
 import { buildProvenanceCommand } from "./commands/provenance.js";
+import { buildReceiptCommand } from "./commands/receipt.js";
 import { buildRegistrySubcommand, buildVaultSubcommand } from "./vault-command.js";
 
 // release review + block-A.3 Commit 11 — single source of truth for
@@ -44,6 +45,7 @@ export function registerVaultVerbs(program: Command): void {
   program.addCommand(buildAuditCommand());
   program.addCommand(buildFrictionCommand());
   program.addCommand(buildProvenanceCommand());
+  program.addCommand(buildReceiptCommand());
   program.addCommand(buildCaptureMetricCommand());
   program.addCommand(buildMachineCommand());
   program.addCommand(buildFederationCommand());

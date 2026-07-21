@@ -22,6 +22,11 @@ import type { Client } from "@libsql/client";
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
 import { listMeshes, type MeshRow } from "../../registry/meshes-repo.js";
 import { listVaults, type VaultRow } from "../../registry/repo.js";
+import {
+  loadDestinationPolicyContext,
+  resolveCanonicalOwnedMeshDestination,
+  type DestinationPolicyContext,
+} from "./destination-policy-service.js";
 import { resolveConfig } from "../../util/config.js";
 import { compareHlcStamped } from "../../util/hlc.js";
 import { getWriterId } from "../../util/writer-id.js";
@@ -60,8 +65,7 @@ import {
 } from "../../yon/federation-mesh-ledger-read.js";
 
 // (Brief A) — the pod manifest (`pod.yon`) is a DERIVED view of the local
-// registry, regenerated from `registry.db` exactly like the pod-map vault
-// (pod-map-generate.ts). This is the SINGLE derivation path: both the lifecycle
+// registry. This is the SINGLE derivation path: both the lifecycle
 // regen hooks (init / adopt / forget) and `lyt federation rebuild` route through
 // `derivePodManifestDoc` so there is exactly one definition of "what the manifest
 // should contain given the registry". Dissolves the empty-manifest
@@ -69,7 +73,7 @@ import {
 //
 // The registry is the SoT; `pod.yon` is never hand-edited as truth. Anything a
 // handler types into `pod.yon` is overwritten on the next mutation-triggered
-// regen — same contract as pod-map.
+// regen.
 
 export interface DerivePodManifestOptions {
   handle: string;
@@ -155,24 +159,33 @@ export async function derivePodManifestDoc(
   // this is the sync-reconstitution path (reconcile === false; see the option
   // doc). Drop tombstoned registry rows first (the LOCAL soft-delete; manifest
   // retraction is the ledger `state` channel, wired at delete/forget).
+  const registryMeshes = await listMeshes(db);
+  const destinationPolicies = await loadDestinationPolicyContext(db);
   if (opts.reconcile !== false) {
     const registryVaults = (await listVaults(db)).filter((v) => v.status !== "tombstoned");
-    const registryMeshes = await listMeshes(db);
     reconcileVaultsIntoLedger(registryVaults);
-    reconcileMeshesIntoLedger(registryMeshes, state.fedRidHex, opts.handle);
+    reconcileMeshesIntoLedger(registryMeshes, state.fedRidHex, destinationPolicies);
   }
 
   // Step 3 — fold the ledger shards → the live vault/mesh set. The fold already
   // EXCLUDES tombstoned winners (the drop-retracted filter, now on `state`).
-  const fedMeshes: FedMeshRecord[] = liveFedMeshes().map((m) => ({
-    fedRidHex: m.fedRidHex.length > 0 ? m.fedRidHex : state.fedRidHex,
-    meshRidHex: m.meshRid,
-    meshName: m.meshName,
-    pushTarget: m.pushTarget,
-    pushKind: m.pushKind,
-    role: m.role,
-    addedAt: m.addedAt,
-  }));
+  const registryMeshByRid = new Map(registryMeshes.map((mesh) => [mesh.ridHex, mesh]));
+  const fedMeshes: FedMeshRecord[] = liveFedMeshes().map((m) => {
+    const localMesh = registryMeshByRid.get(m.meshRid);
+    const canonical =
+      localMesh?.ownCreated === true
+        ? legacyMeshTopologyProjection(localMesh, destinationPolicies)
+        : { pushTarget: m.pushTarget, pushKind: m.pushKind };
+    return {
+      fedRidHex: m.fedRidHex.length > 0 ? m.fedRidHex : state.fedRidHex,
+      meshRidHex: m.meshRid,
+      meshName: m.meshName,
+      pushTarget: canonical.pushTarget,
+      pushKind: canonical.pushKind,
+      role: m.role,
+      addedAt: m.addedAt,
+    };
+  });
 
   const fedVaults: FedVaultRecord[] = liveFedVaults().map((v) => ({
     vaultRidHex: v.vaultRid,
@@ -420,7 +433,7 @@ function compareFedMeshLedgerRecords(a: FedMeshLedgerRecord, b: FedMeshLedgerRec
 function reconcileMeshesIntoLedger(
   meshes: readonly MeshRow[],
   fedRidHex: string,
-  handle: string,
+  destinationPolicies: DestinationPolicyContext,
 ): void {
   // F2 (latency) — ONE ledger snapshot per reconcile (mesh-rail analog of the
   // vault dedup above). allRids + live-winner map + winner-record map +
@@ -434,8 +447,12 @@ function reconcileMeshesIntoLedger(
   const observed = observedMaxHlcFromFedMeshRecords(priorRecords);
   for (const m of meshes) {
     const rid = m.ridHex;
-    const pushTarget = m.pushTarget ?? handle;
-    const pushKind = m.pushKind ?? "handle";
+    // The topology ledger carries only a compatibility/origin projection. For
+    // owned meshes derive it from the semantic destination projection; never
+    // invent authority from the pod handle or read raw push fields as policy.
+    const projected = legacyMeshTopologyProjection(m, destinationPolicies);
+    const pushTarget = projected.pushTarget;
+    const pushKind = projected.pushKind;
     const role = m.ownCreated ? "own" : "join"; // R1 (FIX 3)
     if (!allRids.has(rid)) {
       appendFedMeshActive({
@@ -473,6 +490,29 @@ function reconcileMeshesIntoLedger(
       observedMaxHlc: observed,
     });
   }
+}
+
+function legacyMeshTopologyProjection(
+  mesh: MeshRow,
+  destinationPolicies: DestinationPolicyContext,
+): {
+  pushTarget: string;
+  pushKind: "handle" | "org";
+} {
+  if (mesh.ownCreated) {
+    const destination = resolveCanonicalOwnedMeshDestination(mesh, destinationPolicies);
+    if (destination.kind === "github") {
+      return {
+        pushTarget: destination.owner,
+        pushKind: destination.targetKind === "user" ? "handle" : "org",
+      };
+    }
+    return { pushTarget: "", pushKind: "handle" };
+  }
+  return {
+    pushTarget: mesh.pushTarget ?? "",
+    pushKind: mesh.pushKind ?? "handle",
+  };
 }
 
 // Struct-level "substantive change" compare for the DERIVED manifest. Two docs

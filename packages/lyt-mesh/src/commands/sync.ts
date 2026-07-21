@@ -25,29 +25,43 @@ import {
   deriveWriteGate,
   getHandleFromIdentity,
   getMeshByRid,
+  housekeepFlow,
+  getVaultByRid,
+  listMeshes,
+  listFederationStates,
+  listVaults,
+  loadDestinationPolicyContext,
   materializeVaultPublishable,
   normalizeGitHubRepoCoordinate,
   openRegistry,
   podNeedsConnect,
   reconcilePublishFlow,
   reconstructionExitCode,
+  resolveCanonicalOwnedVaultDestination,
+  resolveCanonicalOwnedVaultPublicationAuthority,
   resolveVault,
   syncPodLedgerFlow,
-  vaultRepoName,
   withSpinner,
   type AdoptRemoteRenameAsideResult,
   type ConnectPodResult,
   type ReconcilePublishResult,
   type SyncPodLedgerResult,
   type MaterializeVaultResult,
+  type EffectiveOwnedDestination,
 } from "@younndai/lyt-vault";
 
 import { syncCheckFlow, type VaultCheckReport } from "../flows/sync-check.js";
+import {
+  scopedSyncCheckFlow,
+  type ScopedSyncCheckOutcome,
+  type ScopedVaultCheckReport,
+} from "../flows/scoped-sync-check.js";
 import {
   syncFlow,
   type ConflictResolver,
   type VaultSyncReport,
   type VaultSyncStatus,
+  type SyncOnlineVaultAuthority,
 } from "../flows/sync.js";
 import { syncWatchFlow } from "../flows/sync-watch.js";
 
@@ -66,11 +80,13 @@ export interface SyncFederationDeps {
   connectPodFlow: typeof connectPodFlow;
   syncPodLedgerFlow: typeof syncPodLedgerFlow;
   reconcilePublishFlow: typeof reconcilePublishFlow;
+  housekeepFlow?: typeof housekeepFlow;
   // Phase C — the rename-aside actionable path + its HIL chooser
   // (injectable so the 3-option menu is unit-testable without a live TTY).
   adoptRemoteRenameAsideFlow: typeof adoptRemoteRenameAsideFlow;
   chooseConnectAction: (existingRemote: string) => Promise<ConnectChoice>;
   materializeScopedVault?: typeof materializeScopedVaultAfterSync;
+  scopedSyncCheck?: typeof scopedSyncCheckFlow;
 }
 
 export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Command {
@@ -80,10 +96,12 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
   const connectPodFlowFn = deps.connectPodFlow ?? connectPodFlow;
   const syncPodLedgerFlowFn = deps.syncPodLedgerFlow ?? syncPodLedgerFlow;
   const reconcilePublishFlowFn = deps.reconcilePublishFlow ?? reconcilePublishFlow;
+  const housekeepFlowFn = deps.housekeepFlow ?? housekeepFlow;
   const adoptRemoteRenameAsideFlowFn =
     deps.adoptRemoteRenameAsideFlow ?? adoptRemoteRenameAsideFlow;
   const chooseConnectActionFn = deps.chooseConnectAction ?? chooseConnectActionTty;
   const materializeScopedVaultFn = deps.materializeScopedVault ?? materializeScopedVaultAfterSync;
+  const scopedSyncCheckFn = deps.scopedSyncCheck ?? scopedSyncCheckFlow;
   const cmd = new Command("sync");
   cmd
     .description(
@@ -111,7 +129,7 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
     )
     .option(
       "--vault <name>",
-      "Scope the sync to ONE registered vault (by name, mesh-qualified name, origin coordinate, unique leaf, or an @-sigil pod-local alias — a bare name is NOT resolved as an alias). Only that vault is committed/pushed/pulled, and the pod-wide federation/publish pass is skipped so no other vault's repo is created.",
+      "Scope sync or --check to ONE registered vault (by name, mesh-qualified name, origin coordinate, unique leaf, or an @-sigil pod-local alias — a bare name is NOT resolved as an alias). Only that vault is inspected or synced, and pod-wide passes are skipped.",
     )
     .action(async (opts: SyncCliOpts) => {
       if (opts.check === true && opts.watch === true) {
@@ -119,13 +137,11 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
         console.error("lyt sync: --check and --watch are mutually exclusive.");
         process.exit(1);
       }
-      // R7/S3 — `--vault` scopes the DEFAULT sync path only. `--check` (read-only
-      // freshness) and `--watch` (the pod-wide daemon) do not carry a scope, so
-      // combining them with `--vault` would SILENTLY ignore the scope. Refuse
-      // loudly instead of pretending the scope took effect.
-      if (opts.vault !== undefined && (opts.check === true || opts.watch === true)) {
+      // Watch remains pod-wide. Scoped read-only inspection has its own closed
+      // one-vault path below and never enters the default/pod-wide sync flow.
+      if (opts.vault !== undefined && opts.watch === true) {
         // eslint-disable-next-line no-console
-        console.error("lyt sync: --vault is not supported with --check or --watch.");
+        console.error("lyt sync: --vault is not supported with --watch.");
         process.exit(1);
       }
       // R7/S3 — resolve the `--vault` argument to a registered vault through the
@@ -133,10 +149,10 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       // unknown or ambiguous name fails fast with a clear message (never a
       // silent all-vault sync). The canonical stored name feeds syncFlow's
       // `vaultNames` filter below.
-      let scopedVaultName: string | undefined;
-      if (opts.vault !== undefined) {
+      let scopedVaultIdentity: ScopedVaultIdentity | undefined;
+      if (opts.vault !== undefined && opts.check !== true) {
         try {
-          scopedVaultName = await resolveScopedVaultName(opts.vault);
+          scopedVaultIdentity = await resolveScopedVaultIdentity(opts.vault);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error(err instanceof Error ? err.message : String(err));
@@ -144,6 +160,22 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
         }
       }
       if (opts.check === true) {
+        if (opts.vault !== undefined) {
+          const scoped = await scopedSyncCheckFn(opts.vault);
+          if (opts.quiet === true) {
+            process.exit(scoped.exitCode);
+            return;
+          }
+          if (opts.json === true) {
+            // eslint-disable-next-line no-console
+            console.log(JSON.stringify(scoped, null, 2));
+            process.exit(scoped.exitCode);
+            return;
+          }
+          printScopedCheckHuman(scoped);
+          process.exit(scoped.exitCode);
+          return;
+        }
         const result = await syncCheckFlow();
         if (opts.quiet === true) {
           process.exit(result.exitCode);
@@ -158,14 +190,18 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
             ),
           );
           process.exit(result.exitCode);
+          return;
         }
         printCheckHuman(result.reports, result.summary);
         process.exit(result.exitCode);
+        return;
       }
       if (opts.watch === true) {
         const handle = await syncWatchFlow({
           commitDebounceMs: numericOpt(opts.commitDebounce),
           resolveMeshContext: opts.resolveMeshContext === true,
+          networkMode: opts.publish === false ? "local-only" : "online",
+          ...(opts.publish === false ? {} : { resolveOnlineAuthority: resolveSyncAuthority }),
           onTick: (report) => {
             const ts = new Date().toISOString();
             // eslint-disable-next-line no-console
@@ -187,43 +223,53 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       // in reconcilePublishFlow below, which runs after this resolves — no
       // nested spinner). --json/--quiet stay spinner-free; non-TTY prints
       // "Syncing…" once (zero escape codes).
+      const syncAuthority =
+        opts.publish === false
+          ? {
+              onlineAuthorityByVaultRid: {} as Record<string, SyncOnlineVaultAuthority>,
+            }
+          : await resolveSyncAuthority(
+              scopedVaultIdentity === undefined ? undefined : [scopedVaultIdentity.ridHex],
+            );
       const expectedScopedOrigin =
-        scopedVaultName !== undefined && opts.publish !== false
-          ? await resolveExpectedScopedOrigin(scopedVaultName)
-          : undefined;
+        scopedVaultIdentity === undefined
+          ? undefined
+          : syncAuthority.onlineAuthorityByVaultRid[scopedVaultIdentity.ridHex]?.expectedOrigin;
       const syncArgs = {
         resolveMeshContext: opts.resolveMeshContext === true,
         networkMode: opts.publish === false ? ("local-only" as const) : ("online" as const),
+        enforceOnlineAuthority: true,
         // R7/S3 — scope the commit/push/pull loop to the single resolved vault.
         // syncFlow's existing `vaultNames` filter (flows/sync.ts) is REUSED here —
         // no parallel scoped-sync path.
-        ...(scopedVaultName !== undefined ? { vaultNames: [scopedVaultName] } : {}),
+        ...(scopedVaultIdentity !== undefined ? { vaultRids: [scopedVaultIdentity.ridHex] } : {}),
         ...(opts.message !== undefined ? { message: opts.message } : {}),
         // 0.12.0 Phase D · A1 — the concurrent-write conflict resolver: a plain
         // keep-mine/theirs/both choice on a TTY, the safe never-lose `both`
         // default when non-interactive (no TTY, or --json/--quiet).
         resolveConflict: makeConflictResolver(opts),
-        ...(scopedVaultName !== undefined && expectedScopedOrigin !== undefined
-          ? {
-              expectedOriginByVault: {
-                [scopedVaultName]: expectedScopedOrigin,
-              },
-            }
-          : {}),
+        onlineAuthorityByVaultRid: syncAuthority.onlineAuthorityByVaultRid,
       };
       const result =
         opts.json !== true && opts.quiet !== true
           ? await withSpinner("", () => syncFlowFn(syncArgs), { op: "sync" })
           : await syncFlowFn(syncArgs);
       let scopedPublish: ScopedPublishOutcome | undefined;
-      if (scopedVaultName !== undefined) {
-        const report = result.reports.find((candidate) => candidate.name === scopedVaultName);
+      if (scopedVaultIdentity !== undefined) {
+        const scopedVaultName = scopedVaultIdentity.name;
+        const report = result.reports.find(
+          (candidate) => candidate.path === scopedVaultIdentity.path,
+        );
         scopedPublish =
           opts.publish === false
             ? scopedPublishHeld(scopedVaultName)
             : report?.status === "origin-mismatch"
               ? scopedPublishOriginMismatch(scopedVaultName, report, expectedScopedOrigin)
-              : await materializeScopedVaultFn({ vaultName: scopedVaultName, report });
+              : await materializeScopedVaultFn({
+                  vaultRid: scopedVaultIdentity.rid,
+                  vaultName: scopedVaultName,
+                  report,
+                });
       }
       if (opts.json !== true && opts.quiet !== true) {
         printSyncHuman(result.reports);
@@ -257,7 +303,7 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       // hidden inside any pass) so a reviewer can see the scope guard.
       const federationPassAllowed = isFederationPassAllowed({
         publishRequested: opts.publish !== false,
-        vaultScoped: scopedVaultName !== undefined,
+        vaultScoped: scopedVaultIdentity !== undefined,
       });
 
       let connectDeferredPublish = false;
@@ -372,6 +418,34 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       let podLedger: SyncPodLedgerResult | undefined;
       if (federationPassAllowed && !connectDeferredPublish) {
         podLedger = await syncPodLedgerFlowFn({ push: true });
+        const publishedMachineSnapshot = (podLedger as typeof podLedger & {
+          publishedMachineSnapshot?: unknown;
+        }).publishedMachineSnapshot;
+        const verifyPublishedSnapshot = (podLedger as typeof podLedger & {
+          revalidatePublishedMachineSnapshot?: () => Promise<boolean>;
+        }).revalidatePublishedMachineSnapshot;
+        if (podLedger.status === "synced" && publishedMachineSnapshot !== undefined && verifyPublishedSnapshot !== undefined) {
+          const runPublishedGc = housekeepFlowFn as unknown as (args: {
+            vaultRid?: string;
+            ledger: "sync";
+            publishedMachineSnapshot: unknown;
+            verifyPublishedSnapshot: () => Promise<boolean>;
+          }) => Promise<{ gc: Array<{ vaultName: string; outcome: string }> }>;
+          const housekeeping = await runPublishedGc({
+            ...(scopedVaultIdentity === undefined ? {} : { vaultRid: scopedVaultIdentity.ridHex }),
+            ledger: "sync",
+            publishedMachineSnapshot,
+            verifyPublishedSnapshot,
+          });
+          const changedVaults = new Set(
+            housekeeping.gc.filter((entry) => entry.outcome === "deleted").map((entry) => entry.vaultName),
+          );
+          for (const report of result.reports) {
+            if (!changedVaults.has(report.name)) continue;
+            report.pendingLytMutation = true;
+            report.message += " Local Lyt housekeeping is pending publication on the next sync.";
+          }
+        }
         if (opts.json !== true && opts.quiet !== true) {
           printPodLedgerHuman(podLedger);
         }
@@ -385,7 +459,8 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       // pod-ledger leg above so its pod.yon regen sees the reconstituted cache
       // (W4 staleness fix — see the ledger-leg comment).
       let publish: ReconcilePublishResult | undefined;
-      if (federationPassAllowed && !connectDeferredPublish) {
+      const podLedgerAllowsPublish = podLedgerAllowsOuterPublish(podLedger);
+      if (federationPassAllowed && !connectDeferredPublish && podLedgerAllowsPublish) {
         publish = await reconcilePublishFlowFn({ push: true });
         if (opts.json !== true && opts.quiet !== true) {
           printPublishHuman(publish);
@@ -403,7 +478,7 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
         publishOk &&
         podLedgerOk &&
         scopedPublishOk;
-      if (opts.json === true && scopedVaultName !== undefined) {
+      if (opts.json === true && scopedVaultIdentity !== undefined) {
         // eslint-disable-next-line no-console
         console.log(
           JSON.stringify(
@@ -418,6 +493,18 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       );
     });
   return cmd;
+}
+
+export function podLedgerAllowsOuterPublish(podLedger: SyncPodLedgerResult | undefined): boolean {
+  return (
+    podLedger === undefined ||
+    podLedger.status === "skipped" ||
+    (podLedger.status === "synced" &&
+      (!podLedger.committed ||
+        (podLedger.proofCommitted &&
+          podLedger.proofRecordCount === 2 &&
+          podLedger.receiptPersisted)))
+  );
 }
 
 export type ScopedPublishStatus =
@@ -475,6 +562,8 @@ function scopedPublishOriginMismatch(
 }
 
 export async function materializeScopedVaultAfterSync(args: {
+  vaultRid: Uint8Array;
+  /** Initial display name only; never used for identity resolution. */
   vaultName: string;
   report: VaultSyncReport | undefined;
 }): Promise<ScopedPublishOutcome> {
@@ -485,10 +574,15 @@ export async function materializeScopedVaultAfterSync(args: {
       const podLedger = await syncPodLedgerFlow({ registryDb: db });
       warnings.push(...podLedger.warnings);
       if (podLedger.status === "synced" && podLedger.podDir !== undefined) {
+        const podHandle = getHandleFromIdentity();
         const podCommit = await commitPodRepo(
           podLedger.podDir,
           "chore(lyt): advertise scoped vault publication",
-          { push: true },
+          {
+            push: true,
+            permissionActor: podHandle,
+            permissionRepository: `${podHandle}/lyt-pod`,
+          },
         );
         warnings.push(...podCommit.warnings);
       } else {
@@ -498,7 +592,7 @@ export async function materializeScopedVaultAfterSync(args: {
       }
       return warnings;
     };
-    const vault = await resolveVault(db, args.vaultName);
+    const vault = await getVaultByRid(db, args.vaultRid);
     if (vault === null) {
       return {
         vaultName: args.vaultName,
@@ -515,11 +609,14 @@ export async function materializeScopedVaultAfterSync(args: {
     }
     const writeGate = await deriveWriteGate(vault, db);
     const mesh = vault.homeMeshRid === null ? null : await getMeshByRid(db, vault.homeMeshRid);
+    const policyContext = await loadDestinationPolicyContext(db);
+    const authority = resolveCanonicalOwnedVaultPublicationAuthority(vault, mesh, policyContext);
+    const destination =
+      authority?.destination ?? resolveCanonicalOwnedVaultDestination(vault, mesh, policyContext);
     const eligibility = classifyScopedPublishEligibility({
       publishable: !writeGate.blocked,
-      mesh,
-      existingRepoCoordinate:
-        vault.gitUrl === null ? null : normalizeGitHubRepoCoordinate(vault.gitUrl),
+      destination,
+      legacyOriginHint: vault.gitUrl === null ? null : normalizeGitHubRepoCoordinate(vault.gitUrl),
       reportStatus: args.report?.status,
     });
     if (eligibility.status === "skipped-readonly") {
@@ -551,7 +648,20 @@ export async function materializeScopedVaultAfterSync(args: {
       };
     }
     const pushTarget = eligibility.pushTarget;
-    const expectedRepo = `${pushTarget}/${vaultRepoName(vault.name)}`;
+    if (destination.kind !== "github" || destination.repositoryName === null) {
+      return {
+        vaultName: vault.name,
+        status: "local-only-no-push-target",
+        remoteAction: "none",
+        visibility: "private",
+        expectedRepo: null,
+        materialized: null,
+        syncStatus: args.report?.status ?? null,
+        ok: true,
+        message: "Saved locally; this vault has no exact RID-bound repository policy.",
+      };
+    }
+    const expectedRepo = `${destination.owner}/${destination.repositoryName}`;
     if (eligibility.status === "sync-incomplete") {
       return {
         vaultName: vault.name,
@@ -583,10 +693,14 @@ export async function materializeScopedVaultAfterSync(args: {
       materialized = await materializeVaultPublishable(vault, {
         handle: getHandleFromIdentity(),
         repoOwner: pushTarget,
+        repoName: destination.repositoryName,
+        repoTargetKind: destination.kind === "github" ? destination.targetKind : undefined,
+        repoOwnerAuthority: "effective-owned-destination",
         createRemoteIfMissing: true,
         push: true,
         setRemote: true,
         visibility: "private",
+        registryDb: db,
       });
     } catch (err) {
       return {
@@ -637,31 +751,31 @@ export type ScopedPublishEligibility =
 
 export function classifyScopedPublishEligibility(args: {
   publishable: boolean;
-  mesh: { ownCreated: boolean; pushTarget: string | null } | null;
-  existingRepoCoordinate?: string | null;
+  destination: EffectiveOwnedDestination;
+  /** Existing origin evidence only; never authorizes creation or retargeting. */
+  legacyOriginHint?: string | null;
   reportStatus: VaultSyncStatus | undefined;
 }): ScopedPublishEligibility {
   if (!args.publishable) return { status: "skipped-readonly" };
-  // Scoped sync is an explicit outward action on one owned vault. Its mesh's
-  // configured target is therefore the inherited publication coordinate;
-  // GitHub authorization remains the final permission gate. `ownCreated` is a
-  // stale false value on pre-migration pods and must not erase that coordinate.
-  const pushTarget = args.mesh?.pushTarget ?? null;
-  const existingOwner = args.existingRepoCoordinate?.split("/", 1)[0] ?? null;
+  const exactRepository =
+    args.destination.kind === "github" && args.destination.repositoryName !== null
+      ? `${args.destination.owner}/${args.destination.repositoryName}`.toLowerCase()
+      : null;
   if (
-    existingOwner !== null &&
-    existingOwner.length > 0 &&
+    exactRepository !== null &&
+    args.legacyOriginHint?.toLowerCase() === exactRepository &&
     (args.reportStatus === "clean" ||
       args.reportStatus === "committed" ||
       args.reportStatus === "pushed" ||
       args.reportStatus === "pulled" ||
       args.reportStatus === "diverged-synced")
   ) {
-    return { status: "already-online", pushTarget: existingOwner };
+    return { status: "already-online", pushTarget: exactRepository.split("/", 1)[0]! };
   }
-  if (pushTarget === null || pushTarget.length === 0) {
+  if (args.destination.kind !== "github" || args.destination.repositoryName === null) {
     return { status: "local-only-no-push-target" };
   }
+  const pushTarget = args.destination.owner;
   switch (args.reportStatus) {
     case "no-upstream":
       return { status: "publish-needed", pushTarget };
@@ -735,7 +849,14 @@ export function isFederationPassAllowed(scope: {
 // tiebreaks) and a plain Error when nothing matches — both surface to the CLI
 // as a clear message + exit 1. Reuses the same resolver the rest of the verb
 // fleet uses; no scoped-sync-specific name matching.
-export async function resolveScopedVaultName(vault: string): Promise<string> {
+export interface ScopedVaultIdentity {
+  rid: Uint8Array;
+  ridHex: string;
+  name: string;
+  path: string;
+}
+
+export async function resolveScopedVaultIdentity(vault: string): Promise<ScopedVaultIdentity> {
   const db = await openRegistry();
   try {
     const resolved = await resolveVault(db, vault);
@@ -744,24 +865,87 @@ export async function resolveScopedVaultName(vault: string): Promise<string> {
         `lyt sync: no registered vault matches '${vault}'. Run \`lyt vault list\` to see your vaults.`,
       );
     }
-    return resolved.name;
+    return {
+      rid: resolved.rid,
+      ridHex: resolved.ridHex,
+      name: resolved.name,
+      path: resolved.path,
+    };
   } finally {
     await closeRegistry(db);
   }
 }
 
-async function resolveExpectedScopedOrigin(vaultName: string): Promise<string | undefined> {
+export async function resolveScopedVaultName(vault: string): Promise<string> {
+  return (await resolveScopedVaultIdentity(vault)).name;
+}
+
+async function resolveSyncAuthority(vaultRids?: readonly string[]): Promise<{
+  onlineAuthorityByVaultRid: Record<string, SyncOnlineVaultAuthority>;
+}> {
   const db = await openRegistry();
   try {
-    const vault = await resolveVault(db, vaultName);
-    if (vault === null || vault.homeMeshRid === null) return undefined;
-    const mesh = await getMeshByRid(db, vault.homeMeshRid);
-    if (mesh === null || mesh.pushTarget === null || mesh.pushTarget.length === 0) {
-      return vault.gitUrl === null
-        ? undefined
-        : (normalizeGitHubRepoCoordinate(vault.gitUrl) ?? undefined);
+    const all = await listVaults(db);
+    const meshes = await listMeshes(db);
+    const context = await loadDestinationPolicyContext(db);
+    const states = await listFederationStates(db);
+    const actor = states.length === 1 ? states[0]!.handle : null;
+    const resolved = all.flatMap((vault) => {
+      if (vault.status !== "active" || vault.source !== "own") return [];
+      const mesh =
+        vault.homeMeshRid === null
+          ? null
+          : (meshes.find((candidate) => candidate.ridHex === vault.homeMeshRidHex) ?? null);
+      const authority = resolveCanonicalOwnedVaultPublicationAuthority(vault, mesh, context);
+      if (authority === null) return [];
+      const repository = `${authority.destination.owner}/${authority.destination.repositoryName}`;
+      return [{ vault, authority, repository }];
+    });
+    const assignments = new Map<string, typeof resolved>();
+    for (const assignment of resolved) {
+      const coordinate = `github.com/${assignment.repository}`.toLowerCase();
+      const existing = assignments.get(coordinate);
+      if (existing === undefined) assignments.set(coordinate, [assignment]);
+      else existing.push(assignment);
     }
-    return `${mesh.pushTarget}/${vaultRepoName(vault.name)}`;
+    const collisions = [...assignments.entries()]
+      .filter(([, entries]) => entries.length > 1)
+      .sort(([left], [right]) => left.localeCompare(right));
+    if (collisions.length > 0) {
+      const diagnostic = collisions
+        .map(
+          ([coordinate, entries]) =>
+            `${coordinate} => ${entries
+              .map(({ vault }) => `${vault.ridHex} (${vault.name})`)
+              .sort()
+              .join(", ")}`,
+        )
+        .join("; ");
+      throw new Error(
+        `lyt sync: publication coordinate collision; refusing online sync: ${diagnostic}`,
+      );
+    }
+    const selected =
+      vaultRids === undefined
+        ? resolved
+        : resolved.filter(({ vault }) => vaultRids.includes(vault.ridHex));
+    const onlineAuthorityByVaultRid: Record<string, SyncOnlineVaultAuthority> = {};
+    for (const { vault, authority, repository } of selected) {
+      if (actor === null || context.podRid === null) continue;
+      onlineAuthorityByVaultRid[vault.ridHex] = {
+        expectedOrigin: repository,
+        publication: {
+          actor,
+          target: `github:${authority.destination.targetKind}/${authority.destination.owner}`,
+          repository,
+          vaultRid: vault.rid,
+          podRid: context.podRid,
+          ...(context.podRoot === undefined ? {} : { podRoot: context.podRoot }),
+          policy: authority,
+        },
+      };
+    }
+    return { onlineAuthorityByVaultRid };
   } finally {
     await closeRegistry(db);
   }
@@ -1001,6 +1185,12 @@ export function printPodLedgerHuman(p: SyncPodLedgerResult): void {
   const detail = parts.length > 0 ? parts.join(" · ") : "up to date";
   // eslint-disable-next-line no-console
   console.log(`lyt sync (ledger): ${p.status} — ${detail}`);
+  if (p.status === "error" || p.status === "conflict") {
+    // eslint-disable-next-line no-console
+    console.log(
+      "  Next: run `lyt doctor`, then retry `lyt sync` after the reported issue is clear.",
+    );
+  }
   for (const w of p.warnings) {
     // eslint-disable-next-line no-console
     console.log(`  ⚠ ${w}`);
@@ -1042,6 +1232,8 @@ const CHECK_STATUS_LABEL: Record<string, string> = {
   disconnected: "disconnected",
   tombstoned: "removed",
   access_lost: "no access",
+  "remote-different": "online changed",
+  "remote-unknown": "online status unknown",
 };
 
 // A status that represents pending sync work (unsaved / to send / to receive).
@@ -1140,4 +1332,27 @@ export function printCheckHuman(
       ` ${checkStatusLabel(r.status).padEnd(17)} ${r.name}${extras.length > 0 ? " " + extras.join(" ") : ""}`,
     );
   }
+}
+
+export function printScopedCheckHuman(outcome: ScopedSyncCheckOutcome): void {
+  if (outcome.kind === "refused") {
+    // eslint-disable-next-line no-console
+    console.error(`lyt sync --check: ${outcome.refusal.summary}`);
+    // eslint-disable-next-line no-console
+    console.error(`  ${outcome.refusal.nextAction}`);
+    return;
+  }
+  const checked: ScopedVaultCheckReport = outcome.reports[0];
+  const extras: string[] = [];
+  if (checked.frozen && checked.remaining !== null) extras.push(`(${checked.remaining} left)`);
+  if (checked.ahead !== null && checked.ahead > 0) extras.push(`${checked.ahead} to send`);
+  if (checked.behind !== null && checked.behind > 0) extras.push(`${checked.behind} to receive`);
+  if (checked.dirtyCount !== null && checked.dirtyCount > 0) {
+    extras.push(`${checked.dirtyCount} change(s)`);
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `lyt sync --check: ${checkStatusLabel(checked.status)} — ${checked.name}` +
+      (extras.length === 0 ? "" : ` (${extras.join(" · ")})`),
+  );
 }

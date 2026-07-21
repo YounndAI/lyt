@@ -17,15 +17,14 @@
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../../registry/client.js";
-import { getMeshByName, getMeshByRid, insertMesh, type MeshRow } from "../../registry/meshes-repo.js";
 import {
-  deleteAllAliases,
-  insertAliasRow,
-} from "../../registry/aliases-repo.js";
-import {
-  addSubscription,
-  deleteAllSubscriptions,
-} from "../../registry/mesh-subscriptions-repo.js";
+  getMeshByName,
+  getMeshByRid,
+  insertMesh,
+  type MeshRow,
+} from "../../registry/meshes-repo.js";
+import { deleteAllAliases, insertAliasRow } from "../../registry/aliases-repo.js";
+import { addSubscription, deleteAllSubscriptions } from "../../registry/mesh-subscriptions-repo.js";
 import {
   deleteAllMeshEdges,
   getVaultByRid,
@@ -36,18 +35,9 @@ import { canonicalizeCoordinate, gitUrlToCoordinate } from "../../registry/vault
 import { bucketMeshName } from "../../util/bucket-mesh.js";
 import { slugifyHandle } from "../../util/federation-paths.js";
 import { hexToUuid7Bytes, newUuidv7Bytes } from "../../util/uuid7.js";
-import {
-  liveAliases,
-  type LiveAlias,
-} from "../../yon/alias-ledger-read.js";
-import {
-  liveMeshEdges,
-  type LiveMeshEdge,
-} from "../../yon/mesh-edge-ledger-read.js";
-import {
-  liveSubscriptions,
-  type LiveSubscription,
-} from "../../yon/subscription-ledger-read.js";
+import { liveAliases, type LiveAlias } from "../../yon/alias-ledger-read.js";
+import { liveMeshEdges, type LiveMeshEdge } from "../../yon/mesh-edge-ledger-read.js";
+import { liveSubscriptions, type LiveSubscription } from "../../yon/subscription-ledger-read.js";
 import {
   foldFedVaultWinners,
   readAllFedVaultRecords,
@@ -108,10 +98,7 @@ import { regeneratePodManifestNonFatal } from "./regenerate.js";
 // name rule now live in util/bucket-mesh.ts — the SINGLE source of truth shared
 // with the LIVE receive path (flows/clone.ts + flows/subscribe.ts, Inc-2 Phase
 // B). Re-exported here for back-compat with any importer of these symbols.
-export {
-  SUBSCRIPTION_BUCKET_MESH,
-  SHARED_BUCKET_MESH,
-} from "../../util/bucket-mesh.js";
+export { SUBSCRIPTION_BUCKET_MESH, SHARED_BUCKET_MESH } from "../../util/bucket-mesh.js";
 
 export interface RebuildFederationCacheArgs {
   // Open-once seam (vindicated repeatedly across this codebase): callers may
@@ -641,7 +628,10 @@ async function writeBackRegistryFromLedger(
     if (!nameChanged && !homeChanged) continue;
 
     if (homeMeshBytes === undefined) {
-      await db.execute({ sql: "UPDATE vaults SET name = ? WHERE rid = ?", args: [lv.vaultName, ridBytes] });
+      await db.execute({
+        sql: "UPDATE vaults SET name = ? WHERE rid = ?",
+        args: [lv.vaultName, ridBytes],
+      });
     } else {
       await db.execute({
         sql: "UPDATE vaults SET name = ?, home_mesh_rid = ? WHERE rid = ?",
@@ -690,7 +680,10 @@ async function writeBackRegistryFromLedger(
 
     if (ownChanged) {
       await db.execute({
-        sql: "UPDATE meshes SET name = ?, own_created = ? WHERE rid = ?",
+        sql: `UPDATE meshes
+              SET name = ?, own_created = ?, destination_kind = NULL,
+                  destination_source = NULL
+              WHERE rid = ?`,
         args: [lm.meshName, desiredOwnCreated ? 1 : 0, ridBytes],
       });
     } else {

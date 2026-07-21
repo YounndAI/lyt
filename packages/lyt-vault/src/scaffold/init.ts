@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,6 +52,14 @@ import {
 import { isMeshDefiner, writeMeshContextFile } from "./mesh-context.js";
 import { renderMemscopeYon } from "../yon/memscope.js";
 import { renderVaultYon } from "../yon/vault.js";
+import { assertSafeWritePath } from "../util/write-path-guard.js";
+import {
+  createInitialCheckpointContext,
+  finalizeInitialCheckpoint,
+  type CheckpointGitRunner,
+  type InitialCheckpointContext,
+  type LocalCheckpointResult,
+} from "./local-checkpoint.js";
 
 // Bundled v1 reference @AUTOMATOR YON declarations copied into every fresh
 // vault's .lyt/automators/. Block-A.3 shipped metadata-filler.yon (the
@@ -100,12 +108,20 @@ export interface InitOptions {
   topics?: readonly string[] | undefined;
   starterFigment?: boolean | undefined;
   gitInit?: boolean | undefined;
+  /** Retained for CLI compatibility; fresh Git scaffolds checkpoint regardless. */
   commitInitial?: boolean | undefined;
+  /** Focused test seam for a checkpoint failure; production uses git directly. */
+  checkpointGitRunner?: CheckpointGitRunner | undefined;
+  /** Higher-level creation flows defer until their final Lyt-authored binding write. */
+  checkpointMode?: "automatic" | "deferred" | undefined;
   // v1.B.3 — when present, scaffolded vault.yon gets a @VAULT_HOME_MESH
   // block pointing at this mesh. Absence leaves vault.yon mesh-unaffiliated
   // (pre-v1.B.3 behavior; the v1.B.3 init flow's auto-personal branch and
   // clone --to-mesh path always set this).
   homeMesh?: ScaffoldHomeMesh | undefined;
+  /** Immutable creation-plan identities. Absent only for non-creation callers. */
+  plannedVaultRid?: Uint8Array | undefined;
+  plannedMemscopeRid?: Uint8Array | undefined;
 }
 
 export interface InitResult {
@@ -115,10 +131,67 @@ export interface InitResult {
   template: TemplateName;
   gitInitialized: boolean;
   initialCommitMade: boolean;
+  checkpoint: LocalCheckpointResult;
+  /** Exact vault-relative journal for a deferred higher-level handoff. */
+  checkpointContext: InitialCheckpointContext;
   primingFilesWritten: string[];
   // Phase C (UNIT 1) — which tier payload was materialised. "rich" for a
   // `{mesh}/main` vault (full seed + mesh-prop write); "mini" for a member vault.
   tier: ScaffoldTier;
+}
+
+const OBSIDIAN_SCAFFOLD_PATHS = [
+  ".obsidian/app.json",
+  ".obsidian/community-plugins.json",
+  ".obsidian/core-plugins.json",
+  ".obsidian/workspace.json",
+] as const;
+
+/** Pure, vault-relative first-checkpoint journal used by CreationPlanV1. */
+export function plannedInitialScaffoldPaths(args: {
+  name: string;
+  template?: TemplateName | undefined;
+  starterFigment?: boolean | undefined;
+}): string[] {
+  const paths = [
+    ".gitignore",
+    ".lyt/agents.md",
+    ".lyt/audit/.gitkeep",
+    ".lyt/automators/arc-builder.yon",
+    ".lyt/automators/lane-builder.yon",
+    ".lyt/automators/metadata-filler.yon",
+    ".lyt/lyt-overview.md",
+    ".lyt/memscope.yon",
+    ".lyt/mesh-context.md",
+    ".lyt/vault.yon",
+    "README.md",
+    "notes/.gitkeep",
+  ];
+  // The optional Obsidian template writes local editor state, never a
+  // Lyt-authored checkpoint artifact. Keep it out of this checkpoint journal
+  // and every exact-path initial commit.
+  if (args.starterFigment !== false) {
+    paths.push(...payloadForVault(args.name).seedFigments.map((seed) => seed.relativePath));
+  }
+  return [...new Set(paths)].sort();
+}
+
+/** Exact local writes for a first scaffold, including ignored editor state. */
+export function plannedInitialLocalWritePaths(args: {
+  name: string;
+  template?: TemplateName | undefined;
+  starterFigment?: boolean | undefined;
+}): string[] {
+  const paths = plannedInitialScaffoldPaths(args);
+  if ((args.template ?? DEFAULT_TEMPLATE) === "obsidian-default") {
+    paths.push(...OBSIDIAN_SCAFFOLD_PATHS);
+  }
+  return [...new Set(paths)].sort();
+}
+
+/** Exact ignored editor-state writes for receipt evidence. */
+export function plannedObsidianScaffoldPaths(template: TemplateName): string[] {
+  return template === "obsidian-default" ? [...OBSIDIAN_SCAFFOLD_PATHS] : [];
 }
 
 export function initVault(opts: InitOptions): InitResult {
@@ -129,8 +202,11 @@ export function initVault(opts: InitOptions): InitResult {
   ensureEmptyOrCreate(vaultPath);
 
   const owner = getIdentity();
-  const vaultRid = newUuidv7Bytes();
-  const memscopeRid = newUuidv7Bytes();
+  const journal = new ScaffoldWriteJournal(vaultPath);
+  // A creation plan owns these identities.  Never mint a replacement after a
+  // retry or partial apply; legacy/non-creation callers retain fresh IDs.
+  const vaultRid = opts.plannedVaultRid ?? newUuidv7Bytes();
+  const memscopeRid = opts.plannedMemscopeRid ?? newUuidv7Bytes();
   const createdAt = new Date().toISOString();
 
   // Phase C (UNIT 1) — branch the scaffold payload by tier. `{mesh}/main` →
@@ -139,16 +215,25 @@ export function initVault(opts: InitOptions): InitResult {
   // does NOT inline the contents, so B-1's contract can later supply the data.
   const tier = resolveScaffoldTier(opts.name);
 
-  writeVaultYon({ vaultPath, name: opts.name, vaultRid, memscopeRid, owner, createdAt, opts });
-  writeMemscopeYon({ vaultPath, name: opts.name, vaultRid, memscopeRid, owner });
+  writeVaultYon({
+    vaultPath,
+    name: opts.name,
+    vaultRid,
+    memscopeRid,
+    owner,
+    createdAt,
+    opts,
+    journal,
+  });
+  writeMemscopeYon({ vaultPath, name: opts.name, vaultRid, memscopeRid, owner, journal });
   if (template === "obsidian-default") {
     writeObsidianScaffold(vaultPath, template);
   }
-  writeReadme(vaultPath, opts.name);
-  writeVaultGitignore(vaultPath);
-  writeNotesPlaceholder(vaultPath);
-  writeAuditDirPlaceholder(vaultPath);
-  copyBundledAutomators(vaultPath);
+  writeReadme(vaultPath, opts.name, journal);
+  writeVaultGitignore(vaultPath, journal);
+  writeNotesPlaceholder(vaultPath, journal);
+  writeAuditDirPlaceholder(vaultPath, journal);
+  copyBundledAutomators(vaultPath, journal);
 
   const primingFilesWritten = writePrimingFiles({
     vaultPath,
@@ -162,6 +247,7 @@ export function initVault(opts: InitOptions): InitResult {
     // seeds so their frontmatter shows the actual creation instant, not the
     // 1970 epoch sentinel. Same `createdAt` already stamped into vault.yon.
     createdAt,
+    journal,
   });
 
   const gitInit = opts.gitInit ?? true;
@@ -170,10 +256,13 @@ export function initVault(opts: InitOptions): InitResult {
     gitInitialized = runGitInit(vaultPath);
   }
 
-  let initialCommitMade = false;
-  if (gitInitialized && opts.commitInitial === true) {
-    initialCommitMade = runInitialCommit(vaultPath, primingFilesWritten);
-  }
+  const checkpointContext = createInitialCheckpointContext(vaultPath, journal.paths);
+  const checkpoint = !gitInitialized
+    ? { status: "skipped" as const, paths: checkpointContext.paths, affectedRepositoryCount: 0 }
+    : opts.checkpointMode === "deferred"
+      ? { status: "deferred" as const, paths: checkpointContext.paths, affectedRepositoryCount: 0 }
+      : finalizeInitialCheckpoint(checkpointContext, opts.checkpointGitRunner);
+  const initialCommitMade = checkpoint.status === "committed";
 
   return {
     vaultPath,
@@ -182,12 +271,15 @@ export function initVault(opts: InitOptions): InitResult {
     template,
     gitInitialized,
     initialCommitMade,
+    checkpoint,
+    checkpointContext,
     primingFilesWritten,
     tier,
   };
 }
 
 function ensureEmptyOrCreate(dir: string): void {
+  assertSafeWritePath(dir);
   if (existsSync(dir)) {
     const entries = readdirSync(dir);
     if (entries.length > 0) {
@@ -201,9 +293,27 @@ function ensureEmptyOrCreate(dir: string): void {
   mkdirSync(dir, { recursive: true });
 }
 
-function writeFile(filePath: string, content: string): void {
+class ScaffoldWriteJournal {
+  private readonly recorded = new Set<string>();
+
+  constructor(private readonly vaultPath: string) {}
+
+  record(filePath: string): void {
+    const path = relative(this.vaultPath, filePath).split(sep).join(posix.sep);
+    if (path === ".obsidian" || path.startsWith(".obsidian/")) return;
+    this.recorded.add(path);
+  }
+
+  get paths(): string[] {
+    return [...this.recorded].sort();
+  }
+}
+
+function writeFile(filePath: string, content: string, journal?: ScaffoldWriteJournal): void {
+  assertSafeWritePath(filePath);
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, content, "utf8");
+  journal?.record(filePath);
 }
 
 interface WriteVaultYonArgs {
@@ -214,6 +324,7 @@ interface WriteVaultYonArgs {
   owner: string;
   createdAt: string;
   opts: InitOptions;
+  journal: ScaffoldWriteJournal;
 }
 
 function writeVaultYon(args: WriteVaultYonArgs): void {
@@ -248,7 +359,7 @@ function writeVaultYon(args: WriteVaultYonArgs): void {
         }
       : {}),
   });
-  writeFile(join(args.vaultPath, ".lyt", "vault.yon"), content);
+  writeFile(join(args.vaultPath, ".lyt", "vault.yon"), content, args.journal);
 }
 
 interface WriteMemscopeYonArgs {
@@ -257,6 +368,7 @@ interface WriteMemscopeYonArgs {
   vaultRid: Uint8Array;
   memscopeRid: Uint8Array;
   owner: string;
+  journal: ScaffoldWriteJournal;
 }
 
 function writeMemscopeYon(args: WriteMemscopeYonArgs): void {
@@ -274,7 +386,7 @@ function writeMemscopeYon(args: WriteMemscopeYonArgs): void {
     allowExpandToProject: false,
     allowExpandToWorkspace: false,
   });
-  writeFile(join(args.vaultPath, ".lyt", "memscope.yon"), content);
+  writeFile(join(args.vaultPath, ".lyt", "memscope.yon"), content, args.journal);
 }
 
 function writeObsidianScaffold(vaultPath: string, template: TemplateName): void {
@@ -291,18 +403,20 @@ function writeObsidianScaffold(vaultPath: string, template: TemplateName): void 
 // template (markers + boilerplate). Routing through regenReadme (rather than a
 // raw write) keeps the write path identical to the later marker-bounded regen
 // and to the conformance path, so there is ONE README-writing chokepoint.
-function writeReadme(vaultPath: string, name: string): void {
-  regenReadme(vaultPath, name);
+function writeReadme(vaultPath: string, name: string, journal: ScaffoldWriteJournal): void {
+  assertSafeWritePath(join(vaultPath, "README.md"));
+  if (regenReadme(vaultPath, name).written) journal.record(join(vaultPath, "README.md"));
 }
 
-function writeVaultGitignore(vaultPath: string): void {
-  writeFile(join(vaultPath, ".gitignore"), getVaultGitignore());
+function writeVaultGitignore(vaultPath: string, journal: ScaffoldWriteJournal): void {
+  writeFile(join(vaultPath, ".gitignore"), getVaultGitignore(), journal);
 }
 
-function writeNotesPlaceholder(vaultPath: string): void {
+function writeNotesPlaceholder(vaultPath: string, journal: ScaffoldWriteJournal): void {
   writeFile(
     join(vaultPath, "notes", ".gitkeep"),
     "# Notes (Figments) live here. Subfolders are organizational only — Lyt indexes by content.\n",
+    journal,
   );
 }
 
@@ -311,10 +425,11 @@ function writeNotesPlaceholder(vaultPath: string): void {
 // place for compliance evidence; .gitkeep ensures the empty directory is
 // tracked by git. The directory is intentionally NOT gitignored — exported
 // audit markdown is the handler-shareable cross-machine artifact.
-function writeAuditDirPlaceholder(vaultPath: string): void {
+function writeAuditDirPlaceholder(vaultPath: string, journal: ScaffoldWriteJournal): void {
   writeFile(
     join(vaultPath, ".lyt", "audit", ".gitkeep"),
     "# `lyt audit export` writes per-window markdown files here.\n",
+    journal,
   );
 }
 
@@ -322,8 +437,9 @@ function writeAuditDirPlaceholder(vaultPath: string): void {
 // metadata-filler.yon only) into the fresh vault's .lyt/automators/.
 // Additive on adopt: never overwrites an existing handler-customised copy.
 // block-B's lyt-runner reads these declarations at runtime.
-export function copyBundledAutomators(vaultPath: string): void {
+export function copyBundledAutomators(vaultPath: string, journal?: ScaffoldWriteJournal): void {
   const targetDir = join(vaultPath, ".lyt", "automators");
+  assertSafeWritePath(targetDir);
   mkdirSync(targetDir, { recursive: true });
   const sourceDir = getBundledAutomatorsSourceDir();
   for (const name of BUNDLED_AUTOMATOR_FILENAMES) {
@@ -331,7 +447,9 @@ export function copyBundledAutomators(vaultPath: string): void {
     if (existsSync(target)) continue; // additive: respect handler overrides
     const source = join(sourceDir, name);
     if (!existsSync(source)) continue; // skip if not on disk (e.g., dev builds with stale dist)
+    assertSafeWritePath(target);
     copyFileSync(source, target);
+    journal?.record(target);
   }
 }
 
@@ -361,6 +479,7 @@ interface WritePrimingFilesArgs {
   // Phase A (UNIT 1) — real vault init time (ISO-8601) stamped into the seed
   // frontmatter `created`/`modified` (== createdAt on first scaffold).
   createdAt: string;
+  journal: ScaffoldWriteJournal;
 }
 
 function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
@@ -377,6 +496,7 @@ function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
       owner: args.owner,
       dates: { created: args.createdAt },
     }),
+    args.journal,
   );
   written.push(LYT_OVERVIEW_REL_WRITE_PATH);
 
@@ -391,6 +511,7 @@ function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
   // construction. An explicit --desc still flows through normally; without one,
   // desc is null exactly as before Phase C.
   const meshDesc = args.desc ?? null;
+  assertSafeWritePath(join(args.vaultPath, ".lyt", "mesh-context.md"));
   writeMeshContextFile(args.vaultPath, {
     vaultName: args.name,
     parentVaultRid: args.parentVaultDisplay,
@@ -403,12 +524,14 @@ function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
     // priming seeds). writeMeshContextFile preserves this on later regens.
     dates: { created: args.createdAt },
   });
+  args.journal.record(join(args.vaultPath, ".lyt", "mesh-context.md"));
   written.push(".lyt/mesh-context.md");
 
   const agentsPath = agentsMdWritePath(args.vaultPath);
   writeFile(
     agentsPath,
     getAgentsMdContent({ vaultName: args.name, dates: { created: args.createdAt } }),
+    args.journal,
   );
   written.push(AGENTS_MD_REL_WRITE_PATH);
 
@@ -429,6 +552,7 @@ function writePrimingFiles(args: WritePrimingFilesArgs): string[] {
       writeFile(
         join(args.vaultPath, seed.relativePath),
         renderSeedFigment(seed, { created: args.createdAt }),
+        args.journal,
       );
       written.push(seed.relativePath);
     }
@@ -477,9 +601,7 @@ export interface ScaffoldConformanceResult {
 //   • README.md + notes/index.md are basename-excluded from FTS regardless of a
 //     sentinel, so they are NOT FTS-pollution vectors; README is still seeded
 //     when absent for a complete scaffold, but no sentinel mutation is forced.
-export function writeScaffoldConformance(
-  args: ScaffoldConformanceArgs,
-): ScaffoldConformanceResult {
+export function writeScaffoldConformance(args: ScaffoldConformanceArgs): ScaffoldConformanceResult {
   const written: string[] = [];
   const owner = args.owner ?? getIdentity();
 
@@ -524,40 +646,7 @@ export function writeScaffoldConformance(
 
 function runGitInit(vaultPath: string): boolean {
   try {
-    execSync("git init --initial-branch=main", {
-      cwd: vaultPath,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Per Phase 5.5 smoke Observation #2: opt-in helper to commit only the lyt
-// scaffold (explicit path list, never `git add -A`) so a user's pre-existing
-// files in --path <existing-dir> are not auto-committed.
-//
-// Phase D (SC6) — the agent-priming files (`agents.md`, `lyt-overview.md`) now
-// live under `.lyt/`, so they are committed transitively by the `.lyt` entry
-// here. They ALSO appear in the per-call `primingFiles` list (as
-// `.lyt/agents.md` / `.lyt/lyt-overview.md`) appended in runInitialCommit — the
-// overlap is harmless (`git add` is idempotent). README + seed Figments stay in
-// the vault tree (README.md + notes/* below).
-const SCAFFOLD_COMMIT_PATHS = [".lyt", ".obsidian", ".gitignore", "README.md", "notes/.gitkeep"];
-
-function runInitialCommit(vaultPath: string, primingFiles: readonly string[]): boolean {
-  try {
-    const paths = [
-      ...SCAFFOLD_COMMIT_PATHS.filter((path) => existsSync(join(vaultPath, path))),
-      ...primingFiles,
-    ];
-    const args = paths.map((p) => `"${p}"`).join(" ");
-    execSync(`git add ${args}`, {
-      cwd: vaultPath,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    execSync('git commit -m "chore: lyt vault init scaffold"', {
+    execFileSync("git", ["init", "--initial-branch=main"], {
       cwd: vaultPath,
       stdio: ["ignore", "ignore", "ignore"],
     });

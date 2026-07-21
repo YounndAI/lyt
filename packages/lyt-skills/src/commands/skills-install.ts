@@ -108,12 +108,32 @@ function resolveRuntimes(name: string): readonly Runtime[] {
 }
 
 function printHuman(result: ReturnType<typeof symlinkSkillsTriRuntime>): void {
+  const allRefused =
+    result.results.length > 0 &&
+    result.results.every((entry) => entry.status === "refused-incompatible");
   // eslint-disable-next-line no-console
-  console.log(`Installed Lyt skills from ${result.sourceDir}`);
+  console.log(
+    allRefused
+      ? `Checked Lyt skills from ${result.sourceDir}; none installed`
+      : `Installed Lyt skills from ${result.sourceDir}`,
+  );
   for (const r of result.results) {
     const msg = r.message ? ` (${r.message})` : "";
     // eslint-disable-next-line no-console
     console.log(`  ${r.runtime}/${r.skill}\t${r.status}${msg}`);
+  }
+  const refused = result.results.filter((r) => r.status === "refused-incompatible");
+  if (refused.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`\n${refused.length} incompatible skill target(s) were not changed:`);
+    for (const r of refused) {
+      const next = r.refusal?.nextAction;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `  ${r.runtime}/${r.skill}: ${r.refusal?.code ?? "incompatible"}; ` +
+          `next: ${next?.command ?? "lyt update"}`,
+      );
+    }
   }
   // surface collision renames prominently. The install
   // SUCCEEDED (exit 0, heal never halts), but the handler must know a dir of
@@ -134,6 +154,7 @@ function printHuman(result: ReturnType<typeof symlinkSkillsTriRuntime>): void {
 function pickExitCode(result: ReturnType<typeof symlinkSkillsTriRuntime>): number {
   let exit = 0;
   for (const r of result.results) {
+    if (r.status === "refused-incompatible") return 3;
     if (r.status === "target-not-a-directory") return 4;
     // `divergent-symlink` is a warn (a symlink points somewhere unexpected and
     // we did NOT touch it without --force). `renamed-collision` is NOT a warn

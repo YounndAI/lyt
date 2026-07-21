@@ -93,6 +93,10 @@ export function buildInfoCommand(): Command {
       // eslint-disable-next-line no-console
       console.log(`  status:            ${v.status}`);
       // eslint-disable-next-line no-console
+      console.log(`  acquisition:       ${v.acquisitionSource}`);
+      // eslint-disable-next-line no-console
+      console.log(`  destination:       ${formatDestination(v.destination)}`);
+      // eslint-disable-next-line no-console
       console.log(
         `  local-writable:    ${formatLocalWritable(v.localWritable, v.localWritableReason)}`,
       );
@@ -130,4 +134,15 @@ export function buildInfoCommand(): Command {
       }
     });
   return cmd;
+}
+
+function formatDestination(destination: {
+  kind: "local" | "github" | "unconfigured";
+  target: { owner: string; kind: "user" | "org"; repository: string | null } | null;
+  source: string | null;
+}): string {
+  if (destination.kind === "github" && destination.target !== null) {
+    return `${destination.kind}:${destination.target.kind}/${destination.target.owner}/${destination.target.repository ?? "-"} (${destination.source ?? "-"})`;
+  }
+  return `${destination.kind}${destination.source === null ? "" : ` (${destination.source})`}`;
 }

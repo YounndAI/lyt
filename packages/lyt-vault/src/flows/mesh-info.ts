@@ -22,6 +22,7 @@ import type { Client } from "@libsql/client";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getMeshByName } from "../registry/meshes-repo.js";
 import { getVaultByRid } from "../registry/repo.js";
+import { presentMeshDestination, presentVaultDestination, type DestinationPresentation } from "./destination-presentation.js";
 import { vaultRepoNameFromParts } from "../util/federation-paths.js";
 import { uuid7BytesToDashedString, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
@@ -119,6 +120,8 @@ export interface MeshInfoHomeVault {
   vaultRid: string;
   vaultRidHex: string;
   vaultName: string;
+  acquisitionSource: "own" | "shared" | "subscribed" | null;
+  destination: DestinationPresentation | null;
 }
 
 export interface MeshInfoResult {
@@ -129,6 +132,8 @@ export interface MeshInfoResult {
     name: string;
     pushTarget: string | null;
     pushKind: string | null;
+    ownCreated: boolean;
+    destination: DestinationPresentation;
     mainVaultRid: string;
     createdAt: string;
   };
@@ -188,10 +193,24 @@ export async function meshInfoFlow(args: MeshInfoArgs): Promise<MeshInfoResult> 
 
     const parsed = parseMeshYon(content);
 
-    const homeVaults: MeshInfoHomeVault[] = parsed.homeVaults.map((h) => ({
-      vaultRid: `vault:${uuid7BytesToDashedString(h.vaultRid)}`,
-      vaultRidHex: uuid7BytesToHex(h.vaultRid),
-      vaultName: h.vaultName,
+    const homeVaults: MeshInfoHomeVault[] = await Promise.all(parsed.homeVaults.map(async (h) => {
+      if (source === "remote") {
+        return {
+          vaultRid: `vault:${uuid7BytesToDashedString(h.vaultRid)}`,
+          vaultRidHex: uuid7BytesToHex(h.vaultRid),
+          vaultName: h.vaultName,
+          acquisitionSource: null,
+          destination: null,
+        };
+      }
+      const vault = await getVaultByRid(db, h.vaultRid);
+      return {
+        vaultRid: `vault:${uuid7BytesToDashedString(h.vaultRid)}`,
+        vaultRidHex: uuid7BytesToHex(h.vaultRid),
+        vaultName: h.vaultName,
+        acquisitionSource: vault?.source ?? null,
+        destination: vault === null ? null : presentVaultDestination(vault, mesh),
+      };
     }));
 
     return {
@@ -200,8 +219,15 @@ export async function meshInfoFlow(args: MeshInfoArgs): Promise<MeshInfoResult> 
         rid: `mesh:${uuid7BytesToDashedString(parsed.mesh.rid)}`,
         ridHex: uuid7BytesToHex(parsed.mesh.rid),
         name: parsed.mesh.name,
+        // These remain topology hints when source=remote; they are never local
+        // publication authority.
         pushTarget: parsed.mesh.pushTarget ?? null,
         pushKind: parsed.mesh.pushKind ?? null,
+        ownCreated: source === "local" ? mesh.ownCreated : false,
+        destination:
+          source === "local"
+            ? presentMeshDestination(mesh)
+            : { kind: "unconfigured", target: null, source: null, authority: null, reason: "foreign" },
         mainVaultRid: `vault:${uuid7BytesToDashedString(parsed.mesh.mainVaultRid)}`,
         createdAt: parsed.mesh.createdAt,
       },

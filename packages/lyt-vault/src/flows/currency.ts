@@ -14,43 +14,55 @@
  * limitations under the License.
  */
 
-// Stay-current core — the single source of "is this install behind the
-// published version?" reused by `lyt outdated`, `lyt update`, `doctor`, and
-// `init`. Design invariants (per the stay-current slice plan):
-//   - THROTTLED: passive surfaces (doctor/init) read a ~once/day cache; they do
-//     not hammer the registry on every command. `lyt outdated`/`update` force fresh.
-//   - NON-BLOCKING + OFFLINE-SILENT: a registry probe that times out or fails
-//     NEVER throws — it degrades to `offline`, so a currency check can never slow
-//     or break `init`/`doctor` when the network is down.
-//   - DIST-TAG `alpha`: users install `@younndai/lyt@alpha`, so currency is
-//     measured against the alpha channel (equal to `latest` today; may diverge).
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { readPackageVersion } from "./agent-manual.js";
 
-/** The globally-installed package users run (`npm i -g @younndai/lyt@alpha`). */
+/** The globally-installed package users run. */
 export const CURRENCY_PACKAGE = "@younndai/lyt";
-/** The install channel currency is measured against. */
+/** Compatibility default for callers that explicitly opt into a channel. */
 export const CURRENCY_DIST_TAG = "alpha";
+export const UPDATE_CHANNELS = ["alpha", "latest"] as const;
+export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
 /** Passive-surface cache TTL — a fresh network probe at most once per day. */
 export const CURRENCY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-/** Registry probe timeout — bounded so a hung `npm view` cannot block a command. */
+/** Registry probe timeout — bounded so a hung npm invocation cannot block a command. */
 const CURRENCY_PROBE_TIMEOUT_MS = 4000;
+const DEFAULT_REGISTRY_URL = "https://registry.npmjs.org/";
+const CACHE_SCHEMA_VERSION = 1;
+const CHANNEL_SCHEMA_VERSION = 1;
 
 /** Runs a binary, returns stdout, or `null` on ANY failure (never throws). */
 export type CommandRunner = (command: string, args: string[]) => string | null;
 
-const defaultRunner: CommandRunner = (command, args) => {
+function npmCliPath(): string | null {
+  const candidates = [
+    process.env.npm_execpath,
+    process.env.NPM_EXECPATH,
+    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    join(dirname(dirname(process.execPath)), "node_modules", "npm", "bin", "npm-cli.js"),
+  ].filter(
+    (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
+  );
+  const found = candidates.find((candidate) => existsSync(candidate));
+  return found === undefined ? null : resolve(found);
+}
+
+const defaultRunner: CommandRunner = (_command, args) => {
+  const npmCli = npmCliPath();
+  if (npmCli === null) return null;
   try {
-    return execFileSync(command, args, {
+    return execFileSync(process.execPath, [npmCli, ...args], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-      // npm/gh/git are .cmd shims on Windows — need a shell to resolve them.
-      shell: process.platform === "win32",
       timeout: CURRENCY_PROBE_TIMEOUT_MS,
+      // Execute Node and a resolved npm-cli.js directly. Do not invoke a Windows
+      // npm.cmd shim through a shell; that is both less deterministic and emits
+      // Node's shell-argument deprecation warning.
+      shell: false,
     });
   } catch {
     return null;
@@ -58,50 +70,88 @@ const defaultRunner: CommandRunner = (command, args) => {
 };
 
 export interface CurrencyResult {
-  /**
-   * The locally installed Lyt version — read from the lyt-vault package.json,
-   * which publishes in lockstep with the `@younndai/lyt` meta CLI (the package
-   * `latest` is measured against), so the two are the same version by contract.
-   */
+  /** Stable machine-readable result discriminator. */
+  status: "ok" | "offline" | "channel-unconfigured";
+  /** The locally installed Lyt version. Callers that own the meta CLI must pass it. */
   installed: string;
-  /** The published version on the tracked dist-tag, or `null` when unreachable. */
+  /** The selected release channel, or null when no explicit selection exists. */
+  channel: UpdateChannel | null;
+  /** Where the channel selection came from. */
+  channelSource: "explicit" | "persisted" | "unconfigured";
+  /** Normalized npm registry URL used for this observation. */
+  registry: string;
+  /** Package whose dist-tag was observed. */
+  packageName: string;
+  /** The observed dist-tag (equal to channel for a valid observation). */
+  observedTag: UpdateChannel | null;
+  /** The published version on the tracked dist-tag, or null when unavailable. */
   latest: string | null;
-  /** True iff `latest` is known AND strictly newer than `installed`. */
+  /** The registry-provided SRI integrity for `latest`, never inferred. */
+  integrity: string | null;
+  /** True iff latest is known AND strictly newer than installed. */
   stale: boolean;
+  /** True iff the selected channel is known but its target is lower than installed. */
+  aheadOfChannel: boolean;
   /** True iff no published version could be determined (offline / registry down). */
   offline: boolean;
-  /** Whether `latest` came from the on-disk cache rather than a fresh probe. */
+  /** True iff update checking was refused because a channel is not selected. */
+  channelUnconfigured: boolean;
+  /** Whether latest came from the on-disk cache rather than a fresh probe. */
   fromCache: boolean;
-  /** ISO timestamp of when `latest` was determined. */
+  /** ISO timestamp of when latest was determined. */
   checkedAt: string;
+  /** One deterministic corrective action for a channel-unconfigured result. */
+  nextAction?: string;
 }
 
 export interface CurrencyOptions {
-  /** Bypass the cache and force a fresh registry probe (used by `outdated`/`update`). */
+  /** Bypass the cache and force a fresh registry probe (used by outdated/update). */
   force?: boolean;
-  /** Override the installed version (tests). */
+  /** Override the installed version (the meta CLI MUST pass its own version). */
   installedVersion?: string;
   /** Override the registry probe (tests). */
   runner?: CommandRunner;
-  /** Override the tracked dist-tag. */
-  distTag?: string;
+  /** Explicit alpha/latest selection. Does not persist by itself. */
+  channel?: UpdateChannel;
+  /** Override the registry URL (tests and controlled callers). */
+  registryUrl?: string;
+  /** Override the package target (tests). */
+  packageName?: string;
   /** Override the passive-surface cache TTL. */
   ttlMs?: number;
   /** Override the clock (tests). */
   now?: () => number;
-  /** Override the pod home (tests) — where the throttle cache lives. */
+  /** Override the pod home (tests) — where selection and cache live. */
   homeDir?: string;
-  /**
-   * Never probe the registry — surface only a FRESH cached result, else report
-   * offline. For hot paths (e.g. `init`) that must stay strictly non-blocking and
-   * never make a network call. Ignored when `force` is set.
-   */
+  /** Never probe the registry — surface only a FRESH cached result, else offline. */
   cacheOnly?: boolean;
 }
 
-interface CurrencyCache {
+export interface UpdateChannelPreference {
+  schemaVersion: 1;
+  channel: UpdateChannel;
+}
+
+interface CurrencyObservation {
+  registry: string;
+  packageName: string;
+  channel: UpdateChannel;
+  observedTag: UpdateChannel;
+  version: string;
+  integrity: string;
   checkedAt: string;
-  latest: string | null;
+}
+
+export interface CurrencyStateInspectionV1 {
+  readonly channel: UpdateChannel | null;
+  readonly channelStatus: "current" | "missing" | "malformed";
+  readonly cacheStatus: "current" | "missing" | "malformed" | "tampered" | "stale";
+  readonly observation: Readonly<CurrencyObservation> | null;
+}
+
+interface CurrencyCacheV1 {
+  schemaVersion: 1;
+  observations: Record<string, CurrencyObservation>;
 }
 
 /** Mirrors the postinstall/federation-root convention for the pod home. */
@@ -110,25 +160,218 @@ function podHome(opts: CurrencyOptions): string {
 }
 
 function cachePath(opts: CurrencyOptions): string {
-  return join(podHome(opts), ".currency-check.json");
+  return join(podHome(opts), ".currency-checks.json");
 }
 
-function readCache(opts: CurrencyOptions): CurrencyCache | null {
+function channelPath(opts: Pick<CurrencyOptions, "homeDir">): string {
+  return join(podHome(opts), ".update-channel.json");
+}
+
+export function isUpdateChannel(value: string): value is UpdateChannel {
+  return (UPDATE_CHANNELS as readonly string[]).includes(value);
+}
+
+export function normalizeRegistryUrl(value: string | undefined): string {
+  const raw = value?.trim() || DEFAULT_REGISTRY_URL;
+  let parsed: URL;
   try {
-    const raw = readFileSync(cachePath(opts), "utf8");
-    const json = JSON.parse(raw) as Partial<CurrencyCache>;
-    if (typeof json.checkedAt !== "string") return null;
-    // Validate the cached `latest` the SAME way the live probe does — a tampered
-    // or corrupt cache must not surface a bogus "update available" line that a
-    // fresh probe would have rejected (release review: cache/probe validation parity).
-    const latest = typeof json.latest === "string" && looksLikeVersion(json.latest) ? json.latest : null;
-    return { checkedAt: json.checkedAt, latest };
+    parsed = new URL(raw);
+  } catch {
+    return DEFAULT_REGISTRY_URL;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return DEFAULT_REGISTRY_URL;
+  parsed.username = "";
+  parsed.password = "";
+  parsed.search = "";
+  parsed.hash = "";
+  parsed.hostname = parsed.hostname.toLowerCase();
+  parsed.pathname = `${parsed.pathname.replace(/\/+$/u, "")}/`;
+  return parsed.toString();
+}
+
+function cacheKey(registry: string, packageName: string, channel: UpdateChannel): string {
+  return JSON.stringify([registry, packageName, channel]);
+}
+
+function validIntegrity(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^sha(?:1|256|384|512)-[A-Za-z0-9+/=]+(?:\s+sha(?:1|256|384|512)-[A-Za-z0-9+/=]+)*$/u.test(
+      value,
+    )
+  );
+}
+
+function readChannelPreference(
+  opts: Pick<CurrencyOptions, "homeDir">,
+): UpdateChannelPreference | null {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(channelPath(opts), "utf8"),
+    ) as Partial<UpdateChannelPreference>;
+    if (parsed.schemaVersion !== CHANNEL_SCHEMA_VERSION || typeof parsed.channel !== "string")
+      return null;
+    if (!isUpdateChannel(parsed.channel)) return null;
+    return { schemaVersion: CHANNEL_SCHEMA_VERSION, channel: parsed.channel };
   } catch {
     return null;
   }
 }
 
-function writeCache(opts: CurrencyOptions, cache: CurrencyCache): void {
+export function readUpdateChannel(
+  opts: Pick<CurrencyOptions, "homeDir"> = {},
+): UpdateChannel | null {
+  return readChannelPreference(opts)?.channel ?? null;
+}
+
+export function writeUpdateChannel(
+  channel: UpdateChannel,
+  opts: Pick<CurrencyOptions, "homeDir"> = {},
+): void {
+  const path = channelPath(opts);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({ schemaVersion: CHANNEL_SCHEMA_VERSION, channel }, null, 2),
+    "utf8",
+  );
+}
+
+function isObservation(value: unknown): value is CurrencyObservation {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as Partial<CurrencyObservation>;
+  return (
+    typeof item.registry === "string" &&
+    typeof item.packageName === "string" &&
+    typeof item.channel === "string" &&
+    isUpdateChannel(item.channel) &&
+    typeof item.observedTag === "string" &&
+    isUpdateChannel(item.observedTag) &&
+    typeof item.version === "string" &&
+    looksLikeVersion(item.version) &&
+    validIntegrity(item.integrity) &&
+    typeof item.checkedAt === "string" &&
+    Number.isFinite(Date.parse(item.checkedAt))
+  );
+}
+
+function readCache(opts: CurrencyOptions): CurrencyCacheV1 | null {
+  try {
+    const raw = readFileSync(cachePath(opts), "utf8");
+    const parsed = JSON.parse(raw) as Partial<CurrencyCacheV1>;
+    if (
+      parsed.schemaVersion !== CACHE_SCHEMA_VERSION ||
+      typeof parsed.observations !== "object" ||
+      parsed.observations === null
+    ) {
+      return null;
+    }
+    const observations: Record<string, CurrencyObservation> = {};
+    for (const [key, observation] of Object.entries(parsed.observations)) {
+      if (!isObservation(observation)) continue;
+      if (cacheKey(observation.registry, observation.packageName, observation.channel) !== key)
+        continue;
+      if (observation.observedTag !== observation.channel) continue;
+      observations[key] = observation;
+    }
+    return { schemaVersion: CACHE_SCHEMA_VERSION, observations };
+  } catch {
+    return null;
+  }
+}
+
+/** Strict, local-only inspection for doctor. Never probes npm and never rewrites cache state. */
+export function inspectCurrencyStateV1(opts: CurrencyOptions = {}): CurrencyStateInspectionV1 {
+  let channel: UpdateChannel | null = null;
+  let channelStatus: CurrencyStateInspectionV1["channelStatus"] = "missing";
+  const preferencePath = channelPath(opts);
+  if (existsSync(preferencePath)) {
+    try {
+      const parsed = JSON.parse(
+        readFileSync(preferencePath, "utf8"),
+      ) as Partial<UpdateChannelPreference>;
+      if (
+        parsed.schemaVersion === CHANNEL_SCHEMA_VERSION &&
+        typeof parsed.channel === "string" &&
+        isUpdateChannel(parsed.channel)
+      ) {
+        channel = parsed.channel;
+        channelStatus = "current";
+      } else channelStatus = "malformed";
+    } catch {
+      channelStatus = "malformed";
+    }
+  }
+  const path = cachePath(opts);
+  if (!existsSync(path))
+    return Object.freeze({ channel, channelStatus, cacheStatus: "missing", observation: null });
+  let parsed: Partial<CurrencyCacheV1>;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<CurrencyCacheV1>;
+  } catch {
+    return Object.freeze({ channel, channelStatus, cacheStatus: "malformed", observation: null });
+  }
+  if (
+    parsed.schemaVersion !== CACHE_SCHEMA_VERSION ||
+    typeof parsed.observations !== "object" ||
+    parsed.observations === null ||
+    Array.isArray(parsed.observations)
+  ) {
+    return Object.freeze({ channel, channelStatus, cacheStatus: "malformed", observation: null });
+  }
+  if (channel === null)
+    return Object.freeze({ channel, channelStatus, cacheStatus: "current", observation: null });
+  const registry = normalizeRegistryUrl(opts.registryUrl);
+  const packageName = opts.packageName ?? CURRENCY_PACKAGE;
+  for (const [storedKey, stored] of Object.entries(parsed.observations)) {
+    if (!isObservation(stored)) {
+      return Object.freeze({ channel, channelStatus, cacheStatus: "malformed", observation: null });
+    }
+    if (
+      storedKey !== cacheKey(stored.registry, stored.packageName, stored.channel) ||
+      stored.observedTag !== stored.channel
+    ) {
+      return Object.freeze({ channel, channelStatus, cacheStatus: "tampered", observation: null });
+    }
+  }
+  const key = cacheKey(registry, packageName, channel);
+  const candidate = parsed.observations[key];
+  if (candidate === undefined) {
+    const misplaced = Object.entries(parsed.observations).some(([storedKey, value]) => {
+      if (!isObservation(value)) return false;
+      return (
+        value.registry === registry &&
+        value.packageName === packageName &&
+        value.channel === channel &&
+        storedKey !== cacheKey(value.registry, value.packageName, value.channel)
+      );
+    });
+    if (misplaced)
+      return Object.freeze({ channel, channelStatus, cacheStatus: "tampered", observation: null });
+    return Object.freeze({ channel, channelStatus, cacheStatus: "missing", observation: null });
+  }
+  if (!isObservation(candidate))
+    return Object.freeze({ channel, channelStatus, cacheStatus: "malformed", observation: null });
+  if (
+    candidate.registry !== registry ||
+    candidate.packageName !== packageName ||
+    candidate.channel !== channel ||
+    candidate.observedTag !== channel ||
+    cacheKey(candidate.registry, candidate.packageName, candidate.channel) !== key
+  ) {
+    return Object.freeze({ channel, channelStatus, cacheStatus: "tampered", observation: null });
+  }
+  const age = (opts.now ?? Date.now)() - Date.parse(candidate.checkedAt);
+  const stale = age < 0 || age > (opts.ttlMs ?? CURRENCY_CACHE_TTL_MS);
+  return Object.freeze({
+    channel,
+    channelStatus,
+    cacheStatus: stale ? "stale" : "current",
+    observation: Object.freeze({ ...candidate }),
+  });
+}
+
+function writeCache(opts: CurrencyOptions, cache: CurrencyCacheV1): void {
   try {
     const path = cachePath(opts);
     mkdirSync(dirname(path), { recursive: true });
@@ -165,130 +408,189 @@ export function isNewerVersion(candidate: string, base: string): boolean {
     const bi = b[i] ?? 0;
     if (ai !== bi) return ai > bi;
   }
-  // Equal cores: a plain release outranks a prerelease of the same core (semver
-  // precedence — 0.10.0 > 0.10.0-alpha.1). Matters because the tracked channel is
-  // `alpha`, so an installed prerelease must read as behind the published release.
   const candPre = hasPrerelease(candidate);
   const basePre = hasPrerelease(base);
-  if (candPre !== basePre) return basePre; // candidate newer iff ONLY base is a prerelease
-  return false; // same core + same prerelease-ness → not strictly newer
+  if (candPre !== basePre) return basePre;
+  return false;
 }
 
-/** Probes the registry for the published version on the tracked dist-tag. */
-function probeLatest(runner: CommandRunner, pkg: string, distTag: string): string | null {
-  const out = runner("npm", ["view", `${pkg}@${distTag}`, "version"]);
-  if (out === null) return null;
-  // `npm view <pkg>@<tag> version` prints just the bare version line.
-  const line = out
-    .trim()
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-    .pop();
-  if (line === undefined) return null;
-  // Tolerate a quoted form (`'0.10.0'`) just in case.
-  const cleaned = line.replace(/['"]/g, "");
-  return looksLikeVersion(cleaned) ? cleaned : null;
+function parseProbe(
+  raw: string,
+  registry: string,
+  packageName: string,
+  channel: UpdateChannel,
+  checkedAt: string,
+): CurrencyObservation | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    const version = record.version;
+    const integrity =
+      record["dist.integrity"] ?? (record.dist as Record<string, unknown> | undefined)?.integrity;
+    if (typeof version !== "string" || !looksLikeVersion(version) || !validIntegrity(integrity))
+      return null;
+    return { registry, packageName, channel, observedTag: channel, version, integrity, checkedAt };
+  } catch {
+    return null;
+  }
 }
 
-/**
- * Determines whether the local install is behind the published dist-tag.
- *
- * Passive callers (doctor/init) pass no `force` → a fresh probe runs at most once
- * per TTL, otherwise the cached answer is returned with zero network cost. Explicit
- * callers (`lyt outdated`/`lyt update`) pass `force: true` for an always-fresh read.
- * NEVER throws: an unreachable registry yields `offline: true`.
- */
-export async function checkCurrency(opts: CurrencyOptions = {}): Promise<CurrencyResult> {
-  const installed = opts.installedVersion ?? readPackageVersion();
-  const runner = opts.runner ?? defaultRunner;
-  const distTag = opts.distTag ?? CURRENCY_DIST_TAG;
-  const ttl = opts.ttlMs ?? CURRENCY_CACHE_TTL_MS;
-  const nowMs = opts.now ? opts.now() : Date.now();
-  const force = opts.force === true;
+function probeLatest(
+  runner: CommandRunner,
+  registry: string,
+  packageName: string,
+  channel: UpdateChannel,
+  checkedAt: string,
+): CurrencyObservation | null {
+  const out = runner("npm", [
+    "view",
+    `${packageName}@${channel}`,
+    "version",
+    "dist.integrity",
+    "--json",
+    "--registry",
+    registry,
+  ]);
+  return out === null ? null : parseProbe(out, registry, packageName, channel, checkedAt);
+}
 
-  const cache = readCache(opts);
-  const cacheFresh =
-    cache !== null && Number.isFinite(Date.parse(cache.checkedAt)) && nowMs - Date.parse(cache.checkedAt) < ttl;
-
-  // Passive path: a fresh cache answers without touching the network.
-  if (!force && cacheFresh && cache !== null) {
-    const latest = cache.latest;
-    return {
-      installed,
-      latest,
-      stale: latest !== null && isNewerVersion(latest, installed),
-      offline: latest === null,
-      fromCache: true,
-      checkedAt: cache.checkedAt,
-    };
-  }
-
-  // Cache-only callers (e.g. `init`) never probe — a hot path stays strictly
-  // non-blocking + network-free. Reaching here means no fresh cache, so stay
-  // silent (offline). `force` overrides this and probes.
-  if (opts.cacheOnly === true && !force) {
-    return {
-      installed,
-      latest: null,
-      stale: false,
-      offline: true,
-      fromCache: false,
-      checkedAt: new Date(nowMs).toISOString(),
-    };
-  }
-
-  // Otherwise probe the registry (forced, or cache missing/stale).
-  const probed = probeLatest(runner, CURRENCY_PACKAGE, distTag);
-  if (probed !== null) {
-    const checkedAt = new Date(nowMs).toISOString();
-    writeCache(opts, { checkedAt, latest: probed });
-    return {
-      installed,
-      latest: probed,
-      stale: isNewerVersion(probed, installed),
-      offline: false,
-      fromCache: false,
-      checkedAt,
-    };
-  }
-
-  // Probe failed. Fall back to a stale cached value if we have one (better than
-  // nothing); only truly `offline` when we have no published version at all.
-  if (cache !== null && cache.latest !== null) {
-    return {
-      installed,
-      latest: cache.latest,
-      stale: isNewerVersion(cache.latest, installed),
-      offline: false,
-      fromCache: true,
-      checkedAt: cache.checkedAt,
-    };
-  }
-
+function unconfiguredResult(
+  installed: string,
+  registry: string,
+  packageName: string,
+  checkedAt: string,
+): CurrencyResult {
   return {
+    status: "channel-unconfigured",
     installed,
+    channel: null,
+    channelSource: "unconfigured",
+    registry,
+    packageName,
+    observedTag: null,
     latest: null,
+    integrity: null,
     stale: false,
-    offline: true,
+    aheadOfChannel: false,
+    offline: false,
+    channelUnconfigured: true,
     fromCache: false,
-    checkedAt: new Date(nowMs).toISOString(),
+    checkedAt,
+    nextAction: "lyt update --channel alpha",
   };
 }
 
-/** The exact command a user (or `lyt update`) runs to get current. */
-export function updateCommandString(distTag: string = CURRENCY_DIST_TAG): string {
-  return `npm i -g ${CURRENCY_PACKAGE}@${distTag}`;
+function resultFromObservation(
+  installed: string,
+  observation: CurrencyObservation,
+  source: CurrencyResult["channelSource"],
+  fromCache: boolean,
+): CurrencyResult {
+  return {
+    status: "ok",
+    installed,
+    channel: observation.channel,
+    channelSource: source,
+    registry: observation.registry,
+    packageName: observation.packageName,
+    observedTag: observation.observedTag,
+    latest: observation.version,
+    integrity: observation.integrity,
+    stale: isNewerVersion(observation.version, installed),
+    aheadOfChannel: isNewerVersion(installed, observation.version),
+    offline: false,
+    channelUnconfigured: false,
+    fromCache,
+    checkedAt: observation.checkedAt,
+  };
+}
+
+function offlineResult(
+  installed: string,
+  channel: UpdateChannel,
+  channelSource: CurrencyResult["channelSource"],
+  registry: string,
+  packageName: string,
+  checkedAt: string,
+): CurrencyResult {
+  return {
+    status: "offline",
+    installed,
+    channel,
+    channelSource,
+    registry,
+    packageName,
+    observedTag: null,
+    latest: null,
+    integrity: null,
+    stale: false,
+    aheadOfChannel: false,
+    offline: true,
+    channelUnconfigured: false,
+    fromCache: false,
+    checkedAt,
+  };
 }
 
 /**
- * Policy for `lyt update` — kept here (tested core) because the load-bearing rule
- * is a SAFETY gate: never silently mutate a global install. `proceed` is returned
- * only with an explicit `--yes` or an interactive confirmation; a non-interactive
- * run without `--yes` is `blocked` rather than auto-installing.
+ * Determines whether the local install is behind a deliberately selected
+ * release channel. Legacy `.currency-check.json` is intentionally never read:
+ * it lacks registry/package/channel/integrity identity and is unsafe to reuse.
  */
+export async function checkCurrency(opts: CurrencyOptions = {}): Promise<CurrencyResult> {
+  const installed = opts.installedVersion ?? readPackageVersion();
+  const registry = normalizeRegistryUrl(
+    opts.registryUrl ?? process.env.npm_config_registry ?? process.env.NPM_CONFIG_REGISTRY,
+  );
+  const packageName = opts.packageName ?? CURRENCY_PACKAGE;
+  const persisted = readUpdateChannel(opts);
+  const channel = opts.channel ?? persisted;
+  const channelSource: CurrencyResult["channelSource"] =
+    opts.channel !== undefined ? "explicit" : persisted !== null ? "persisted" : "unconfigured";
+  const nowMs = opts.now ? opts.now() : Date.now();
+  const checkedAt = new Date(nowMs).toISOString();
+  if (channel === null) return unconfiguredResult(installed, registry, packageName, checkedAt);
+
+  const runner = opts.runner ?? defaultRunner;
+  const ttl = opts.ttlMs ?? CURRENCY_CACHE_TTL_MS;
+  const force = opts.force === true;
+  const cache = readCache(opts);
+  const key = cacheKey(registry, packageName, channel);
+  const cached = cache?.observations[key] ?? null;
+  const cacheFresh = cached !== null && nowMs - Date.parse(cached.checkedAt) < ttl;
+
+  if (!force && cacheFresh && cached !== null) {
+    return resultFromObservation(installed, cached, channelSource, true);
+  }
+
+  if (opts.cacheOnly === true) {
+    return offlineResult(installed, channel, channelSource, registry, packageName, checkedAt);
+  }
+
+  const probed = probeLatest(runner, registry, packageName, channel, checkedAt);
+  if (probed !== null) {
+    const next: CurrencyCacheV1 = {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      observations: { ...(cache?.observations ?? {}), [key]: probed },
+    };
+    writeCache(opts, next);
+    return resultFromObservation(installed, probed, channelSource, false);
+  }
+
+  if (cached !== null) return resultFromObservation(installed, cached, channelSource, true);
+  return offlineResult(installed, channel, channelSource, registry, packageName, checkedAt);
+}
+
+/** The exact command a user (or `lyt update`) runs to get current. */
+export function updateCommandString(channel: UpdateChannel = CURRENCY_DIST_TAG): string {
+  return `npm i -g ${CURRENCY_PACKAGE}@${channel}`;
+}
+
 export type UpdateAction =
+  | { kind: "channel-unconfigured"; message: string; nextAction: string }
   | { kind: "offline"; message: string }
+  | { kind: "ahead-of-channel"; message: string }
   | { kind: "current"; message: string }
   | { kind: "needs-confirm"; message: string }
   | { kind: "blocked-noninteractive"; message: string }
@@ -296,28 +598,45 @@ export type UpdateAction =
 
 export function resolveUpdateAction(
   result: CurrencyResult,
-  opts: { yes?: boolean; interactive?: boolean } = {},
+  opts: { yes?: boolean; interactive?: boolean; allowDowngrade?: boolean } = {},
 ): UpdateAction {
+  if (result.channelUnconfigured) {
+    return {
+      kind: "channel-unconfigured",
+      message: formatCurrencyLine(result),
+      nextAction: result.nextAction ?? "lyt update --channel alpha",
+    };
+  }
   if (result.offline) return { kind: "offline", message: formatCurrencyLine(result) };
-  if (!result.stale) return { kind: "current", message: formatCurrencyLine(result) };
+  if (result.aheadOfChannel && opts.allowDowngrade !== true) {
+    return { kind: "ahead-of-channel", message: formatCurrencyLine(result) };
+  }
+  if (!result.stale && !result.aheadOfChannel)
+    return { kind: "current", message: formatCurrencyLine(result) };
   const target = `Lyt ${result.installed} → ${result.latest}`;
-  const cmd = updateCommandString();
+  const cmd = updateCommandString(result.channel!);
   if (opts.yes === true) return { kind: "proceed", message: `Updating ${target} (\`${cmd}\`)…` };
   if (opts.interactive === true)
     return { kind: "needs-confirm", message: `Update ${target}? This runs \`${cmd}\`.` };
   return {
     kind: "blocked-noninteractive",
-    message: `A newer version (${result.latest}) is available. Refusing to modify a global install non-interactively — re-run \`lyt update --yes\`, or run \`${cmd}\` yourself.`,
+    message: `A different Lyt version (${result.latest}) is selected on ${result.channel}. Refusing to modify a global install non-interactively — re-run \`lyt update --yes\`, or run \`${cmd}\` yourself.`,
   };
 }
 
-/** One-line human summary shared by `outdated`, `doctor`, and `init`. */
+/** One-line human summary shared by outdated, doctor, and init. */
 export function formatCurrencyLine(result: CurrencyResult): string {
+  if (result.channelUnconfigured) {
+    return `Lyt ${result.installed} — update channel is unconfigured. Run \`${result.nextAction ?? "lyt update --channel alpha"}\`.`;
+  }
   if (result.offline) {
-    return `Lyt ${result.installed} — could not reach the npm registry to check for updates.`;
+    return `Lyt ${result.installed} (${result.channel}) — could not reach ${result.registry} to check for updates.`;
+  }
+  if (result.aheadOfChannel) {
+    return `Lyt ${result.installed} is ahead of ${result.channel} (${result.latest}); refusing to downgrade implicitly. Re-run with \`lyt update --channel ${result.channel} --allow-downgrade\` if intended.`;
   }
   if (result.stale) {
-    return `Lyt ${result.installed} — a newer version (${result.latest}) is available. Run \`lyt update\` (or \`${updateCommandString()}\`).`;
+    return `Lyt ${result.installed} — a newer ${result.channel} version (${result.latest}) is available. Run \`lyt update\` (or \`${updateCommandString(result.channel!)}\`).`;
   }
-  return `Lyt ${result.installed} — up to date.`;
+  return `Lyt ${result.installed} — up to date on ${result.channel}.`;
 }

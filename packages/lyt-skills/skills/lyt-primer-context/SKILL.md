@@ -3,6 +3,9 @@ name: lyt-primer-context
 description: >
   Prime an agent with Lyt-scoped context — for a vault, a mesh, or the whole pod — by composing `lyt primer` (top keywords + active arcs + recent activity + top lanes) and `lyt vault info --json` (writable status for vault-scope). Trigger when the user runs /lyt-primer-context, or says "prime me for X", "give me context on this vault", "what's been happening in my pod lately", "what arcs are active in mesh Y", "give the agent context before X", or similar phrasing on a scope they want surfaced for agent priming. Wraps `lyt primer` + `lyt vault info --json` (6-reason writable contract) — composes both into an agent-facing summary. Read-only; pairs with /lyt-search (query-driven recall) and /lyt-capture (write).
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.6.0
 capabilities: [read]
 runtimes: [claude, codex, agents]

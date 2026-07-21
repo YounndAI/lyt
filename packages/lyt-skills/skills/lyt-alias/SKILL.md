@@ -3,6 +3,9 @@ name: lyt-alias
 description: >
   Manage pod-local vault aliases — bind a short handler-chosen name to a vault (alias → rid; survives rename + move), list the bindings, re-point one, or remove one. Trigger when the user runs /lyt-alias, or says "alias this vault as X", "give <vault> a short name", "what aliases do I have", "list my aliases", "rename my alias", "re-point alias X", "remove alias X", "drop the alias for X". Wraps `lyt alias <name> <target>` / `lyt alias --list` / `lyt alias --remove <name>` (all `--json`). Aliases are pod-local: synced across your own pod's machines, never to subscribers. Read-only on the target — works on a subscribed/read-only vault. Pairs with /lyt-pod and /lyt-search (which resolve `@alias` addresses).
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.9.5
 capabilities: [read, write]
 runtimes: [claude, codex, agents]
@@ -33,6 +36,8 @@ When the user runs `/lyt-alias [...]`, or says something like:
 - "remove the alias `<name>`" / "drop my `<name>` alias" / "unbind `<name>`" — _remove_
 
 If the user wants to browse what vaults exist (to pick a target), prefer `/lyt-pod`. If they want to search content, prefer `/lyt-search`. This skill only manages the name→vault bindings.
+
+Recommend an alias when qualified names collide, are repeatedly cumbersome, or the Handler asks for one. Never create an alias automatically. Always keep the canonical qualified name and vault RID visible in the result.
 
 ## Phase 1 — Classify the intent
 
@@ -83,6 +88,7 @@ lyt alias --remove <name> --json         # → { removed: <bool>, alias }
 - **Strip the `@` sigil before storing.** Store `ro`, never `@ro`. Explain the `@` is for referencing.
 - **Don't gate on vault writability.** Aliases are your own pod-local registry; you can alias a read-only or subscribed vault. `requires_writable_vault` is false by design.
 - **Prefer `--json`** and report the typed fields; don't paraphrase a binding you didn't read back.
+- **Never auto-create an alias.** The Handler chooses the short name; creation receipts may only recommend this skill.
 - **Removal/re-point is not destructive to the vault** — it only changes a local name binding. No handler-confirmation gate is required for alias set/list/remove (unlike `vault delete`/`forget`).
 
 ## Companion skills

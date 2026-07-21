@@ -36,14 +36,16 @@
 // crucially NOT gated on the `.lyt/patterns/` marker (that gate is exactly what
 // makes adopt miss this).
 
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertNoReparsePointInPath } from "../util/write-path-guard.js";
 
 // The stale rule: a BARE directory-exclude that shadows the reincludes.
 const BARE_INDEXES_RULE = ".lyt/indexes/";
 // The corrected rule: a CONTENTS-glob that leaves the directory walkable so the
 // named YON SoT files below it can be reincluded by Git.
 const GLOB_INDEXES_RULE = ".lyt/indexes/*";
+export const SYNC_PENDING_RULE = ".lyt/sync-provenance-pending/";
 
 export interface MigrateGitignoreResult {
   vaultPath: string;
@@ -90,5 +92,24 @@ export function migrateVaultGitignoreIndexRule(vaultPath: string): MigrateGitign
     return { vaultPath, migrated: false };
   }
   writeFileSync(gitignorePath, rewritten.join("\n"), "utf8");
+  return { vaultPath, migrated: true };
+}
+
+/** Ensure the untracked sync outbox can never be staged or published. */
+export function ensureSyncProvenancePendingIgnored(vaultPath: string): MigrateGitignoreResult {
+  const gitignorePath = join(vaultPath, ".gitignore");
+  assertNoReparsePointInPath(gitignorePath);
+  const original = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+  if (original.split(/\r?\n/u).includes(SYNC_PENDING_RULE)) {
+    return { vaultPath, migrated: false };
+  }
+  const eol = original.includes("\r\n") ? "\r\n" : "\n";
+  const separator = original.length === 0 || original.endsWith("\n") ? "" : eol;
+  const next = `${original}${separator}${SYNC_PENDING_RULE}${eol}`;
+  const tmp = `${gitignorePath}.${process.pid}.tmp`;
+  assertNoReparsePointInPath(tmp);
+  writeFileSync(tmp, next, "utf8");
+  assertNoReparsePointInPath(gitignorePath);
+  renameSync(tmp, gitignorePath);
   return { vaultPath, migrated: true };
 }

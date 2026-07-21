@@ -15,9 +15,10 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { getLytHome } from "./paths.js";
+import { assertSafeWritePath } from "./write-path-guard.js";
 
 // Lane O Phase 0 — PROTO-StepOutcome init-failure instrumentation.
 //
@@ -79,6 +80,15 @@ export interface RecordInitFailureInput {
   context?: Record<string, string> | undefined;
 }
 
+/**
+ * `none` deliberately prepares no durable record. Creation-command owners use
+ * this while returning a preflight refusal so planning stays byte-for-byte
+ * read-only; apply/error owners use the default `write` mode.
+ */
+export interface RecordInitFailureOptions {
+  mode?: "write" | "none";
+}
+
 // Resolve the failure-log path under the user's lyt home. Co-located with the
 // other lyt-home artifacts so a `~/lyt` move/copy carries it along.
 export function getInitFailureLogPath(): string {
@@ -90,23 +100,38 @@ export function getInitFailureLogPath(): string {
 // full disk, race) can never abort the init flow it's instrumenting. Returns
 // true when the record was written, false when the write was swallowed.
 //
-// `path` is an injectable test seam (defaults to getInitFailureLogPath()).
-export function recordInitFailure(input: RecordInitFailureInput, path?: string): boolean {
+export function createInitFailureRecord(input: RecordInitFailureInput): InitFailureRecord {
+  return {
+    ts: new Date().toISOString(),
+    site: input.site,
+    step: input.step,
+    summary: oneLine(input.summary),
+    ...(input.context !== undefined && Object.keys(input.context).length > 0
+      ? { context: input.context }
+      : {}),
+  };
+}
+
+/**
+ * Record one failure only under the canonical Lyt-home log path. The write
+ * target's leaf and every existing parent are lstat-guarded before mkdir/append;
+ * callers cannot redirect this best-effort logger into an arbitrary path.
+ */
+export function recordInitFailure(
+  input: RecordInitFailureInput,
+  options: RecordInitFailureOptions = {},
+): boolean {
+  if (options.mode === "none") return false;
   try {
-    const p = path ?? getInitFailureLogPath();
-    const record: InitFailureRecord = {
-      ts: new Date().toISOString(),
-      site: input.site,
-      step: input.step,
-      // Trim + collapse the summary to a single line so one record = one JSONL
-      // line (a stray newline in an error message would otherwise split a
-      // record across two lines and break the per-line parse).
-      summary: oneLine(input.summary),
-      ...(input.context !== undefined && Object.keys(input.context).length > 0
-        ? { context: input.context }
-        : {}),
-    };
+    const p = getInitFailureLogPath();
+    assertCanonicalFailureLogPath(p);
+    assertSafeWritePath(p);
+    const record = createInitFailureRecord(input);
     mkdirSync(dirname(p), { recursive: true });
+    // Revalidate after mkdir closes the check/create window for newly created
+    // parents before the actual append.
+    assertCanonicalFailureLogPath(p);
+    assertSafeWritePath(p);
     appendFileSync(p, `${JSON.stringify(record)}\n`, "utf8");
     return true;
   } catch {
@@ -120,7 +145,7 @@ export function recordInitFailure(input: RecordInitFailureInput, path?: string):
 // Tolerant by design: a missing file → []; a malformed line → skipped (not
 // fatal); any read error → [] (never throws into the doctor flow).
 //
-// `path` is an injectable test seam (defaults to getInitFailureLogPath()).
+// `path` is read-only and therefore remains injectable for diagnostic tests.
 export function readInitFailures(limit = 20, path?: string): InitFailureRecord[] {
   try {
     const p = path ?? getInitFailureLogPath();
@@ -143,6 +168,15 @@ export function readInitFailures(limit = 20, path?: string): InitFailureRecord[]
     return records;
   } catch {
     return [];
+  }
+}
+
+function assertCanonicalFailureLogPath(path: string): void {
+  const home = resolve(getLytHome());
+  const expected = resolve(home, "init-failures.jsonl");
+  const target = resolve(path);
+  if (target !== expected) {
+    throw new Error("Init failure logging may write only the canonical Lyt-home init-failures.jsonl path.");
   }
 }
 

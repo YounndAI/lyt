@@ -24,6 +24,7 @@ import { listMeshes } from "../registry/meshes-repo.js";
 import { computeDisplayNameSync } from "../registry/vault-addressing.js";
 import { closeVaultDb, getLytDbPath, openLytDb } from "../registry/vault-db.js";
 import { readGitRemoteOriginUrl } from "../util/git.js";
+import { presentVaultDestination, type DestinationPresentation } from "./destination-presentation.js";
 import {
   countTombstonedRollupForTarget,
   latestTombstoneSeenForTarget,
@@ -52,6 +53,9 @@ export interface ListFlowOptions {
 
 export interface ListFlowResult {
   vaults: VaultRow[];
+  // Additive read-only policy view keyed by canonical vault RID. Raw vault rows
+  // remain for compatibility; this separates acquisition and destination facts.
+  destinations: Record<string, { acquisitionSource: VaultRow["source"]; destination: DestinationPresentation; onlineState: "unknown"; upstreamState: "unknown" }>;
   // 0.9.4 (3a) — the COMPUTED `{mesh}/{vault}` display name per vault, keyed by
   // ridHex. Derived from each vault's live `home_mesh_rid` + leaf, so a `move`
   // is reflected here even though the stored `name` prefix may lag. The human
@@ -71,16 +75,6 @@ export async function listVaultsFlow(opts: ListFlowOptions = {}): Promise<ListFl
     const all = await listVaults(db);
     const vaults = opts.noTombstones ? all.filter((v) => v.status !== "tombstoned") : all;
 
-    // hardening pass (Cohort-1 fix-pass) — reconcile a null registry `gitUrl` from the
-    // vault's live git `origin` at THIS shared chokepoint, so `vault list` and
-    // `vault info` AGREE. A self-init'd home vault carries git_url=null in the
-    // registry until a remote is wired; `vault info` self-heals it lazily (via
-    // deriveVaultWritable, writability.ts), but `vault list` runs BEFORE any
-    // writable-derive and previously emitted the raw null — so `/lyt-pod`
-    // mislabelled a published vault "0 pushable / no push target". Read live
-    // origin + persist it back (the SAME self-heal writability does;
-    // reconcile = correctness floor). Best-effort: a write failure must not
-    // change the surfaced value (we already hold the live URL).
     await reconcileNullGitUrls(db, vaults);
 
     // 0.9.4 (3a) — compute the canonical `{mesh}/{vault}` display name from
@@ -91,9 +85,19 @@ export async function listVaultsFlow(opts: ListFlowOptions = {}): Promise<ListFl
     for (const v of vaults) {
       displayNames[v.ridHex] = computeDisplayNameSync(v, meshNameByRidHex);
     }
+    const meshByRid = new Map(meshes.map((m) => [m.ridHex, m] as const));
+    const destinations: ListFlowResult["destinations"] = {};
+    for (const v of vaults) {
+      destinations[v.ridHex] = {
+        acquisitionSource: v.source,
+        destination: presentVaultDestination(v, v.homeMeshRidHex ? meshByRid.get(v.homeMeshRidHex) ?? null : null),
+        onlineState: "unknown",
+        upstreamState: "unknown",
+      };
+    }
 
     if (opts.includeRollupTombstones !== true) {
-      return { vaults, displayNames };
+      return { vaults, displayNames, destinations };
     }
 
     const thresholdDays = opts.rollupThresholdDays ?? ROLLUP_DISCONNECTED_DAYS;
@@ -107,6 +111,7 @@ export async function listVaultsFlow(opts: ListFlowOptions = {}): Promise<ListFl
     return {
       vaults,
       displayNames,
+      destinations,
       rollupTombstones: aggregates,
       rollupThresholdDays: thresholdDays,
       rollupThresholdIso: thresholdIso,
@@ -116,13 +121,6 @@ export async function listVaultsFlow(opts: ListFlowOptions = {}): Promise<ListFl
   }
 }
 
-// for each listed vault whose registry `gitUrl` is null, read the live
-// git `origin` from disk and (a) patch the in-memory row so list output matches
-// what `vault info` reports, and (b) persist it back to the registry so the
-// self-heal is durable (the SAME reconcile writability.ts does on the info
-// path). Mutates the VaultRow objects in place. Best-effort throughout: a
-// missing origin leaves the null; a persist failure is swallowed (the surfaced
-// value is already correct from the live read).
 async function reconcileNullGitUrls(db: Client, vaults: readonly VaultRow[]): Promise<void> {
   for (const v of vaults) {
     if (v.gitUrl !== null) continue;
@@ -134,7 +132,7 @@ async function reconcileNullGitUrls(db: Client, vaults: readonly VaultRow[]): Pr
     try {
       await setVaultGitUrl(db, v.rid, liveRemote);
     } catch {
-      // non-fatal — the in-memory row already carries the correct live value.
+      // The in-memory row is still accurate when the best-effort cache update fails.
     }
   }
 }

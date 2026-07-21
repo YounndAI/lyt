@@ -15,14 +15,16 @@ queryable, federated graph my agent can ground in."_ The three layers are:
 
 ## Vault
 
-A **vault** is one Git repo holding Figments (markdown), `.lyt/vault.yon`, a
-per-vault libSQL index, and Obsidian config. Every vault belongs to exactly
+A **vault** is one Git repo holding Figments (markdown), `.lyt/vault.yon`, and a
+per-vault libSQL index. Editor-specific config is optional and local by default.
+Every vault belongs to exactly
 one **home mesh** — recorded in its `vault.yon`'s `@VAULT_HOME_MESH` record.
 Content lives in vaults; meshes and federations are organisational layers.
 
 ## Mesh
 
-A **mesh** is a named group of vaults sharing a GitHub push target. Its
+A **mesh** is a named group of vaults. Its name is independent from GitHub
+accounts and organizations. Its
 definition lives in the **main vault's `.lyt/mesh.yon`** — the SoT for which
 vaults the mesh owns (`@MESH_HOME`) and references as edges (`@MESH_EDGE`).
 Flat subscriptions to external vaults are recorded in a per-writer
@@ -84,12 +86,15 @@ missing, and **stops + notifies if the vault already exists**:
 lyt vault init notes              # bare → personal/notes (personal mesh auto-created)
 lyt vault init company/handbook   # creates the `company` mesh if absent, then the vault
 lyt vault init handbook --mesh company           # same, via the flag
-lyt vault init company/handbook --push-to myorg      # auto-created mesh is a SHARING mesh
+lyt vault init company/handbook --target github:org/myorg # explicit destination override
 ```
 
-Without `--push-to`, an auto-created mesh is **local-only** (the personal
-default). This is uniform — there is no longer a `personal`-only special-case
-and no `home-mesh-not-found` refusal.
+The mesh name and GitHub owner are independent. A new vault snapshots the
+mesh's destination policy at creation and records whether it was inherited,
+overridden, or local; a later mesh change never silently retargets it. Automatic
+destination mode uses the authenticated GitHub owner when observable; otherwise
+creation is local-only and recommends going online for safety and redundancy.
+Creation never publishes.
 
 ### Aliases (pod-local)
 
@@ -115,10 +120,10 @@ without ambiguity.
 
 A mesh can reference vaults that live in OTHER meshes. There are two shapes:
 
-| Form                                    | Relationship                         | Rollup propagates?                      | Searchable in referencing mesh? |
-| --------------------------------------- | ------------------------------------ | --------------------------------------- | ------------------------------- |
-| **Edge** (`@MESH_EDGE`, in mesh.yon)    | Parent-child between two vaults      | Yes — keywords propagate child → parent | Yes                             |
-| **Subscription** (ledger record)        | Flat reference, no tree relationship | No                                      | Yes                             |
+| Form                                 | Relationship                         | Rollup propagates?                      | Searchable in referencing mesh? |
+| ------------------------------------ | ------------------------------------ | --------------------------------------- | ------------------------------- |
+| **Edge** (`@MESH_EDGE`, in mesh.yon) | Parent-child between two vaults      | Yes — keywords propagate child → parent | Yes                             |
+| **Subscription** (ledger record)     | Flat reference, no tree relationship | No                                      | Yes                             |
 
 CLI verbs (subscriber-side):
 

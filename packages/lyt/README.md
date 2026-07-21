@@ -24,7 +24,7 @@
 
 ## What is this?
 
-`@younndai/lyt` is the **meta package and unified CLI** for [Lyt](https://github.com/YounndAI/lyt) — *Link Your Think*: federated markdown vaults, the storage architecture for AI-native knowledge work. Lyt turns a folder of markdown notes into a Git-native vault that can join a **mesh** of other vaults across people and organizations — **mint vaults you own, weave meshes you share, forge Your Pod.**
+`@younndai/lyt` is the **meta package and unified CLI** for [Lyt](https://github.com/YounndAI/lyt) — _Link Your Think_: federated markdown vaults, the storage architecture for AI-native knowledge work. Lyt turns a folder of markdown notes into a Git-native vault that can join a **mesh** of other vaults across people and organizations — **mint vaults you own, weave meshes you share, forge Your Pod.**
 
 Lyt is **AI-first by design**: an AI agent is a first-class operator of your knowledge, not a bolted-on feature. Every vault and mesh speaks [YON](https://yon.younndai.com) — structured records any agent reads directly — and the same operation set is exposed to humans via the CLI and to agents via harness skills and an MCP server. Lyt is the reference implementation of an AI-first approach we're working out in the open.
 
@@ -45,9 +45,11 @@ The `alpha` tag is the recommended channel while compatibility testing continues
 
 ```bash
 lyt init                       # create or adopt your first vault
+lyt mesh init research --target github:org/YounndAI # name and owner are independent
 lyt capture "an idea worth keeping"
 lyt search "idea"              # full-text across your pod
 lyt sync --vault personal/main # publish only this vault when ready
+lyt sync --check --vault personal/main --json # exact one-vault, zero-mutation check
 lyt mesh status                # the federation graph
 lyt doctor                     # confirm your environment is healthy
 ```
@@ -72,6 +74,12 @@ leaves (unique-leaf, errors on collision), aliases, and `lyt:vault:` origin
 coordinates all resolve to it. `lyt vault init <mesh>/<vault>` is
 create-if-missing.
 
+Creation is local-first and returns Receipt V1: terminal status, destination,
+checkpoint/mutation evidence, and exact next-sync evidence. Policy source is
+available afterward through read-only vault/mesh info. A new
+vault snapshots its mesh destination unless explicitly overridden; no creation
+command publishes silently.
+
 ## Metadata that stays correct
 
 Every note carries an 8-field frontmatter contract — title, real dates, tags, a `topic`, and a `purpose` you write. Lyt keeps it correct at rest, sets it at capture, and heals legacy files — without ever touching your prose:
@@ -83,21 +91,21 @@ lyt vault reconcile <name> --apply            # heal notes that are unindexed or
 lyt doctor                                    # count notes with missing or invalid frontmatter
 ```
 
-Backfill fills titles, genuine created/modified dates (from git history), and keyword tags **with no model required** — on any vault, including one you just imported. `purpose` is left blank and flagged, never guessed; anything you authored is never overwritten. When a local embedding model is present, `topic:` is enriched too — capture *suggests* one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure. Topics are ranked against your vault's current on-disk labels and computed on-device — nothing is sent anywhere. Every machine-filled field is provenance-stamped, so it stays distinguishable from your own writing.
+Backfill fills titles, genuine created/modified dates (from git history), and keyword tags **with no model required** — on any vault, including one you just imported. `purpose` is left blank and flagged, never guessed; anything you authored is never overwritten. When a local embedding model is present, `topic:` is enriched too — capture _suggests_ one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure. Topics are ranked against your vault's current on-disk labels and computed on-device — nothing is sent anywhere. Every machine-filled field is provenance-stamped, so it stays distinguishable from your own writing.
 
 ## The Lyt toolchain
 
 Lyt is an open toolchain — `@younndai/lyt` composes these packages, and you can also depend on any of them directly:
 
-| Package | Role |
-| --- | --- |
-| [`@younndai/lyt`](https://github.com/YounndAI/lyt/tree/main/packages/lyt) | **This package** — the unified `lyt` CLI that aggregates every verb group |
-| [`@younndai/lyt-vault`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-vault) | The vault primitive — init, adopt, capture, search, the libSQL index, patterns |
-| [`@younndai/lyt-mesh`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mesh) | The federation layer — meshes, edges, subscriptions, clone-all, sync |
-| [`@younndai/lyt-skills`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-skills) | Agent-harness skills — Claude Code, Codex, and generic agent runtimes |
-| [`@younndai/lyt-mcp`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mcp) | The MCP server — exposes Lyt to any Model Context Protocol client |
-| [`@younndai/lyt-runner`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-runner) | The YON automation runner — patterns, automators, directive expansion |
-| [`@younndai/lyt-llm`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-llm) | The LLM gateway — multi-source routing for AI-assisted vault operations |
+| Package                                                                                 | Role                                                                           |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| [`@younndai/lyt`](https://github.com/YounndAI/lyt/tree/main/packages/lyt)               | **This package** — the unified `lyt` CLI that aggregates every verb group      |
+| [`@younndai/lyt-vault`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-vault)   | The vault primitive — init, adopt, capture, search, the libSQL index, patterns |
+| [`@younndai/lyt-mesh`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mesh)     | The federation layer — meshes, edges, subscriptions, clone-all, sync           |
+| [`@younndai/lyt-skills`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-skills) | Agent-harness skills — Claude Code, Codex, and generic agent runtimes          |
+| [`@younndai/lyt-mcp`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-mcp)       | The MCP server — exposes Lyt to any Model Context Protocol client              |
+| [`@younndai/lyt-runner`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-runner) | The YON automation runner — patterns, automators, directive expansion          |
+| [`@younndai/lyt-llm`](https://github.com/YounndAI/lyt/tree/main/packages/lyt-llm)       | The LLM gateway — multi-source routing for AI-assisted vault operations        |
 
 ## Documentation
 
@@ -109,7 +117,7 @@ Lyt is an open toolchain — `@younndai/lyt` composes these packages, and you ca
 
 ## About YounndAI
 
-**YounndAI™ — You and AI, unified.** (pronounced *"yoon-dye"*)
+**YounndAI™ — You and AI, unified.** (pronounced _"yoon-dye"_)
 
 A philosophy of intelligence: building with intention, so humans and machines
 think together without losing what makes either whole.
@@ -128,10 +136,10 @@ Website: [linkyourthink.com](https://linkyourthink.com)
 
 ---
 
-|               |                                                         |
-| ------------- | ------------------------------------------------------- |
-| **Project**   | [Lyt — Link Your Think](https://linkyourthink.com)      |
-| **Author**    | [Alexandru Mareș](https://allemaar.com)                 |
-| **Company**   | [MARLINK TRADING SRL](https://younndai.com) · YounndAI™ |
-| **License**   | [Apache 2.0](./LICENSE) — © 2026 MARLINK TRADING SRL    |
-| **Trademark** | [YounndAI™ Trademark Guidelines](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md)        |
+|               |                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------- |
+| **Project**   | [Lyt — Link Your Think](https://linkyourthink.com)                                       |
+| **Author**    | [Alexandru Mareș](https://allemaar.com)                                                  |
+| **Company**   | [MARLINK TRADING SRL](https://younndai.com) · YounndAI™                                  |
+| **License**   | [Apache 2.0](./LICENSE) — © 2026 MARLINK TRADING SRL                                     |
+| **Trademark** | [YounndAI™ Trademark Guidelines](https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md) |

@@ -18,6 +18,11 @@ import type { Client } from "@libsql/client";
 
 import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
 import { canonicalizeVaultPath } from "../util/paths.js";
+import type {
+  DestinationKind,
+  DestinationTargetKind,
+  VaultDestinationSource,
+} from "./destination-policy.js";
 
 export type VaultStatus = "active" | "disconnected" | "missing" | "tombstoned" | "access_lost";
 
@@ -71,6 +76,13 @@ export interface VaultRow {
   status: VaultStatus;
   // Inc-2 Phase B / own-vs-clone provenance (fail-closed 'own').
   source: VaultSource;
+  // Phase A — effective owned publication intent. Foreign rows always expose
+  // null here even if stale physical bytes survived an interrupted old writer.
+  destinationKind: DestinationKind | null;
+  destinationSource: VaultDestinationSource | null;
+  destinationTarget: string | null;
+  destinationTargetKind: DestinationTargetKind | null;
+  destinationRepositoryName: string | null;
   gitUrl: string | null;
   createdAt: string | null;
   registeredAt: string;
@@ -194,6 +206,21 @@ function rowToVault(row: Record<string, unknown>): VaultRow {
   const memscope = toBytesOrNull(row["memscope_rid"], "memscope_rid", nameStr);
   const parent = toBytesOrNull(row["parent_vault"], "parent_vault", nameStr);
   const homeMesh = toBytesOrNull(row["home_mesh_rid"], "home_mesh_rid", nameStr);
+  const source = normalizeVaultSource(row["source"]);
+  const destinationKindRaw = row["destination_kind"];
+  const destinationKind: DestinationKind | null =
+    source === "own" && (destinationKindRaw === "local" || destinationKindRaw === "github")
+      ? destinationKindRaw
+      : null;
+  const destinationSourceRaw = row["destination_source"];
+  const destinationSource: VaultDestinationSource | null =
+    source === "own" &&
+    (destinationSourceRaw === "mesh-inherited" ||
+      destinationSourceRaw === "vault-override" ||
+      destinationSourceRaw === "legacy-derived")
+      ? destinationSourceRaw
+      : null;
+  const destinationTargetKindRaw = row["destination_target_kind"];
   return {
     rid,
     ridHex: uuid7BytesToHex(rid),
@@ -214,7 +241,23 @@ function rowToVault(row: Record<string, unknown>): VaultRow {
     // guarantees an ambiguous row is treated as the user's own data (never
     // deletable as a "confirmed clone"). Only the two exact foreign tokens
     // ('shared','subscribed') read through; any other value degrades to 'own'.
-    source: normalizeVaultSource(row["source"]),
+    source,
+    destinationKind,
+    destinationSource,
+    destinationTarget:
+      source === "own" && destinationKind === "github" && row["destination_target"] != null
+        ? String(row["destination_target"])
+        : null,
+    destinationTargetKind:
+      source === "own" &&
+      destinationKind === "github" &&
+      (destinationTargetKindRaw === "user" || destinationTargetKindRaw === "org")
+        ? destinationTargetKindRaw
+        : null,
+    destinationRepositoryName:
+      source === "own" && destinationKind === "github" && row["destination_repository_name"] != null
+        ? String(row["destination_repository_name"])
+        : null,
     gitUrl: row["git_url"] == null ? null : String(row["git_url"]),
     createdAt: row["created_at"] == null ? null : String(row["created_at"]),
     registeredAt: String(row["registered_at"]),
@@ -366,10 +409,12 @@ export async function setVaultSource(
   rid: Uint8Array,
   source: VaultSource,
 ): Promise<void> {
-  await db.execute({
-    sql: "UPDATE vaults SET source = ? WHERE rid = ?",
-    args: [source, rid],
-  });
+  // A registry-only clear is insufficient: runtime readers prefer the
+  // canonical ledger, so its vault winner must be retracted before this row
+  // can cross the ownership boundary and later return to `own`.
+  const { transitionVaultSourceWithPolicyFence } =
+    await import("../flows/federation/destination-policy-service.js");
+  await transitionVaultSourceWithPolicyFence(db, rid, source);
 }
 
 // the PRESERVE-AWARE foreign mark used by the receive-path converge

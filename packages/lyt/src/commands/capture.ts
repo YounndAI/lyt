@@ -57,9 +57,6 @@ import type { Client } from "@libsql/client";
 
 const CAPTURE_PATTERN = "knowledge-capture";
 const CAPTURE_VERB = "capture";
-// The generated pod-map vault is generator-managed (writable=false) — never a
-// capture target, so it is excluded from single-vault default resolution.
-const POD_MAP_VAULT_NAME = "lyt-pod-map";
 
 interface CaptureCliOpts {
   vault?: string;
@@ -338,7 +335,7 @@ async function resolveCaptureVault(
     return row.name;
   }
   const userVaults = (await listVaults(db)).filter(
-    (v: VaultRow) => v.status === "active" && v.name !== POD_MAP_VAULT_NAME,
+    (v: VaultRow) => v.status === "active",
   );
   if (userVaults.length === 1) {
     return userVaults[0]!.name;

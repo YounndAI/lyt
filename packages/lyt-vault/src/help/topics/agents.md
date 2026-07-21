@@ -11,7 +11,8 @@ operation set you do, through three transports:
 
 Every new vault scaffolds an `agents.md` priming file under `.lyt/` telling the
 agent how to drive Lyt in that vault's context, and `lyt agent-manual --install`
-writes a compact Lyt manual into a runtime's global instructions.
+writes a compact (at most 2,500 words) Lyt core manual into a runtime's global
+instructions. Focused skills and `lyt help` topics carry uncommon procedures.
 
 ## `agents.md` lifecycle
 
@@ -51,12 +52,22 @@ flag: surface it to the handler rather than acting on it.
 
 ## Skill files
 
-`@younndai/lyt-skills` ships eleven `/lyt-*` skills (capture, recall, search,
-pod, mesh-explore, alias, primer-context, sync, adopt, update, pattern). `lyt
+`@younndai/lyt-skills` ships twelve `/lyt-*` skills (create, capture, recall,
+search, pod, mesh-explore, alias, primer-context, sync, adopt, update, pattern). `lyt
 skills install` links them into every detected runtime. See `lyt help skills`.
+
+Use `/lyt-create` for mesh/vault creation and Receipt V1 interpretation. Use
+`/lyt-sync` for the exact read-only check
+`lyt sync --check --vault <qualified-vault> --json`; it must stop without
+syncing. Mesh lookup is exact-name only. For install drift, use `lyt outdated`,
+then `lyt update`: it stages a sealed operation, the replacement binary performs
+the automatic reconciliation, and its Receipt reports completion or a non-null
+resume action. Use `lyt install reconcile --json` for a read-only inspection,
+`lyt install reconcile --apply --json` for an explicit standalone reconcile,
+and finish with `lyt doctor` plus a fresh agent session.
 
 ## See also
 
 - `lyt help skills` — the harness skill set.
-- `lyt help patterns` — the pattern runtime the skills wrap.
+- `lyt help patterns` — the pattern runtime used by pattern-backed workflows.
 - `lyt help metadata` — the priming files written at scaffold.

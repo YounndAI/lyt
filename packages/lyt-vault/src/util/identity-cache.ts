@@ -14,10 +14,20 @@
  * limitations under the License.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 
 import { getLytHome } from "./paths.js";
+import { assertNoReparsePointInPath } from "./write-path-guard.js";
+import { escapeQuoted, unescapeQuoted } from "../yon/_helpers.js";
 
 // W2.3 (2026-06-03) — the pod repo is the DURABLE identity SoT (the
 // recovery path). `<podRepoDir>/identity.yon` carries the same @IDENTITY shape
@@ -44,6 +54,18 @@ export interface CachedIdentity {
   handle: string;
   verifiedAtMs: number;
   source: string;
+}
+
+// The synced pod identity extends the account identity additively. `podRid`
+// is the existing federation RID (not a new identity); `podAlias` is mutable
+// presentation metadata. Both are optional on read for legacy identity.yon.
+export interface PodIdentity extends CachedIdentity {
+  podRid?: string;
+  podAlias?: string;
+}
+
+export class PodIdentityMismatchError extends Error {
+  readonly errorCode = "pod-identity-mismatch";
 }
 
 // (2026-06-04) — identity `source` values for the
@@ -135,17 +157,122 @@ export function getPodIdentityPath(podRepoDir: string): string {
   return join(podRepoDir, "identity.yon");
 }
 
-export function readPodIdentity(podRepoDir: string): CachedIdentity | null {
-  return readIdentityCache(getPodIdentityPath(podRepoDir));
+export function readPodIdentity(podRepoDir: string): PodIdentity | null {
+  const path = getPodIdentityPath(podRepoDir);
+  assertNoReparsePointInPath(path);
+  return readIdentityCache(path);
 }
 
 // Brief F — the pod SoT renders the `lyt-pod-identity` doc-id (NOT the machine
 // id). It does NOT route through writeIdentityCache (that one stamps the machine
 // doc-id) — it writes the pod-flavoured render directly to the pod path.
-export function writePodIdentity(identity: CachedIdentity, podRepoDir: string): void {
+export function writePodIdentity(identity: PodIdentity, podRepoDir: string): void {
   const p = getPodIdentityPath(podRepoDir);
+  assertNoReparsePointInPath(p);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, renderPodIdentity(identity), "utf8");
+  assertNoReparsePointInPath(p);
+  // Account-handle reconciliation must not erase synchronized pod metadata.
+  const existing = existsSync(p) ? parseIdentityYon(readFileSync(p, "utf8")) : null;
+  const merged: PodIdentity = {
+    ...identity,
+    ...(identity.podRid === undefined && existing?.podRid !== undefined
+      ? { podRid: existing.podRid }
+      : {}),
+    ...(identity.podAlias === undefined && existing?.podAlias !== undefined
+      ? { podAlias: existing.podAlias }
+      : {}),
+  };
+  atomicWritePodIdentity(p, renderPodIdentity(merged));
+}
+
+function atomicWritePodIdentity(path: string, content: string): void {
+  const tmp = `${path}.${process.pid}-${podIdentityTmpCounter()}.tmp`;
+  assertNoReparsePointInPath(tmp);
+  try {
+    writeFileSync(tmp, content, { encoding: "utf8", flag: "wx" });
+    // Both the destination and the same-directory temporary leaf are checked
+    // again immediately before replacement. A linked parent/leaf is never
+    // followed by the pod identity migration or alias projection paths.
+    assertNoReparsePointInPath(path);
+    assertNoReparsePointInPath(tmp);
+    renameSync(tmp, path);
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+let podIdentityTmpValue = 0;
+function podIdentityTmpCounter(): number {
+  podIdentityTmpValue += 1;
+  return podIdentityTmpValue;
+}
+
+export function sanitizePodAlias(value: string): string | null {
+  const alias = value
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63)
+    .replace(/-+$/g, "");
+  return alias.length > 0 ? alias : null;
+}
+
+export function fallbackPodAlias(podRid: string): string {
+  return `pod-${podRid.slice(0, 8).toLowerCase()}`;
+}
+
+export function deriveInitialPodAlias(podRid: string, osUsername?: string): string {
+  let username = osUsername;
+  if (username === undefined) {
+    try {
+      username = userInfo().username;
+    } catch {
+      username = "";
+    }
+  }
+  return sanitizePodAlias(username ?? "") ?? fallbackPodAlias(podRid);
+}
+
+export function ensurePodIdentityMetadata(
+  podRepoDir: string,
+  podRid: string,
+  options: { freshPod: boolean; osUsername?: string } = { freshPod: false },
+): PodIdentity | null {
+  const identity = readPodIdentity(podRepoDir);
+  if (identity === null) return null;
+  if (identity.podRid !== undefined && identity.podRid !== podRid) {
+    throw new PodIdentityMismatchError(
+      `pod identity mismatch: identity.yon declares ${identity.podRid}, expected ${podRid}`,
+    );
+  }
+  const podAlias =
+    identity.podAlias ??
+    (options.freshPod
+      ? deriveInitialPodAlias(podRid, options.osUsername)
+      : fallbackPodAlias(podRid));
+  const next: PodIdentity = { ...identity, podRid, podAlias };
+  if (identity.podRid !== podRid || identity.podAlias !== podAlias) {
+    writePodIdentity(next, podRepoDir);
+  }
+  return next;
+}
+
+export function updatePodAlias(podRepoDir: string, alias: string): PodIdentity {
+  const identity = readPodIdentity(podRepoDir);
+  if (identity === null || identity.podRid === undefined) {
+    throw new Error("Cannot update pod alias before pod identity metadata is initialized.");
+  }
+  const podAlias = sanitizePodAlias(alias);
+  if (podAlias === null) throw new Error("Pod alias must contain at least one letter or number.");
+  const next: PodIdentity = { ...identity, podAlias };
+  writePodIdentity(next, podRepoDir);
+  return next;
 }
 
 export interface ResolvePodIdentityOptions {
@@ -198,14 +325,19 @@ export function resolvePodIdentity(opts: ResolvePodIdentityOptions = {}): Cached
 // @DOC ver=2.0 | id=<docId> | domain=yai.lyt
 // @IDENTITY rid=identity:local | type=user | provider=<p> | handle=<h>
 // | verified_at:ts=<iso> | source=<src>
-function renderIdentity(id: CachedIdentity, docId: string): string {
+function renderIdentity(id: PodIdentity, docId: string): string {
   const verifiedIso = new Date(id.verifiedAtMs).toISOString();
   return (
     `@DOC ver=2.0 | id=${docId} | domain=yai.lyt\n` +
     `\n` +
     `@IDENTITY rid=identity:local | type=user | provider=${id.provider}` +
     ` | handle=${id.handle} | verified_at:ts=${verifiedIso}` +
-    ` | source=${id.source}\n`
+    ` | source=${id.source}` +
+    (docId === POD_DOC_ID && id.podRid !== undefined ? ` | pod_rid=pod:${id.podRid}` : ``) +
+    (docId === POD_DOC_ID && id.podAlias !== undefined
+      ? ` | pod_alias="${escapeQuoted(id.podAlias)}"`
+      : ``) +
+    `\n`
   );
 }
 
@@ -215,7 +347,7 @@ export function renderMachineIdentity(id: CachedIdentity): string {
 }
 
 // Brief F — the pod-SoT render (@DOC id=lyt-pod-identity).
-export function renderPodIdentity(id: CachedIdentity): string {
+export function renderPodIdentity(id: PodIdentity): string {
   return renderIdentity(id, POD_DOC_ID);
 }
 
@@ -278,7 +410,7 @@ export function reconcileIdentity(
 // Permissive parse: pulls provider/handle/verified_at/source from the first
 // @IDENTITY line. We do not invoke yon-parser here — kept dependency-free per
 // plan §"Commit 2" ("trivial YON shape; no parser needed for write").
-export function parseIdentityYon(raw: string): CachedIdentity | null {
+export function parseIdentityYon(raw: string): PodIdentity | null {
   const line = raw.split(/\r?\n/).find((l) => l.startsWith("@IDENTITY "));
   if (!line) return null;
   const provider = matchField(line, "provider");
@@ -288,7 +420,22 @@ export function parseIdentityYon(raw: string): CachedIdentity | null {
   if (!provider || !handle || !verifiedRaw) return null;
   const verifiedAtMs = Date.parse(verifiedRaw);
   if (Number.isNaN(verifiedAtMs)) return null;
-  return { provider, handle, verifiedAtMs, source };
+  const podRidRaw = matchField(line, "pod_rid");
+  if (podRidRaw !== null && !/^pod:[0-9a-f]{32}$/.test(podRidRaw)) return null;
+  const podRid = podRidRaw === null ? undefined : podRidRaw.slice(4);
+  const podAliasRaw = matchField(line, "pod_alias");
+  const podAlias =
+    podAliasRaw?.startsWith('"') === true && podAliasRaw.endsWith('"')
+      ? unescapeQuoted(podAliasRaw.slice(1, -1))
+      : undefined;
+  return {
+    provider,
+    handle,
+    verifiedAtMs,
+    source,
+    ...(podRid === undefined ? {} : { podRid }),
+    ...(podAlias === undefined ? {} : { podAlias }),
+  };
 }
 
 function matchField(line: string, key: string): string | null {

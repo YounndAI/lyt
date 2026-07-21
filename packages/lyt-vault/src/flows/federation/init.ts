@@ -15,6 +15,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import type { Client } from "@libsql/client";
@@ -35,10 +36,13 @@ import {
 } from "../../util/gh-federation.js";
 import { recordInitFailure } from "../../util/failure-log.js";
 import { getHandleFromIdentity, isValidGhHandle } from "../../util/identity.js";
+import { resolveRemoteUrl } from "../../util/remote-url.js";
 import {
   migrateIdentityCache,
   readIdentityCache,
   readPodIdentity,
+  ensurePodIdentityMetadata,
+  PodIdentityMismatchError,
   resolvePodIdentity,
   writeIdentityCache,
   writePodIdentity,
@@ -48,8 +52,20 @@ import { POD_REPO_DESCRIPTION, POD_TOPICS } from "../../scaffold/github-defaults
 import { hexToUuid7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../../util/uuid7.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { renderFederationYon } from "../../yon/federation-write.js";
+import { registerCurrentMachine } from "../../yon/machine-ledger.js";
+import { ensurePodAliasAuthority } from "../../yon/pod-alias-ledger.js";
 import { AGENTS_MD_TEMPLATE_VERSION } from "../../templates/priming.js";
 import { renderPodReadme } from "../../templates/pod-readme.js";
+import {
+  resolveCanonicalPodPublicationAuthority,
+  withCanonicalPodPublicationAttempt,
+  withFreshPublicationPermission,
+  type CanonicalVaultPublicationAttemptContext,
+} from "./publication-authority.js";
+import {
+  observePublicationPermission,
+  type PublicationPermissionObserver,
+} from "./publication-permission.js";
 
 // `lyt federation init` — provisions or adopts {handle}/lyt-pod (repo
 // name; CLI verb-group + internal "federation" term unchanged per Option B).
@@ -65,19 +81,16 @@ import { renderPodReadme } from "../../templates/pod-readme.js";
 // Default visibility: `--private` per DQ-7a-extended (Alex 2026-05-29).
 // `--public` is explicit opt-in.
 //
-// Network gating: `pushToRemote` defaults to true (matches handler intent
-// "publish my federation repo"). Set to false in tests + when handler wants
-// local-only state until they're ready. Brief says local commits OK; remote
-// push gated on Alex confirmation for the CODE repo — federation pushes are
-// the handler's own GH content so happen freely once they invoke the verb.
+// Creation is local-only by default. Scoped `lyt sync` is the sole remote
+// mutation owner, so callers must opt into neither remote create nor push here.
 
 export type FederationInitBranch = "fresh" | "adopted" | "cached";
 
 export interface FederationInitOptions {
   handle?: string | undefined; // overrides identity lookup when set
   visibility?: FederationRepoVisibility | undefined; // default "private"
-  pushToRemote?: boolean | undefined; // default true (false in tests)
-  createRemoteIfMissing?: boolean | undefined; // default true
+  pushToRemote?: boolean | undefined; // default false
+  createRemoteIfMissing?: boolean | undefined; // default false
   // (2026-06-04) — LOCAL-ONLY pod forge: a no-gh `lyt init`
   // (or the local-only choice). Skips the `gh api` remote probe entirely (which
   // would throw ENOENT with no gh on PATH) AND skips remote-create + remote-add:
@@ -91,6 +104,12 @@ export interface FederationInitOptions {
   ghClient?: FederationGhClient | undefined;
   identityProvider?: (() => string) | undefined;
   now?: (() => Date) | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
+  permissionAttemptId?: string | undefined;
+  /** Fresh creation consumes the RID preallocated by CreationPlanV1. */
+  plannedFedRidBytes?: Uint8Array | undefined;
+  /** Parent aggregate creation owns the single final exact-path checkpoint. */
+  checkpointMode?: "automatic" | "deferred" | undefined;
   // v1.A.1 fold (DO NOT SKIP #4): open-once registry seam. When provided,
   // the flow uses the caller's already-open libSQL client instead of
   // opening/closing its own. Saves the close-wait on Windows (~200ms) when
@@ -119,9 +138,11 @@ export async function federationInitFlow(
   const visibility: FederationRepoVisibility = opts.visibility ?? "private";
   const localOnly = opts.localOnly ?? false;
   // localOnly never pushes (no remote exists) regardless of the push flag.
-  const push = localOnly ? false : (opts.pushToRemote ?? true);
-  const createRemote = opts.createRemoteIfMissing ?? true;
+  const push = localOnly ? false : (opts.pushToRemote ?? false);
+  const createRemote = opts.createRemoteIfMissing ?? false;
   const now = opts.now ?? (() => new Date());
+  const permissionObserver = opts.permissionObserver ?? observePublicationPermission;
+  const permissionAttemptId = opts.permissionAttemptId ?? randomUUID();
 
   // Brief F (P4) — migrate a legacy `~/lyt/identity.yon` machine cache to
   // `~/lyt/machine.yon` BEFORE resolvePodIdentity reads it (so the resolver
@@ -164,6 +185,22 @@ export async function federationInitFlow(
   const localDir = getFederationRepoDir(handle);
   const fedYonPath = getFederationYonPath(handle);
   const remoteFullName = federationRepoFullName(handle);
+  const permissionTarget = `github:user/${handle}`;
+  const authorized = <T>(
+    capability: "repository-create" | "repository-push",
+    action: (context: CanonicalVaultPublicationAttemptContext) => Promise<T>,
+  ) =>
+    withFreshPublicationPermission({
+      capability,
+      target: permissionTarget,
+      repository: remoteFullName,
+      actor: handle,
+      attemptId: permissionAttemptId,
+      policyEpoch: 0,
+      permissionObserver,
+      publicationSubject: { identity: `pod:${remoteFullName.toLowerCase()}`, podRoot: localDir },
+      action,
+    });
 
   // v1.A.1 fold (DO NOT SKIP #4): if the caller already has the registry
   // open (e.g. flows/init.ts self-heal probe), reuse it. Otherwise open
@@ -197,7 +234,8 @@ export async function federationInitFlow(
       // existed reaches this cached branch on every re-init, so heal the missing
       // identity.yon here. Disk-present is what B.1's exit asserts; the next sync
       // commits it.
-      ensurePodIdentityWriteback(localDir, handle, now().getTime());
+      ensurePodIdentityWriteback(localDir, handle, now().getTime(), existingState.fedRidHex, false);
+      registerMachineForPod(localDir, now().toISOString());
       const stamped = await upsertFederationState(db, {
         handle,
         fedRidBytes: existingState.fedRidBytes,
@@ -245,11 +283,19 @@ export async function federationInitFlow(
         // cannot set topics). Topic failure is non-fatal — the repo exists and
         // federation_state is still written below.
         const description = opts.description ?? POD_REPO_DESCRIPTION;
-        await ghClient.createRepo(handle, federationRepoName(), visibility, description);
+        await authorized("repository-create", (attempt) =>
+          attempt.runOutwardChild(() =>
+            ghClient.createRepo(handle, federationRepoName(), visibility, description),
+          ),
+        );
         remoteCreated = true;
         branch = "fresh";
         try {
-          await ghClient.setRepoTopics(handle, federationRepoName(), POD_TOPICS);
+          await authorized("repository-push", (attempt) =>
+            attempt.runOutwardChild(() =>
+              ghClient.setRepoTopics(handle, federationRepoName(), POD_TOPICS),
+            ),
+          );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // eslint-disable-next-line no-console
@@ -263,7 +309,11 @@ export async function federationInitFlow(
       if (!localExists) {
         mkdirSync(dirname(localDir), { recursive: true });
         if (branch === "fresh") {
-          await ghClient.initLocalFromFresh(handle, federationRepoName(), localDir);
+          await authorized("repository-push", (attempt) =>
+            attempt.runOutwardChild(() =>
+              ghClient.initLocalFromFresh(handle, federationRepoName(), localDir),
+            ),
+          );
         } else {
           await ghClient.cloneExisting(handle, federationRepoName(), localDir);
         }
@@ -291,7 +341,7 @@ export async function federationInitFlow(
         // Unparseable / ridless cloned manifest — fall through to a fresh mint.
       }
     }
-    fedRidBytes ??= newUuidv7Bytes();
+    fedRidBytes ??= opts.plannedFedRidBytes ?? newUuidv7Bytes();
     const fedRidHex = uuid7BytesToHex(fedRidBytes);
 
     const createdAt = now().toISOString();
@@ -362,13 +412,30 @@ export async function federationInitFlow(
           writeIdentityCache(podIdentity);
         }
       }
-      // A fresh pod writes its durable identity. Adoption consumes the cloned
-      // identity but never rewrites the repository merely because it is now on
-      // another machine.
+      // A fresh pod writes its durable identity. Adoption preserves the cloned
+      // alias; legacy account-only identity files receive a deterministic
+      // fedRid-backed alias rather than this machine's OS username.
       if (branch !== "adopted") {
-        ensurePodIdentityWriteback(localDir, handle, now().getTime());
+        ensurePodIdentityWriteback(
+          localDir,
+          handle,
+          now().getTime(),
+          fedRidHex,
+          branch === "fresh",
+        );
+      } else {
+        ensurePodIdentityMetadata(localDir, fedRidHex, { freshPod: false });
       }
+      registerMachineForPod(localDir, createdAt);
+      ensurePodAliasAuthority({
+        podRoot: localDir,
+        podRid: fedRidHex,
+        ...(readPodIdentity(localDir)?.podAlias === undefined
+          ? {}
+          : { fallbackAlias: readPodIdentity(localDir)!.podAlias }),
+      });
     } catch (err) {
+      if (err instanceof PodIdentityMismatchError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       // eslint-disable-next-line no-console
       console.error(`federation init: identity persistence failed non-fatally — ${msg}`);
@@ -383,10 +450,36 @@ export async function federationInitFlow(
       : remoteCreated
         ? `chore(federation): forge ${remoteFullName}`
         : `chore(federation): refresh ${remoteFullName}`;
+    const podPublicationAuthority = resolveCanonicalPodPublicationAuthority(handle, fedRidHex);
     let pushed = false;
     try {
-      if (branch !== "adopted") {
-        await ghClient.commitAndOptionallyPush(localDir, commitMessage, push);
+      if (branch !== "adopted" && opts.checkpointMode !== "deferred") {
+        if (push) {
+          await ghClient.commitAndOptionallyPush(
+            localDir,
+            commitMessage,
+            true,
+            {
+              url: resolveRemoteUrl(
+                podPublicationAuthority.destination.owner,
+                podPublicationAuthority.destination.repositoryName,
+              ),
+              refspec: "HEAD:refs/heads/main",
+            },
+            (pushChild) =>
+              withCanonicalPodPublicationAttempt({
+                authority: podPublicationAuthority,
+                podYonPath: fedYonPath,
+                podRoot: localDir,
+                actor: handle,
+                attemptId: permissionAttemptId,
+                permissionObserver,
+                action: (attempt) => attempt.runOutwardChild(pushChild),
+              }),
+          );
+        } else {
+          await ghClient.commitAndOptionallyPush(localDir, commitMessage, false);
+        }
         pushed = push;
       }
     } catch (err) {
@@ -427,6 +520,15 @@ export async function federationInitFlow(
   }
 }
 
+function registerMachineForPod(podDir: string, nowIso: string): void {
+  const identity = readPodIdentity(podDir) ?? readIdentityCache();
+  registerCurrentMachine({
+    podRoot: podDir,
+    nowIso,
+    ...(identity === null ? {} : { accountIdentity: `${identity.provider}:${identity.handle}` }),
+  });
+}
+
 function defaultIdentityProvider(): string {
   return getHandleFromIdentity();
 }
@@ -448,7 +550,13 @@ function defaultIdentityProvider(): string {
 // drift at its source. A pod handle that DIFFERS is a genuine conflict (two
 // machines / a handle change) — left for `lyt doctor [--apply]` to reconcile;
 // the self-heal never silently overwrites a divergent handle.
-function ensurePodIdentityWriteback(podDir: string, handle: string, nowMs: number): void {
+function ensurePodIdentityWriteback(
+  podDir: string,
+  handle: string,
+  nowMs: number,
+  podRid: string,
+  freshPod: boolean,
+): void {
   try {
     const existing = readPodIdentity(podDir);
     if (existing !== null) {
@@ -461,6 +569,7 @@ function ensurePodIdentityWriteback(podDir: string, handle: string, nowMs: numbe
           writePodIdentity({ ...existing, verifiedAtMs: fresher }, podDir);
         }
       }
+      ensurePodIdentityMetadata(podDir, podRid, { freshPod });
       return;
     }
     const local = readIdentityCache();
@@ -471,7 +580,9 @@ function ensurePodIdentityWriteback(podDir: string, handle: string, nowMs: numbe
       source: "pod-writeback",
     };
     writePodIdentity(identity, podDir);
+    ensurePodIdentityMetadata(podDir, podRid, { freshPod });
   } catch (err) {
+    if (err instanceof PodIdentityMismatchError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     // eslint-disable-next-line no-console
     console.error(`federation init: pod identity write-back failed non-fatally — ${msg}`);

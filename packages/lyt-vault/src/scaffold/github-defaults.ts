@@ -61,13 +61,6 @@ export const PUBLIC_VAULT_TOPICS: readonly string[] = [...BRAND_TOPICS, "lyt-pub
 //   - "vault"        → BRAND_TOPICS        [lyt, lyt-vault, linkyourthink]
 //   - "pod"          → POD_TOPICS          [lyt, lyt-pod, linkyourthink]
 //   - "public-vault" → PUBLIC_VAULT_TOPICS [lyt, lyt-vault, linkyourthink, lyt-public]
-// NOTE on "map": the map repo (`{handle}/lyt-pod-map`) has NO established
-// topic-enforcement convention today — pod-map-generate.ts emits the markdown
-// vault but never runs a `gh repo create`/`--add-topic` for it. Per the Phase E
-// brief ("follow the existing map-repo convention if one exists; otherwise
-// leave map untouched and note it"), map is intentionally OMITTED from this
-// table. When map-repo topic enforcement is wired, add a "map" class here
-// (likely `[lyt, lyt-pod-map, linkyourthink]`) + a caller.
 export type RepoClass = "vault" | "pod" | "public-vault";
 
 export function baseTopicsForClass(repoClass: RepoClass): readonly string[] {

@@ -17,23 +17,18 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve as pathResolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 
 import { meshInitFlow } from "./mesh-init.js";
+import { inspectMeshInitPreflight } from "./mesh-init-preflight.js";
 import { captureIndexFlow } from "./capture-index.js";
 import { federationInitFlow } from "./federation/init.js";
-import {
-  reconcilePublishFlow,
-  type ReconcilePublishResult,
-} from "./federation/reconcile-publish.js";
 import { adoptAndPrimeFlow } from "./adopt-and-prime.js";
 import { reconstructionExitCode } from "./federation/recover-pod.js";
 import { embeddingsOfferGate } from "./embeddings-offer.js";
 import { resolveAskedState } from "./embeddings-offer-state.js";
 import { markAsked } from "../registry/nudge-state-repo.js";
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { generatePodMapFlow, installPodManagerPlugin } from "./pod-map-generate.js";
 import { detectInstalledRuntimes } from "./agent-manual.js";
 import {
   deriveProvisionalHandle,
@@ -41,15 +36,23 @@ import {
   isValidGhHandle,
   validateMeshName,
 } from "../util/identity.js";
-import { writeProvisionalIdentity } from "../util/identity-cache.js";
 import {
   federationRepoName,
   federationRepoFullName,
   getFederationRepoDir,
-  slugifyHandle,
+  vaultRepoName,
 } from "../util/federation-paths.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
 import { recordInitFailure } from "../util/failure-log.js";
+import { newUuidv7Bytes, uuid7BytesToDashedString } from "../util/uuid7.js";
+import {
+  deriveCreationOperationIdV1,
+  plannedSingleVaultEffectsV1,
+  resolveCreationPlanV1,
+  withCreationRepositoryEffectsV1,
+  type CreationPlanV1,
+} from "./creation-plan.js";
+import type { CreationMutationEvidence } from "../op/creation-mutation-journal.js";
 import { renderPodCard, renderNextSteps, type PodCardData } from "../util/pod-card.js";
 import { startSpinner, type SpinnerOp } from "../util/spinner.js";
 import {
@@ -68,10 +71,9 @@ import {
 // phase numbers shifted one more step; user-facing flow is 12 phases.
 // P7 (first vault) gains a placement-override prompt (Gap 1).
 //
-// Per the ratified default (phased, handler-ratified 2026-06-01): 9 of 10 phases shipped
-// in G.4 with Phase 9 deferred. v1.G.10 RE-WIRES the pod-map phase (now P11)
-// to invoke the pod-map vault generator + install the Pod Manager Obsidian
-// plugin (per G.4 retro @RECOMMENDATIONS #2 load-bearing contract).
+// P11 remains as a skipped compatibility window after retirement of the
+// Obsidian-specific pod-map generator. The wizard still reports 12 ordered
+// phases without generating viewer artifacts.
 //
 // Per the ratified default (handler-ratified 2026-06-01): the wizard is invoked via
 // `lyt init --wizard`; NO new top-level verb.
@@ -90,7 +92,7 @@ import {
 // P8 Create `personal` mesh (meshInitFlow direct call)
 // P9 First vault = `personal/main` (resolves the mesh main from P8; no name prompt, no duplicate scaffold)
 // P10 Initialize federation repo (federationInitFlow direct call)
-// P11 Pod-map vault + plugin install (generatePodMapFlow + installPodManagerPlugin)
+// P11 Retired pod-map window (observable skipped result; no generation)
 // P12 First-use demo (direct fs write + grep read-back)
 //
 // PG-8 shell-injection defenses (brief PG-8 4-prong):
@@ -133,6 +135,7 @@ export interface WizardPhaseResult {
     // 12 owner-misresolved/bug drop) surfaced by phase_adoptPod so the `lyt init`
     // command can wire it to process.exitCode with the bug/state granularity.
     reconstructExitCode?: number;
+    creation?: { plan: CreationPlanV1; mutations: CreationMutationEvidence };
   };
 }
 
@@ -146,10 +149,9 @@ export interface WizardRunOptions {
   // (P7 → P8-adopt) can be exercised without live gh. Defaults to the real
   // adoptAndPrimeFlow.
   adoptFlowOverride?: typeof adoptAndPrimeFlow;
-  // Brief C (F1) test seam — override the consented publish engine so the
-  // end-of-wizard staged-HIL publish prompt can be exercised without live
-  // gh/git. Defaults to the real reconcilePublishFlow.
-  publishFlowOverride?: typeof reconcilePublishFlow;
+  // Retained for option compatibility. Creation never publishes; scoped sync
+  // is the sole remote mutation owner.
+  publishFlowOverride?: unknown;
   // Phase C test seam — override the interactive embeddings offer so the
   // no-flag wizard route's neutral+recommend gate can be exercised without a
   // real model download. Defaults to the real embeddingsOfferGate.
@@ -159,6 +161,7 @@ export interface WizardRunOptions {
 export interface WizardRunResult {
   status: "completed" | "halted";
   phases: WizardPhaseResult[];
+  creation?: { plan: CreationPlanV1; mutations: CreationMutationEvidence };
 }
 
 // v1.GP WS3 / lead with "pod" (user-facing); gloss "federation" on
@@ -338,6 +341,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   const isTty = process.stdin.isTTY === true;
   let mode: "local" | "connected" | "adopt" = "local";
   let handleForProbe = "";
+  let freshHandle = "";
 
   if (ghReady) {
     try {
@@ -370,13 +374,15 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   // Provisional identity (D.2) — minted only in LOCAL mode (gh-absent or the
   // handler chose local). Prompts for a handle (default OS username, ⏎ accepts).
   if (mode === "local") {
-    await establishProvisionalIdentity(ph, opts.dryRun, isTty);
+    freshHandle = await chooseProvisionalIdentity(ph, opts.dryRun, isTty);
+  } else if (mode === "connected") {
+    freshHandle = handleForProbe;
   }
 
-  // firstVaultPath + ownerForPodMap feed the shared P11/P12 tail, sourced from
-  // the adopt branch OR the fresh-scaffold branch (local or connected).
+  // firstVaultPath feeds the shared completion tail, sourced from the adopt
+  // branch OR the fresh-scaffold branch (local or connected).
   let firstVaultPath = "";
-  let ownerForPodMap = "";
+  let creation: WizardRunResult["creation"];
 
   if (mode === "adopt") {
     // ADOPT — an existing pod. Clone it + acquire the user's vaults from gh +
@@ -391,7 +397,20 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     phases.push(adopt);
     if (!adopt.ok && !adopt.skipped) return { status: "halted", phases };
     firstVaultPath = adopt.data?.vaultPath ?? "";
-    ownerForPodMap = handleForProbe.length > 0 ? handleForProbe : safeHandleForOwner();
+    phases.push({
+      phase: 9,
+      name: "first-vault",
+      ok: true,
+      skipped: true,
+      message: "Skipped — existing pod adoption already acquired its registered vaults.",
+    });
+    phases.push({
+      phase: 10,
+      name: "federation-init",
+      ok: true,
+      skipped: true,
+      message: "Skipped — existing pod adoption already restored the pod repository.",
+    });
   } else {
     // FRESH — scaffold personal mesh + first vault + pod repo. `localMode` (no
     // gh / chose local) forges the pod LOCAL-ONLY (no gh repo, no remote);
@@ -400,9 +419,13 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
     emit(
       "\nPhase 8 — Create your `personal` mesh\nA mesh is a named group of vaults; `personal` is the default starter mesh.",
     );
-    const p6 = await phase6_createPersonalMesh(opts.dryRun);
+    const p6 = await phase6_createPersonalMesh(opts.dryRun, {
+      handle: freshHandle || deriveProvisionalHandle(),
+      connected: mode === "connected",
+    });
     phases.push(p6);
     if (!p6.ok && !p6.skipped) return { status: "halted", phases };
+    creation = p6.data?.creation;
 
     // P9 — first vault. the first vault is `personal/main`, already
     // scaffolded by P8's mesh-init. P9 resolves that path (no name prompt, no
@@ -428,35 +451,29 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
             "together. Under the hood it's a *federation* — 'pod' is what you'll see in " +
             "docs + chat, 'federation' is the plumbing underneath."),
     );
-    const p8 = await phase8_initFederationRepo(opts.dryRun, localMode);
+    const p8: WizardPhaseResult = {
+      phase: 10,
+      name: "federation-init",
+      ok: true,
+      skipped: true,
+      message:
+        "The immutable personal-mesh creation plan already initialized the local pod; no second pod mutation ran.",
+    };
     phases.push(p8);
-    if (!p8.ok && !p8.skipped) return { status: "halted", phases };
 
     firstVaultPath = p7.data?.vaultPath ?? "";
-    ownerForPodMap = resolveOwnerForPodMap(p8);
   }
 
-  if (mode !== "adopt") {
-    // P11/P12 are onboarding for a genuinely fresh pod. An adopted pod already
-    // has vaults and content; creating a local Obsidian pod-map and a welcome
-    // Figment there mutates recovered repositories unexpectedly.
-    emit(
-      "\nPhase 11 — Pod-map vault\n" +
-        "Generating your pod-map vault at `lyt-pod-map` — every mesh + vault gets " +
-        "a note; wikilinks encode federation edges; Obsidian's graph view renders the " +
-        "topology natively. The Pod Manager community plugin installs alongside for " +
-        "mesh-boundary coloring + 🔒 read-only badges. (writable=false; generator-managed.)",
-    );
-    const p9 = await phase9_podMapInit(ownerForPodMap, opts.dryRun);
-    phases.push(p9);
-    if (!p9.ok && !p9.skipped) return { status: "halted", phases };
-
-    emit(
-      "\nPhase 12 — First-use demo\nCapturing a 'Welcome to Lyt' sample Figment + recalling it.",
-    );
-    const p10 = await phase10_firstUseDemo(firstVaultPath, opts.dryRun);
-    phases.push(p10);
-  }
+  // P11/P12 are retained as observable compatibility windows in every mode.
+  // Neither creates viewer artifacts or unrequested content.
+  phases.push(await phase9_podMapInit("", opts.dryRun));
+  phases.push({
+    phase: 12,
+    name: "first-use-demo",
+    ok: true,
+    skipped: true,
+    message: "Skipped — creation does not add unrequested content after its exact checkpoint.",
+  });
 
   // v1.GP WS4 — end-of-init pod card + clickable links + Next-steps trio.
   // Skipped under --dry-run (the phase-walk output stays deterministic; a
@@ -538,15 +555,9 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
         "\nYour pod is local-only (not connected to GitHub). Run `lyt sync` to connect + back it up.\n",
       );
     } else if (mode !== "adopt") {
-      // Brief C (F1) — staged-HIL publish prompt. The wizard materialized the pod
-      // LOCALLY (mesh/federation init held the push; the pod CONTAINER repo may
-      // already exist on GitHub per two-tier consent, but the CONTENT —
-      // vault repos + pod push — is HELD until this consent). Offer to publish now
-      // (default-Yes per the ratified default); the prompt itself IS the explicit content-consent.
-      // Skipped on a non-TTY (never hangs).
+      // Creation ends locally. A scoped sync is the sole remote mutation owner.
       await maybePromptAndPublishWizard(ph, {
         isTty: process.stdin.isTTY === true,
-        publishFlow: opts.publishFlowOverride ?? reconcilePublishFlow,
       });
     } else {
       emit("\nExisting pod adopted. No publication is needed.\n");
@@ -556,83 +567,35 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   }
 
   const completed = phases.every((p) => p.ok || p.skipped === true);
-  return { status: completed ? "completed" : "halted", phases };
+  return {
+    status: completed ? "completed" : "halted",
+    phases,
+    ...(creation === undefined ? {} : { creation }),
+  };
 }
 
 export interface WizardPublishPromptDeps {
   // Whether stdin is an interactive TTY. A non-TTY MUST NOT prompt (the prompt
   // would hang a script waiting on stdin) — it surfaces the staged nudge instead.
   isTty: boolean;
-  // The consented publish engine (injected for tests). The real impl regen's
-  // pod.yon → creates missing vault repos + pushes → commits + pushes the pod,
-  // resumable via the outbox.
-  publishFlow: typeof reconcilePublishFlow;
+  /**
+   * Retained for test/caller compatibility. Creation never invokes a publish
+   * flow; scoped sync is the sole remote mutation owner.
+   */
+  publishFlow?: unknown;
 }
 
-// Brief C (F1) — the end-of-wizard staged-HIL publish prompt. Default-Yes
-// publishing is the expected end-state and the prompt is the explicit
-// consent (two-tier consent — running the prompt's "Yes" is the
-// content-publish consent; "No" genuinely holds the pod staged). Exported so it
-// can be unit-tested with a stub prompt handler + injected publish flow.
-//
-// Release review invariants this encodes: non-TTY NEVER prompts (no hang); "No"
-// publishes nothing (the flow is not called); a single "Yes" calls the engine
-// exactly once (the wizard performs no other outward publish, so no
-// double-publish is possible).
+// Creation is local-only. Keep this exported compatibility seam so callers get
+// one clear next action, but it must never invoke a publish engine.
 export async function maybePromptAndPublishWizard(
-  ph: IPromptHandler,
+  _ph: IPromptHandler,
   deps: WizardPublishPromptDeps,
 ): Promise<void> {
-  if (!deps.isTty) {
-    emit("\nYour pod is staged locally (not published). Run `lyt sync` to publish it to GitHub.");
-    return;
-  }
-
-  // Release review F1 (I1+Mi1) — branch-agnostic wording: "pushes … + its vault
-  // repo(s)" reads honestly after BOTH a fresh scaffold AND an adopt (where the
-  // vault repos already exist on GitHub — "creates" would lie there), and aligns
-  // with the --auto path's phrasing (init.ts) for cross-path consistency.
-  const yes = await ph.confirm(
-    "\nPublish your pod to GitHub now? (pushes your pod + its vault repo(s))",
-    true,
-  );
-  if (!yes) {
-    emit("Staged. Run `lyt sync` when you're ready to publish to GitHub.");
-    return;
-  }
-
-  emit("Publishing your pod to GitHub…");
-  // Release review F1 (M2) — a throw here (e.g. registry/outbox open failure) is
-  // INTENTIONALLY left to propagate: runWizard awaits this helper, and its caller
-  // (lyt init's --wizard branch) wraps runWizard in a try/catch that surfaces the
-  // failure as `wizard-error` + a non-zero exit. The engine does NOT throw on a
-  // normal partial/conflict publish — it returns `result.ok=false` (handled
-  // below) and a partial push is always resumable via `lyt sync` (outbox). A
-  // try/catch is kept OUT of here so a real failure isn't swallowed into a
-  // falsely-clean wizard finish.
-  const result: ReconcilePublishResult = await deps.publishFlow({ push: true });
-  if (result.skipped) {
-    emit(`Publish skipped — ${result.reason ?? "no pod"}.`);
-    return;
-  }
-  const pushed = result.vaultOutcomes.filter((o) => o.pushed).length;
-  if (result.ok) {
-    emit(`✓ Published to GitHub — ${pushed} vault repo(s) + your pod.`);
-    return;
-  }
-  emit(
-    `⚠ Partial publish — ${pushed} vault(s) pushed; ${result.outboxRemaining} op(s) pending. ` +
-      "Re-run `lyt sync` to finish (resumable, no data lost).",
-  );
-  for (const o of result.vaultOutcomes) {
-    if (o.status === "conflict" || o.status === "failed") {
-      emit(`  ${o.status}: ${o.vaultName} — ${o.message}`);
-    }
-  }
+  const suffix = deps.isTty ? " You can run it when ready." : "";
+  emit(`\nYour pod is local and not published. Run \`lyt sync\` to publish it to GitHub.${suffix}`);
 }
 
-// Build + print the WS4 pod card. Best-effort: handle resolution / pod-map
-// presence are tolerant (a missing piece simply doesn't render). Never throws
+// Build + print the WS4 pod card. Best-effort handle resolution never throws
 // into the wizard return path. `localOnly` drives the honest "not
 // connected to GitHub" status line (vs the connected "staged" wording).
 function emitPodCard(firstVaultPath: string, localOnly: boolean, adopted = false): void {
@@ -656,11 +619,6 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean, adopted = false
     adopted && firstVaultPath.length > 0 ? basenameOf(dirname(firstVaultPath)) : "personal";
   const vaultName = `${meshName}/${vaultLeaf}`;
 
-  // the pod-map vault sits FLAT under `vaults/` (no `<owner>` segment)
-  // — mirrors derivePodMapPaths in pod-map-generate.ts.
-  const ownerSlug = slugifyHandle(handle);
-  const podMapPath = join(getDefaultVaultsRoot(), "lyt-pod-map");
-
   // no `obsidian://open` deep-link — the card emits the honest
   // file:// vault-FOLDER path + "Open folder as vault" instruction for every
   // vault, so no per-vault verified-file (README) resolution is needed here.
@@ -673,12 +631,6 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean, adopted = false
     },
     podRepoFullName: federationRepoFullName(handle),
     podLocalPath: getFederationRepoDir(handle),
-    ...(existsSync(podMapPath)
-      ? {
-          podMapVaultPath: podMapPath,
-          ownerSlug,
-        }
-      : {}),
     hyperlinksEnabled: process.stdout.isTTY === true,
     // local pod → "not connected to GitHub"; connected (staged) pod →
     // "not yet published". Both lead the Next-steps with `lyt sync`.
@@ -726,7 +678,7 @@ async function askLocalVsConnect(
 // handle is validated with isValidGhHandle (re-prompt on miss). Non-TTY / dry-run
 // → the OS-username default, silently. Connect (`lyt sync`) reconciles it to the
 // real gh handle later.
-async function establishProvisionalIdentity(
+async function chooseProvisionalIdentity(
   ph: IPromptHandler,
   dryRun: boolean,
   isTty: boolean,
@@ -753,7 +705,6 @@ async function establishProvisionalIdentity(
       );
     }
   }
-  writeProvisionalIdentity(handle);
   return handle;
 }
 
@@ -978,12 +929,15 @@ export async function phase4_ghAuthLogin(
   if (status.error !== undefined) {
     // gh missing / spawn failure — halt with an actionable message (the same
     // not-authed remediation applies: get gh working, then re-run).
-    recordInitFailure({
-      site: "gh-auth",
-      step: "wizard:phase4_ghAuthLogin",
-      summary: `gh auth status spawn failed: ${status.error.message}`,
-      context: { reason: "spawn-error" },
-    });
+    recordInitFailure(
+      {
+        site: "gh-auth",
+        step: "wizard:phase4_ghAuthLogin",
+        summary: `gh auth status spawn failed: ${status.error.message}`,
+        context: { reason: "spawn-error" },
+      },
+      { mode: "none" },
+    );
     return {
       phase: 4,
       name: "gh-auth-login",
@@ -1010,12 +964,15 @@ export async function phase4_ghAuthLogin(
   // Not authed — HALT gracefully. Do NOT spawn an interactive `gh auth login`
   // (that is the unkillable-hang under blocking spawnSync). The handler runs
   // it directly in another terminal, then re-runs the wizard.
-  recordInitFailure({
-    site: "gh-auth",
-    step: "wizard:phase4_ghAuthLogin",
-    summary: "gh auth status reported not signed in to GitHub",
-    context: { reason: "not-authed", exitStatus: String(status.status) },
-  });
+  recordInitFailure(
+    {
+      site: "gh-auth",
+      step: "wizard:phase4_ghAuthLogin",
+      summary: "gh auth status reported not signed in to GitHub",
+      context: { reason: "not-authed", exitStatus: String(status.status) },
+    },
+    { mode: "none" },
+  );
   return {
     phase: 4,
     name: "gh-auth-login",
@@ -1267,12 +1224,15 @@ export async function phase5c_crossMachineAdoptDetect(
   try {
     probed = probe(handle, spawn);
   } catch (err) {
-    recordInitFailure({
-      site: "network-probe",
-      step: "wizard:phase5c_crossMachineAdoptDetect",
-      summary: `gh federation probe failed: ${(err as Error).message}`,
-      context: { handle, probe: `gh api /repos/${handle}/${federationRepoName()}` },
-    });
+    recordInitFailure(
+      {
+        site: "network-probe",
+        step: "wizard:phase5c_crossMachineAdoptDetect",
+        summary: `gh federation probe failed: ${(err as Error).message}`,
+        context: { handle, probe: `gh api /repos/${handle}/${federationRepoName()}` },
+      },
+      { mode: "none" },
+    );
     return {
       phase: 7,
       name: "cross-machine-adopt-detect",
@@ -1405,17 +1365,13 @@ export async function phase_adoptPod(opts: WizardRunOptions): Promise<WizardPhas
   }
 }
 
-// Resolve the gh handle for the pod-map owner in the adopt branch (the probe
-// handle may have been empty if identity wasn't cached when P7 ran).
-function safeHandleForOwner(): string {
-  try {
-    return getHandleFromIdentity();
-  } catch {
-    return "";
-  }
-}
-
-export async function phase6_createPersonalMesh(dryRun: boolean): Promise<WizardPhaseResult> {
+export async function phase6_createPersonalMesh(
+  dryRun: boolean,
+  options: { handle: string; connected: boolean } = {
+    handle: deriveProvisionalHandle(),
+    connected: false,
+  },
+): Promise<WizardPhaseResult> {
   // Existing helper for slug-safety; rejects '/' + Windows reserved names.
   try {
     validateMeshName("personal");
@@ -1437,8 +1393,59 @@ export async function phase6_createPersonalMesh(dryRun: boolean): Promise<Wizard
     };
   }
   try {
+    const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+    const destinationRequest = options.connected
+      ? ({ kind: "auto" } as const)
+      : ({ kind: "local" } as const);
+    const subject = { kind: "mesh" as const, repositoryName: vaultRepoName("personal/main") };
+    const preflight = await inspectMeshInitPreflight({ name: "personal" });
+    const operationId = deriveCreationOperationIdV1({
+      request: destinationRequest,
+      subject,
+      scope: `personal/main\0${join(getDefaultVaultsRoot(), "personal", "main")}`,
+    });
+    const planned = resolveCreationPlanV1({
+      request: destinationRequest,
+      subject,
+      actor: {
+        attempt_id: attemptId,
+        observed_at: new Date().toISOString(),
+        result: "unknown",
+        actor: null,
+        evidence_class: "unavailable",
+      },
+      intendedEffects: withCreationRepositoryEffectsV1(
+        plannedSingleVaultEffectsV1({
+          operationId,
+          pod:
+            preflight.podIdentity.state === "present"
+              ? { kind: "existing", rid: preflight.podIdentity.rid }
+              : { kind: "create", handle: options.handle },
+          mesh: { kind: "create", name: "personal" },
+          vaultName: "personal/main",
+          vaultRoot: join(getDefaultVaultsRoot(), "personal", "main"),
+        }),
+        preflight.podIdentity.state === "present"
+          ? [
+              {
+                repositoryRoot: preflight.podIdentity.repositoryRoot,
+                exactPaths: ["pod.yon"],
+              },
+            ]
+          : [],
+      ),
+    });
+    if (planned.kind === "refusal") throw new Error(planned.message);
     const result = await withPhaseWork("git-init", "your `personal` mesh + main vault", () =>
-      meshInitFlow({ name: "personal", noPush: true }),
+      meshInitFlow({
+        name: "personal",
+        noPush: true,
+        creation: {
+          destinationRequest,
+          creationPlan: planned.plan,
+          attemptId,
+        },
+      }),
     );
     return {
       phase: 8,
@@ -1449,7 +1456,10 @@ export async function phase6_createPersonalMesh(dryRun: boolean): Promise<Wizard
       // pod's first (and only) vault on init. Surface its path so P9 can
       // resolve it (instead of scaffolding a duplicate) and P12 can run the
       // first-use demo against it.
-      data: { vaultPath: result.mainVault.path },
+      data: {
+        vaultPath: result.mainVault.path,
+        creation: { plan: result.creationPlan, mutations: result.mutations },
+      },
     };
   } catch (err) {
     recordInitFailure({
@@ -1532,20 +1542,20 @@ export async function phase8_initFederationRepo(
       name: "federation-init",
       ok: true,
       skipped: true,
-      // Brief C (F3) — honest dry-run preview: a real run CREATES the pod
-      // container repo on GitHub (two-tier consent) and STAGES content
-      // locally (push held). Not "local-only".
       message:
-        "[dry-run] would create the pod repo on GitHub + stage content locally (push held until `lyt sync`).",
+        "[dry-run] would create the local pod repository and stage local content only; run `lyt sync` later to create an online copy.",
     };
   }
   try {
-    // local mode forges the pod LOCAL-ONLY (no gh probe, no remote);
-    // connected mode creates the gh container repo (push still held).
-    const result = await withPhaseWork(
-      "create",
-      localOnly ? "your local pod" : "your pod repo",
-      () => federationInitFlow({ pushToRemote: false, localOnly, visibility: "private" }),
+    // Pod creation is always local-only; scoped sync owns remote creation and
+    // publication after the handler explicitly chooses to run it.
+    const result = await withPhaseWork("create", "your local pod", () =>
+      federationInitFlow({
+        pushToRemote: false,
+        createRemoteIfMissing: false,
+        localOnly: true,
+        visibility: "private",
+      }),
     );
     return {
       phase: 10,
@@ -1571,11 +1581,8 @@ export async function phase8_initFederationRepo(
   }
 }
 
-// Brief C (F3) — build the honest end-of-phase pod-repo message. The federation
-// init holds the push (pushToRemote:false) but, per two-tier consent, the
-// pod CONTAINER repo IS created on GitHub on a fresh forge (remoteCreated). So
-// the message must distinguish created-on-GitHub / adopted / cached from the
-// stale "local-only" — and always point at `lyt sync` as the publish step.
+// Build the local-first end-of-phase pod-repo message. Creation never creates
+// or attaches a remote; `lyt sync` is the only online mutation owner.
 function federationPhaseMessage(
   result: Awaited<ReturnType<typeof federationInitFlow>>,
   localOnly = false,
@@ -1586,7 +1593,7 @@ function federationPhaseMessage(
     return `Local pod ready (${result.remoteFullName} — not on GitHub yet) · run \`lyt sync\` to connect + back up. ${where}`;
   }
   if (result.remoteCreated) {
-    return `Pod repo created on GitHub (${result.remoteFullName}) · content staged (unpushed) — run \`lyt sync\` to publish. ${where}`;
+    return `Local pod ready (${result.remoteFullName}) · run \`lyt sync\` to create and publish its online copy. ${where}`;
   }
   if (result.branch === "adopted") {
     return `Pod repo on GitHub (${result.remoteFullName}; adopted) · content staged — run \`lyt sync\` to publish. ${where}`;
@@ -1595,97 +1602,20 @@ function federationPhaseMessage(
   return `Pod repo ready (${result.remoteFullName}; ${result.branch}) — run \`lyt sync\` to publish. ${where}`;
 }
 
-// v1.G.10 — Phase 10 (post-G.13 numbering) pod-map vault auto-init + Pod
-// Manager plugin install. Per G.4 retro @RECOMMENDATIONS #2 LOAD-BEARING
-// contract: replaces the G.4-era phase9_deferred() stub. Generator runs
-// the markdown emission;
-// installer copies the plugin from packages/lyt-vault/obsidian-plugins/
-// lyt-pod-manager/ into <pod-map-vault>/.obsidian/plugins/lyt-pod-manager/.
-//
-// Owner unknown → ok:false with the the ratified default refuse message; halt-on-fail in
-// runWizard so the handler explicitly gh-auth-logins before retry.
-//
-// Plugin install conflict-handling (the ratified default condition 4): if the install
-// dir already has manifest.json (community-store install, or prior
-// wizard run), the install is SKIPPED rather than overwriting — defers
-// to the user-controlled store install to keep semver in lockstep.
+// P11 compatibility seam. Pod-map generation is retired; keep one release
+// window with an explicit skipped result so integrations that count the
+// wizard's 12 phases do not break silently.
 export async function phase9_podMapInit(
-  owner: string,
-  dryRun: boolean,
+  _owner: string,
+  _dryRun: boolean,
 ): Promise<WizardPhaseResult> {
-  if (dryRun) {
-    return {
-      phase: 11,
-      name: "pod-map-vault",
-      ok: true,
-      skipped: true,
-      message: `[dry-run] would generate pod-map vault at <vaults-root>/${owner || "<owner-unknown>"}/lyt-pod-map + install Pod Manager plugin`,
-    };
-  }
-  const genResult = await withPhaseWork("pod-map", "your pod-map vault", () =>
-    generatePodMapFlow({ owner }),
-  );
-  if (!genResult.ok) {
-    return {
-      phase: 11,
-      name: "pod-map-vault",
-      ok: false,
-      message: `pod-map vault auto-init failed: ${genResult.error}`,
-    };
-  }
-  // Plugin install. The source dir resolves relative to this file's
-  // built location: `<lyt-vault>/dist/flows/wizard.js` → `../../obsidian-plugins/lyt-pod-manager/`.
-  const pluginSourceDir = resolvePluginSourceDir();
-  const installResult = installPodManagerPlugin({
-    pluginInstallDir: genResult.paths.pluginInstallDir,
-    pluginSourceDir,
-  });
-  const installNote = installResult.skipped
-    ? " (plugin install skipped — already present)"
-    : installResult.ok
-      ? ""
-      : ` (plugin install failed: ${installResult.reason})`;
-  // A failed plugin install is non-fatal (the pod-map vault still
-  // renders in stock Obsidian per the degrade-to-baseline contract).
   return {
     phase: 11,
-    name: "pod-map-vault",
+    name: "pod-map-init",
     ok: true,
-    message: `pod-map vault generated at ${genResult.vaultPath} (${genResult.meshCount} mesh(es), ${genResult.vaultCount} vault(s), ${genResult.notesEmitted} note(s))${installNote}`,
+    skipped: true,
+    message: "Skipped — pod maps are retired viewer artifacts and are not generated.",
   };
-}
-
-// Owner resolution for Phase 10 (pod-map). Priority order:
-// 1. P9 federation init's self-heal handle (the canonical source).
-// 2. gh identity probe fallback (covers the case where P9 was skipped
-// or didn't run a self-heal because federation already existed).
-// 3. Empty string → generator returns ok:false per the ratified default refuse.
-function resolveOwnerForPodMap(p8: WizardPhaseResult): string {
-  // The federation-init flow does NOT yet expose the resolved handle on
-  // WizardPhaseResult.data — federation-init's narration includes the
-  // handle in its message but we don't want to regex-extract (release review
-  // Cor-mi1/Sec-M1 fragility). Fall straight to the gh identity probe;
-  // if Phase 9 succeeded, `getHandleFromIdentity()` will hit the live
-  // cache populated by federation init's own probe.
-  if (!p8.ok) return "";
-  try {
-    return getHandleFromIdentity();
-  } catch {
-    return "";
-  }
-}
-
-// Resolves the plugin source dir relative to the built wizard.js file
-// location. In dev (vitest), __dirname-equivalent points at src/flows/;
-// in built dist, it points at dist/flows/. Both walk up to the package
-// root and into obsidian-plugins/lyt-pod-manager/.
-function resolvePluginSourceDir(): string {
-  // import.meta.url → file:// URL of this module's source/built location.
-  const thisFile = fileURLToPath(import.meta.url);
-  const flowsDir = dirname(thisFile);
-  // .../src/flows or .../dist/flows → .../src/.. or .../dist/.. → pkg root
-  const pkgRoot = join(flowsDir, "..", "..");
-  return join(pkgRoot, "obsidian-plugins", "lyt-pod-manager");
 }
 
 const WELCOME_FIGMENT_BODY = "Welcome to Lyt — your federated vaults are ready.";
@@ -1861,7 +1791,7 @@ function emit(line: string): void {
 
 // v1.GP F7-followup — run a heavy NON-interactive wizard phase under a
 // phase-spanning spinner so the synchronous work (mesh forge, vault scaffold,
-// libSQL writes, git init, pod.yon write, pod-map emission) shows a
+// libSQL writes, git init, pod.yon write) shows a
 // live label + elapsed instead of a silent multi-second gap. Single-threaded
 // Node can't animate frames INSIDE one blocking sync call (accepted), but the
 // `setImmediate` yield lets the render interval fire at the boundary so the

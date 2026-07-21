@@ -45,6 +45,15 @@ import { rebuildVaultFlow } from "./rebuild-vault.js";
 import { reflectInboundIndex } from "./reflect-index.js";
 import { reconcileMeshLinks } from "./mesh-link-reconcile.js";
 import { healPatterns } from "../util/pattern-paths.js";
+import { getFederationRepoDir, vaultRepoName } from "../util/federation-paths.js";
+import { newUuidv7Bytes, uuid7BytesToDashedString } from "../util/uuid7.js";
+import {
+  deriveCreationOperationIdV1,
+  plannedSingleVaultEffectsV1,
+  resolveCreationPlanV1,
+  withCreationRepositoryEffectsV1,
+} from "./creation-plan.js";
+import { resolveVaultPath } from "../util/paths.js";
 
 // W2.1 / W2.2 (2026-06-03) — adopt-and-prime. The "never-fail, adopt instead
 // of halt" flow that replaces the wizard P7 halt (DF-2) + the spec decision
@@ -132,7 +141,7 @@ export interface AdoptAndPrimeResult {
   clusterOutcomes: ClusterOutcome[];
   // True when no vaults were acquirable and personal/main was scaffolded.
   firstVaultCreated: boolean;
-  // The vault downstream phases (pod-map, first-use demo) should target.
+  // The primary vault selected for downstream onboarding.
   primaryVaultPath: string | null;
   primaryMeshName: string | null;
   // Paths the Lane M reconcile freshened.
@@ -161,6 +170,7 @@ export async function adoptAndPrimeFlow(
     const fed = await federationInitFlow({
       ...(args.handle !== undefined ? { handle: args.handle } : {}),
       pushToRemote: false,
+      createRemoteIfMissing: false,
       db,
       ...(args.federationGhClient !== undefined ? { ghClient: args.federationGhClient } : {}),
     });
@@ -306,9 +316,15 @@ export async function adoptAndPrimeFlow(
       const existingPersonal = await getMeshByName(db, "personal");
       if (existingPersonal === null) {
         try {
+          const creation = await localMeshCreation(db, "personal");
           const mesh = await meshInitFlow({
             name: "personal",
             noPush,
+            creation: {
+              destinationRequest: creation.request,
+              creationPlan: creation.plan,
+              attemptId: creation.attemptId,
+            },
             // Open-once seam (A.4): reuse the adopt flow's registry connection.
             db,
             ...(args.meshGhClient !== undefined ? { ghClient: args.meshGhClient } : {}),
@@ -429,4 +445,45 @@ export async function adoptAndPrimeFlow(
   } finally {
     if (ownDb) await closeRegistry(db);
   }
+}
+
+async function localMeshCreation(db: Client, meshName: string) {
+  const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+  const request = { kind: "local" } as const;
+  const podRows = await db.execute(
+    "SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle LIMIT 2",
+  );
+  if (podRows.rows.length !== 1) {
+    throw new Error("Adopt mesh creation requires exactly one real local pod identity.");
+  }
+  const handle = String(podRows.rows[0]!["handle"]);
+  const subject = { kind: "mesh" as const, repositoryName: vaultRepoName(`${meshName}/main`) };
+  const operationId = deriveCreationOperationIdV1({
+    request,
+    subject,
+    scope: `adopt:${meshName}/main\0${resolveVaultPath(`${meshName}/main`)}`,
+  });
+  const resolved = resolveCreationPlanV1({
+    request,
+    subject,
+    actor: {
+      attempt_id: attemptId,
+      observed_at: new Date().toISOString(),
+      result: "unknown",
+      actor: null,
+      evidence_class: "unavailable",
+    },
+    intendedEffects: withCreationRepositoryEffectsV1(
+      plannedSingleVaultEffectsV1({
+        operationId,
+        pod: { kind: "existing", rid: String(podRows.rows[0]!["rid"]) },
+        mesh: { kind: "create", name: meshName },
+        vaultName: `${meshName}/main`,
+        vaultRoot: resolveVaultPath(`${meshName}/main`),
+      }),
+      [{ repositoryRoot: getFederationRepoDir(handle), exactPaths: ["pod.yon"] }],
+    ),
+  });
+  if (resolved.kind === "refusal") throw new Error(resolved.message);
+  return { request, plan: resolved.plan, attemptId };
 }

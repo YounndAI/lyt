@@ -1,8 +1,11 @@
 ---
 name: lyt-mesh-explore
 description: >
-  Drill into a single Lyt mesh — surface mesh metadata and member home vaults for one named mesh. Trigger when the user runs /lyt-mesh-explore <mesh>, or says "show me the X mesh", "what's in mesh X", "drill into X mesh", "explore the X mesh", "give me X mesh details", or similar phrasing on mesh-scoped browsing. Wraps `lyt mesh info <mesh> [--remote] [--json]` — local mode reads the mesh's `.lyt/mesh.yon` SoT; `--remote` peeks at the remote mesh.yon via gh api without cloning. Read-only; pairs with /lyt-pod (pod-level enumeration across all meshes) for breadth and /lyt-search (tiered query) for content.
+  Drill into one exactly named Lyt mesh — surface mesh metadata, destination policy, and member home-vault destinations. Trigger when the user runs /lyt-mesh-explore <mesh>, or says "show me the X mesh", "what's in mesh X", "drill into X mesh", or similar mesh-scoped browsing. Wraps `lyt mesh info <mesh> [--remote] --json`. Read-only; never resolves by prefix.
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.8.0
 capabilities: [read]
 runtimes: [claude, codex, agents]
@@ -19,7 +22,7 @@ The skill is pure prose around existing CLI verbs — no new CLI verb, no new he
 
 > **Note:** `publicMeta`, `updateCadences`, and `defaultVaultUpdateCadence` were removed from `MeshInfoResult`. The JSON schema and rendering template below reflect the current post-deletion shape.
 
-User-facing language uses **"mesh"** throughout per the LYT vocabulary convention — "pod" is reserved for the user's _full_ set of meshes (which is `/lyt-pod`'s scope); "mesh" is the individual group of vaults sharing a GitHub push target.
+User-facing language uses **"mesh"** throughout. A mesh is a named grouping; its name is independent from a GitHub user or organization. Each home vault reports its own effective destination and the source of that policy.
 
 ## When to invoke
 
@@ -47,7 +50,7 @@ The CLI verb takes one required positional `<mesh>` (the mesh name). Pick by the
 **Resolve the candidate against `lyt mesh list --json` before passing it.** Don't guess — when the user names a mesh:
 
 1. Run `lyt mesh list --json` first (the canonical mesh-enumeration verb). The output's `meshes[].name` field is the source of truth for registered mesh names.
-2. Match the user's term to the listed names (exact, then case-insensitive, then prefix).
+2. Use only an exact listed name. If it is absent or differs, show the available names and ask; never infer by prefix.
 3. **Reject any resolved name that begins with `-` or `--`** before passing it to the positional `<mesh>` argument — closes the flag-injection surface the same way lyt-sync, lyt-search, and lyt-pod close theirs (the gh-flag-injection defense family). Mesh names are user-controlled at `lyt mesh init` time; a mesh literally named `--evil` would otherwise smuggle a flag-shaped token into the verb's argv.
 4. If no match (or the only match is `--`-leading), tell the user the available mesh names from `lyt mesh list --json` and stop — do not invent a name.
 
@@ -86,13 +89,15 @@ The CLI emits stable, deterministically key-ordered JSON on stdout (exit 0 on su
     "pushTarget": "<gh-target>" | null,
     "pushKind": "handle" | "org" | null,
     "mainVaultRid": "vault:<uuid-dashed>",
-    "createdAt": "<iso>"
+      "createdAt": "<iso>"
+      "destination": { "kind": "local|github|unconfigured", "target": "...", "source": "..." }
   },
   "homeVaults": [
     {
       "vaultRid": "vault:<uuid-dashed>",
       "vaultRidHex": "<hex>",
-      "vaultName": "<name>"
+      "vaultName": "<name>",
+      "destination": { "kind": "local|github|unconfigured", "target": "...", "source": "..." } | null
     }
   ]
 }
@@ -116,10 +121,11 @@ Render the mesh summary as a markdown block. The handler-facing layout:
 - push target: `<mesh.pushKind>:<mesh.pushTarget>`     (omit line when pushTarget is null)
 - main vault rid: `<mesh.mainVaultRid>`
 - created: `<mesh.createdAt>`
+- destination: `<mesh.destination.kind>` · target/source from the emitted destination object
 
 **Home vaults:** (count = homeVaults.length)
 - ★ `<main-vault-name>` (`vault:<vaultRidHex>`)        — main vault, marked ★
-- `<vault-name>` (`vault:<vaultRidHex>`)
+- `<vault-name>` (`vault:<vaultRidHex>`) — destination: `<kind>` · source: `<source>`
 - ...
 ```
 

@@ -20,7 +20,10 @@ import { generateFederationCanvasFlow } from "../flows/canvas-federation.js";
 import { federationInitFlow } from "../flows/federation/init.js";
 import { federationListFlow } from "../flows/federation/list.js";
 import { federationRebuildFlow } from "../flows/federation/rebuild.js";
+import { getFederationRoot } from "../util/federation-paths.js";
 import type { FederationRepoVisibility } from "../util/gh-federation.js";
+import { readPodIdentity, sanitizePodAlias } from "../util/identity-cache.js";
+import { appendPodAlias, readPodAlias } from "../yon/pod-alias-ledger.js";
 import { VOICE } from "../voice.js";
 
 // v1.A.0 — `lyt federation init|list|rebuild`. CLI verbs stay plain per
@@ -56,38 +59,62 @@ export function buildFederationCommand(): Command {
   cmd.addCommand(buildListSubcommand());
   cmd.addCommand(buildRebuildSubcommand());
   cmd.addCommand(buildCanvasSubcommand());
+  cmd.addCommand(buildAliasSubcommand());
   return cmd;
+}
+
+function buildAliasSubcommand(): Command {
+  return new Command("alias")
+    .description("Inspect or update Your Pod's mutable alias; the stable pod RID is unchanged.")
+    .argument("[alias]", "New pod alias; omit to inspect")
+    .option("--json", "Emit structured pod identity metadata")
+    .action((alias: string | undefined, opts: { json?: boolean }) => {
+      const podRoot = getFederationRoot();
+      const identity = readPodIdentity(podRoot);
+      if (identity === null || identity.podRid === undefined || identity.podAlias === undefined) {
+        throw new Error("Pod identity metadata is not initialized; run `lyt init` first.");
+      }
+      if (alias !== undefined) {
+        const normalized = sanitizePodAlias(alias);
+        if (normalized === null) throw new Error("Pod alias must contain at least one letter or number.");
+        appendPodAlias({ podRoot, podRid: identity.podRid, alias: normalized });
+      }
+      const podAlias = readPodAlias(podRoot, identity.podRid)?.alias ?? identity.podAlias;
+      const payload = {
+        podRid: identity.podRid,
+        podAlias,
+        accountIdentity: `${identity.provider}:${identity.handle}`,
+      };
+      // eslint-disable-next-line no-console
+      console.log(
+        opts.json === true
+          ? JSON.stringify(payload, null, 2)
+          : `Pod alias: ${payload.podAlias}\nPod RID:   ${payload.podRid}`,
+      );
+    });
 }
 
 function buildInitSubcommand(): Command {
   const sub = new Command("init")
-    .description(
-      "Forge Your Pod — create {handle}/lyt-pod (default --private per DQ-7a-extended) and scaffold pod.yon.",
-    )
+    .description("Create a local pod and scaffold pod.yon; use lyt sync to publish it.")
     .option("--handle <h>", "GitHub handle (overrides cached identity)")
     .addOption(
       new Option("--public", "Create the GitHub repo public (opt-in; default is --private)"),
     )
     .addOption(new Option("--private", "Create the GitHub repo private (DEFAULT)"))
-    .option("--no-push", "Skip the initial git push (local commits only)")
-    .option("--description <text>", "Repo description used on `gh repo create`")
+    .option("--no-push", "Legacy compatibility flag; creation is always local-only")
+    .option("--description <text>", "Stored for later scoped publication")
     .option("--json", "Emit JSON instead of human-readable output")
     .action(async (opts: FedInitCliOpts) => {
       const visibility: FederationRepoVisibility = opts.public === true ? "public" : "private";
-      // commander's `.option("--no-push", ...)` sets opts.push to false; in
-      // our typed shape we read opts.noPush — fall back to opts as-keyed.
-      const rawOpts = opts as unknown as Record<string, unknown>;
-      const push = rawOpts["push"] !== false; // default true unless --no-push given
-
-      // Emit the brand-voice status BEFORE the network round-trip starts so
-      // the handler sees activity even on a slow `gh repo create` call.
-      // eslint-disable-next-line no-console
-      console.log(VOICE.forgingYourPod);
+      if (opts.json !== true) console.error(VOICE.forgingYourPod);
 
       const result = await federationInitFlow({
         ...(opts.handle !== undefined ? { handle: opts.handle } : {}),
         visibility,
-        pushToRemote: push,
+        pushToRemote: false,
+        createRemoteIfMissing: false,
+        localOnly: true,
         ...(opts.description !== undefined ? { description: opts.description } : {}),
       });
 
@@ -114,7 +141,7 @@ function buildInitSubcommand(): Command {
       }
 
       // eslint-disable-next-line no-console
-      console.log(`Your Pod:        ${result.remoteFullName} (${result.visibility})`);
+      console.log(`Your local pod:  ${result.remoteFullName} (${result.visibility})`);
       // eslint-disable-next-line no-console
       console.log(`  rid:           fed:${result.fedRidHex}`);
       // eslint-disable-next-line no-console
@@ -124,9 +151,7 @@ function buildInitSubcommand(): Command {
       // eslint-disable-next-line no-console
       console.log(`  pod.yon        ${result.federationYonPath}`);
       // eslint-disable-next-line no-console
-      console.log(
-        ` remote: ${result.remoteCreated ? "created" : "adopted"}${result.pushed ? " + pushed" : ""}`,
-      );
+      console.log(" remote: not published; run `lyt sync` when ready");
     });
   return sub;
 }

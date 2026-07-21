@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import {
@@ -24,12 +24,22 @@ import {
   listBundledSkills,
   type Runtime,
 } from "./symlink.js";
+import {
+  readSkillMetadata,
+  type SkillCompatibilityRefusal,
+  type SkillCompatibilityStatus,
+} from "./skill-metadata.js";
 
 export type SkillRuntimeState = "symlink" | "copy" | "missing" | "divergent" | "not-a-dir";
 
 export interface SkillRuntimeRow {
   name: string;
+  skillVersion: string | null;
+  requiresLyt: string | null;
+  contractVersion: string | null;
   lytVersion: string | null;
+  compatibility: SkillCompatibilityStatus;
+  refusal: SkillCompatibilityRefusal | null;
   runtimes: Record<Runtime, SkillRuntimeState>;
 }
 
@@ -52,7 +62,7 @@ export function listSkillsTriRuntime(opts: ListSkillsOptions = {}): ListSkillsRe
 
   const skills: SkillRuntimeRow[] = skillNames.map((name) => {
     const skillSourceDir = resolve(join(sourceDir, name));
-    const lytVersion = readLytVersion(join(skillSourceDir, "SKILL.md"));
+    const metadata = readSkillMetadata(join(skillSourceDir, "SKILL.md"));
     const runtimeStates: Record<Runtime, SkillRuntimeState> = {
       claude: "missing",
       codex: "missing",
@@ -63,7 +73,7 @@ export function listSkillsTriRuntime(opts: ListSkillsOptions = {}): ListSkillsRe
       const targetSkillDir = join(targetBase, name);
       runtimeStates[runtime] = detectState(targetSkillDir, skillSourceDir);
     }
-    return { name, lytVersion, runtimes: runtimeStates };
+    return { name, ...metadata, runtimes: runtimeStates };
   });
 
   return { sourceDir, runtimes, skills };
@@ -78,15 +88,4 @@ function detectState(targetSkillDir: string, sourceSkillDir: string): SkillRunti
   }
   if (statSync(targetSkillDir).isDirectory()) return "copy";
   return "not-a-dir";
-}
-
-function readLytVersion(skillMdPath: string): string | null {
-  if (!existsSync(skillMdPath)) return null;
-  const md = readFileSync(skillMdPath, "utf8");
-  const match = md.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return null;
-  const fm = match[1]!;
-  const versionMatch = fm.match(/^lyt-version:\s*(\S.*)$/m);
-  if (!versionMatch) return null;
-  return versionMatch[1]!.trim();
 }

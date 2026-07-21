@@ -28,11 +28,28 @@ import {
 import { getVaultByRid } from "../../registry/repo.js";
 import { initVaultDbs } from "../../registry/vault-db.js";
 import {
-  deriveVaultRepoOwner,
   federationRepoFullName,
   getFederationRepoDir,
   vaultRepoName,
 } from "../../util/federation-paths.js";
+import {
+  destinationPolicyKey,
+  type DestinationPolicyRecordV1,
+} from "../../registry/destination-policy.js";
+import {
+  clearOwnedMeshDestinationProjection,
+  clearOwnedVaultDestinationProjection,
+  prepareOwnedMeshDestinationProjection,
+  projectOwnedMeshDestination,
+  projectOwnedVaultDestination,
+  type MeshDestinationProjection,
+  type VaultDestinationProjection,
+} from "../../registry/destination-policy-projection.js";
+import {
+  foldDestinationPolicyWinners,
+  readAllDestinationPolicyRecords,
+} from "./destination-policy-ledger.js";
+import { setCanonicalDestinationPolicy } from "./destination-policy-service.js";
 import { getDefaultGhExecutor, type GhExecutor } from "../../util/gh-discover.js";
 import { realFederationGhClient } from "../../util/gh-federation.js";
 import { isValidGhHandle, validateMeshName, validateVaultName } from "../../util/identity.js";
@@ -400,6 +417,28 @@ export async function recoverVaultsFromPodManifest(
     ...mesh,
     pushKind: ownership.normalizedPushKinds.get(mesh.meshRidHex) ?? mesh.pushKind,
   }));
+  let policyWinners: Map<string, DestinationPolicyRecordV1>;
+  try {
+    policyWinners = foldDestinationPolicyWinners(
+      readAllDestinationPolicyRecords(doc.federation.fedRidHex, podDir),
+    );
+  } catch (err) {
+    const refusedReason = renderRecoveryRefusal(
+      "semantic-validation",
+      `destination-policy ledger is invalid: ${errMsg(err)}`,
+      "Restore the pod policy ledger before retrying recovery",
+    );
+    return {
+      meshesRecovered: 0,
+      vaultsRecovered,
+      skipped,
+      drops,
+      refused: true,
+      refusedKind: "semantic-validation",
+      refusedReason,
+      warnings: [refusedReason],
+    };
+  }
 
   // R1-m1 fix-pass — index the MANIFEST mesh records by rid so the vault loop
   // can classify a drop against the manifest's declared `role` (not just the
@@ -430,12 +469,13 @@ export async function recoverVaultsFromPodManifest(
       }
       const rid = hexToUuid7Bytes(m.meshRidHex);
       const existingMesh = await getMeshByRid(db, rid);
+      const policyWinner = policyWinners.get(destinationPolicyKey("mesh", m.meshRidHex)) ?? null;
       if (existingMesh === null) {
         await insertMesh(db, {
           rid,
           name: m.meshName,
-          pushTarget: m.pushTarget,
-          pushKind: m.pushKind,
+          pushTarget: policyWinner === null ? m.pushTarget : null,
+          pushKind: policyWinner === null ? m.pushKind : null,
           createdAt: m.addedAt,
           // #1 (SC2) — RESTORE ownership from the manifest's `role`. Omitting
           // ownCreated fail-closed to false, which reconstructed every OWN mesh
@@ -449,16 +489,41 @@ export async function recoverVaultsFromPodManifest(
           // unauthenticated manifest claim by itself.
           ownCreated: m.role === "own",
         });
+        if (m.role === "own" && policyWinner !== null) {
+          await prepareOwnedMeshDestinationProjection(db, rid);
+          if (policyWinner.state === "active") {
+            await projectOwnedMeshDestination(db, rid, meshProjectionFromPolicy(policyWinner));
+          } else {
+            await clearOwnedMeshDestinationProjection(db, rid);
+          }
+        }
         meshesRecovered += 1;
       } else if (m.role === "own") {
         // Recovery is idempotent over partial/legacy local state. The ownership
         // preflight above authenticated this exact target before any mutation,
         // so converge an existing row to the verified manifest authority too.
-        await updateMeshOwnership(db, rid, {
-          pushTarget: m.pushTarget,
-          pushKind: m.pushKind,
-          ownCreated: true,
-        });
+        if (policyWinner === null) {
+          // Legacy absence cannot clear a projection already known to come from
+          // explicit 0.20 policy. Only legacy/unconfigured rows may be seeded
+          // from the authenticated compatibility manifest.
+          if (
+            existingMesh.destinationSource !== "explicit" &&
+            existingMesh.destinationSource !== "authenticated-default"
+          ) {
+            await updateMeshOwnership(db, rid, {
+              pushTarget: m.pushTarget,
+              pushKind: m.pushKind,
+              ownCreated: true,
+            });
+          }
+        } else {
+          await prepareOwnedMeshDestinationProjection(db, rid);
+          if (policyWinner.state === "active") {
+            await projectOwnedMeshDestination(db, rid, meshProjectionFromPolicy(policyWinner));
+          } else {
+            await clearOwnedMeshDestinationProjection(db, rid);
+          }
+        }
       }
     } catch (err) {
       warnings.push(`mesh ${m.meshName}: ${errMsg(err)}`);
@@ -473,7 +538,7 @@ export async function recoverVaultsFromPodManifest(
   for (const v of doc.vaults) {
     const repo = v.repo.length > 0 ? v.repo : vaultRepoName(v.vaultName);
     const manifestHomeMeshRidHex = v.homeMeshRidHex;
-    // #2 — resolve each vault's REAL repo owner from its HOME MESH push_target,
+    // #2 — resolve the clone source from the manifest's legacy origin hint.
     // not the pod-owner handle. An ORG-mesh vault lives under the org handle; the
     // old `cloneFn({ handle: args.handle, ... })` cloned it under the personal
     // handle → 404. deriveVaultRepoOwner reuses the SAME trust gate the publish
@@ -501,13 +566,13 @@ export async function recoverVaultsFromPodManifest(
       // account/org, while still preserving their correct push_target (for
       // example Marlink-Technologies and YounndAI). `role` continues to gate
       // write authority/ownCreated. A current foreign `role=join` + `push_kind=org`
-      // remains untrusted and uses deriveVaultRepoOwner's fail-closed fallback.
+      // remains untrusted and falls back to the pod owner.
       owner =
         manifestMesh !== undefined &&
         isValidGhHandle(manifestMesh.pushTarget) &&
         (manifestMesh.role === "own" || manifestMesh.pushKind === "handle")
           ? manifestMesh.pushTarget
-          : deriveVaultRepoOwner(homeMesh, args.handle);
+          : args.handle;
     } catch {
       owner = args.handle;
     }
@@ -524,7 +589,21 @@ export async function recoverVaultsFromPodManifest(
       // under a changed name (→ re-clone + re-register, a duplicate-identity
       // clobber) or resolve a bare leaf to a DIFFERENT vault. Match on identity.
       const ridBytes = hexToUuid7Bytes(v.vaultRidHex);
-      if ((await getVaultByRid(db, ridBytes)) !== null) {
+      const vaultPolicyWinner =
+        policyWinners.get(destinationPolicyKey("vault", v.vaultRidHex)) ?? null;
+      const existingVault = await getVaultByRid(db, ridBytes);
+      if (existingVault !== null) {
+        if (existingVault.source === "own") {
+          await applyRecoveredOwnedVaultPolicy(
+            db,
+            ridBytes,
+            existingVault,
+            homeMesh,
+            vaultPolicyWinner,
+            doc.federation.fedRidHex,
+            podDir,
+          );
+        }
         skipped.push({ vaultName: v.vaultName, reason: "already-registered" });
         continue;
       }
@@ -593,6 +672,18 @@ export async function recoverVaultsFromPodManifest(
         ridOverride: ridBytes,
         homeMeshRidOverride: hexToUuid7Bytes(manifestHomeMeshRidHex),
       });
+      const recoveredVault = await getVaultByRid(db, ridBytes);
+      if (recoveredVault?.source === "own") {
+        await applyRecoveredOwnedVaultPolicy(
+          db,
+          ridBytes,
+          recoveredVault,
+          homeMesh,
+          vaultPolicyWinner,
+          doc.federation.fedRidHex,
+          podDir,
+        );
+      }
       vaultsRecovered.push({ vaultName: reg.name, repo, path: targetPath });
     } catch (err) {
       const reason = errMsg(err);
@@ -637,6 +728,113 @@ export async function recoverVaultsFromPodManifest(
   }
 
   return { meshesRecovered, vaultsRecovered, skipped, warnings, drops };
+}
+
+function meshProjectionFromPolicy(policy: DestinationPolicyRecordV1): MeshDestinationProjection {
+  if (
+    policy.subjectKind !== "mesh" ||
+    (policy.source !== "explicit" &&
+      policy.source !== "authenticated-default" &&
+      policy.source !== "legacy-derived")
+  ) {
+    throw new Error("Destination-policy winner does not contain a mesh policy.");
+  }
+  return {
+    destinationKind: policy.destinationKind,
+    targetOwner: policy.targetOwner,
+    targetKind: policy.targetKind,
+    source: policy.source,
+  };
+}
+
+async function applyOwnedVaultPolicyWinner(
+  db: Client,
+  vaultRid: Uint8Array,
+  policy: DestinationPolicyRecordV1,
+): Promise<void> {
+  if (policy.subjectKind !== "vault") {
+    throw new Error("Destination-policy winner does not contain a vault policy.");
+  }
+  if (policy.state === "tombstoned") {
+    await clearOwnedVaultDestinationProjection(db, vaultRid);
+    return;
+  }
+  await projectOwnedVaultDestination(db, vaultRid, vaultProjectionFromPolicy(policy));
+}
+
+async function applyRecoveredOwnedVaultPolicy(
+  db: Client,
+  vaultRid: Uint8Array,
+  vault: NonNullable<Awaited<ReturnType<typeof getVaultByRid>>>,
+  homeMesh: MeshRow | null,
+  winner: DestinationPolicyRecordV1 | null,
+  podRid: string,
+  podRoot: string,
+): Promise<void> {
+  if (winner !== null) {
+    await applyOwnedVaultPolicyWinner(db, vaultRid, winner);
+    return;
+  }
+
+  // Preserve an exact projected override/inherited snapshot before consulting
+  // the current mesh. The projection is migration input only: recovery emits a
+  // canonical vault ledger record before any later publication can proceed.
+  const inherited =
+    (vault.destinationSource === "mesh-inherited" ||
+      vault.destinationSource === "vault-override") &&
+    (vault.destinationKind === "local" || vault.destinationKind === "github")
+      ? {
+          destinationKind: vault.destinationKind,
+          targetOwner: vault.destinationKind === "github" ? vault.destinationTarget : null,
+          targetKind: vault.destinationKind === "github" ? vault.destinationTargetKind : null,
+          repositoryName:
+            vault.destinationKind === "github" ? vault.destinationRepositoryName : null,
+          source: vault.destinationSource,
+        }
+      : homeMesh?.ownCreated === true &&
+          homeMesh.destinationSource !== null &&
+          homeMesh.destinationSource !== "legacy-derived" &&
+          homeMesh.destinationKind === "local"
+        ? {
+            destinationKind: "local" as const,
+            targetOwner: null,
+            targetKind: null,
+            repositoryName: null,
+            source: "mesh-inherited" as const,
+          }
+        : null;
+  if (inherited === null) return;
+  if (inherited.destinationKind === "github" && inherited.repositoryName === null) return;
+
+  await setCanonicalDestinationPolicy(db, {
+    podRid,
+    podRoot,
+    subjectKind: "vault",
+    subjectRid: vaultRid,
+    destinationKind: inherited.destinationKind,
+    targetOwner: inherited.targetOwner,
+    targetKind: inherited.targetKind,
+    repositoryName: inherited.repositoryName,
+    source: inherited.source,
+  });
+}
+
+function vaultProjectionFromPolicy(policy: DestinationPolicyRecordV1): VaultDestinationProjection {
+  if (
+    policy.subjectKind !== "vault" ||
+    (policy.source !== "mesh-inherited" &&
+      policy.source !== "vault-override" &&
+      policy.source !== "legacy-derived")
+  ) {
+    throw new Error("Destination-policy winner does not contain a vault policy.");
+  }
+  return {
+    destinationKind: policy.destinationKind,
+    targetOwner: policy.targetOwner,
+    targetKind: policy.targetKind,
+    repositoryName: policy.repositoryName ?? null,
+    source: policy.source,
+  };
 }
 
 function errMsg(e: unknown): string {

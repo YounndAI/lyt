@@ -3,6 +3,9 @@ name: lyt-recall
 description: >
   Search a SINGLE Lyt vault using the tiered-cascade engine (`lyt search --vault`) — Tier 0 arcs (0.95) → Tier 1 lanes (0.90) → Tier 2 FTS5 (0.70) (single-vault scope skips Tier 3 edges), with confidence ranking. Trigger when the user runs /lyt-recall <query>, or asks "what did I write about X", "find my notes on X", "recall X from my vault", "remind me what my <topic> notes say", "have I captured anything about X", or similar single-vault recall phrasing. Wraps `lyt search "<query>" --vault <name> --json`. Returns ranked Figments with path, snippet, and confidence. For a pod-wide search across every vault/mesh, use /lyt-search instead. Companion to lyt-capture.
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.9.8
 capabilities: [search]
 runtimes: [claude, codex, agents]

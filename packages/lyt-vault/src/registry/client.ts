@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
 
 import { getLytHome } from "../util/paths.js";
+import { getFederationRoot } from "../util/federation-paths.js";
 import { migrate } from "./migrate.js";
 
 export function getRegistryPath(): string {
@@ -52,7 +53,7 @@ export async function openRegistry(opts?: { path?: string }): Promise<Client> {
     // Wait (don't immediately error) when another connection holds the write
     // lock. Set per-connection (busy_timeout is not persisted in the DB file).
     await db.execute(`PRAGMA busy_timeout=${REGISTRY_BUSY_TIMEOUT_MS}`);
-    await migrate(db);
+    await migrate(db, { podRoot: getFederationRoot() });
     return db;
   } catch (err) {
     db.close();

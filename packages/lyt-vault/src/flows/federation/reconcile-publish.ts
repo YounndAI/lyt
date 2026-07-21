@@ -15,6 +15,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 import type { Client } from "@libsql/client";
 
@@ -26,12 +27,7 @@ import type { AccessProvider } from "../../access/access-provider.js";
 import { GhAccessProvider } from "../../access/gh-access-provider.js";
 import type { GhExecutor } from "../../util/gh-discover.js";
 import { resolveConfig } from "../../util/config.js";
-import {
-  deriveVaultRepoOwner,
-  getFederationRepoDir,
-  getFederationYonPath,
-  vaultRepoName,
-} from "../../util/federation-paths.js";
+import { getFederationRepoDir, getFederationYonPath } from "../../util/federation-paths.js";
 import { listMeshes } from "../../registry/meshes-repo.js";
 import { ridsEqual } from "../../util/uuid7.js";
 import {
@@ -49,12 +45,29 @@ import {
   closeOutbox,
   countOutbox,
   enqueueOutbox,
+  holdOutbox,
+  LEGACY_VAULT_OUTBOX_MIGRATION_REQUIRED,
   listOutbox,
   markOutboxDone,
   markOutboxFailed,
   openOutbox,
+  parseVaultOutboxTarget,
+  vaultOutboxTarget,
 } from "./outbox.js";
 import { commitPodRepo, materializeVaultPublishable, type GitRunner } from "./vault-publish.js";
+import {
+  loadDestinationPolicyContext,
+  resolveCanonicalOwnedVaultPublicationAuthority,
+  type CanonicalVaultPublicationAuthority,
+} from "./destination-policy-service.js";
+import {
+  withCanonicalVaultPublicationAttempt,
+  type CanonicalVaultPublicationAttemptContext,
+} from "./publication-authority.js";
+import {
+  observePublicationPermission,
+  type PublicationPermissionObserver,
+} from "./publication-permission.js";
 
 // Brief B (B.2) — the ONE reconcile/publish engine.
 //
@@ -130,6 +143,7 @@ export interface ReconcilePublishArgs {
   // tests/callers may inject a different provider. Behavior-preserving: the
   // default exactly mirrors the prior direct `deriveWriteGate(v, db, { gh })`.
   accessProvider?: AccessProvider | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
 }
 
 export interface ReconcilePublishResult {
@@ -219,7 +233,7 @@ export async function reconcilePublishFlow(
     // to a correct warning ("now a read-only subscriber") instead of the
     // misleading "unregistered vault" — the vault IS registered, just no longer
     // in the publish work-set. This is the hardening pass drain path for already-stuck ops.
-    const excludedSubscribers = new Set<string>();
+    const excludedSubscriberRids = new Set<string>();
     // 0.9.4 (dup-repo guard) — a vault carrying a subscription signal is FOREIGN:
     // it was cloned from another pod (its `origin` points at the upstream owner).
     // A granted-write subscription (S6 cross-identity write) is NOT blocked by
@@ -234,7 +248,29 @@ export async function reconcilePublishFlow(
     // force createRemote=false for these vaults — repo-create set = HOME vaults
     // ONLY (the locked fix). Push still targets the existing `origin`, so a
     // granted-write subscription's content sync is unaffected.
-    const foreignVaultNames = new Set<string>();
+    const foreignVaultRids = new Set<string>();
+    const repoOwnerByVaultRid = new Map<string, string>();
+    const repoTargetKindByVaultRid = new Map<string, "user" | "org">();
+    const publicationAuthorityByVaultRid = new Map<string, CanonicalVaultPublicationAuthority>();
+    const manifestByVaultRid = new Map<
+      string,
+      { repoName: string; visibility: FederationRepoVisibility }
+    >();
+    try {
+      const podYonPath = getFederationYonPath(handle);
+      if (existsSync(podYonPath)) {
+        for (const record of parseFederationYon(readFileSync(podYonPath, "utf8")).vaults) {
+          manifestByVaultRid.set(record.vaultRidHex, {
+            repoName: record.repo,
+            visibility: record.visibility,
+          });
+        }
+      }
+    } catch {
+      // Missing/unparseable RID mapping is handled fail-closed per vault below.
+    }
+    const meshes = await listMeshes(db);
+    const policyContext = await loadDestinationPolicyContext(db);
     const accessProvider =
       args.accessProvider ??
       new GhAccessProvider(db, args.writabilityGh !== undefined ? { gh: args.writabilityGh } : {});
@@ -242,37 +278,70 @@ export async function reconcilePublishFlow(
       const gate = await accessProvider.canWrite(v);
       if (gate.blocked) {
         warnings.push(`skipped read-only subscribed vault '${v.name}' (pull-only; no push)`);
-        excludedSubscribers.add(v.name);
+        excludedSubscriberRids.add(v.ridHex);
         continue;
       }
       // Not blocked, but if it's a subscription (a granted-write one), it's still
       // foreign — exclude it from repo-create even though it stays in the work-set.
       if (await hasSubscriptionSignal(db, v.rid)) {
-        foreignVaultNames.add(v.name);
+        foreignVaultRids.add(v.ridHex);
+      }
+      const homeMesh =
+        v.homeMeshRid === null
+          ? null
+          : (meshes.find((m) => ridsEqual(m.rid, v.homeMeshRid)) ?? null);
+      if (v.source === "own") {
+        const authority = resolveCanonicalOwnedVaultPublicationAuthority(
+          v,
+          homeMesh,
+          policyContext,
+        );
+        if (authority === null) {
+          warnings.push(`skipped owned vault '${v.name}' because its destination is unconfigured`);
+          continue;
+        }
+        if (!manifestByVaultRid.has(v.ridHex)) {
+          warnings.push(
+            `skipped owned vault '${v.name}' (vault:${v.ridHex}) because its RID-addressed manifest repository mapping is missing`,
+          );
+          continue;
+        }
+        repoOwnerByVaultRid.set(v.ridHex, authority.destination.owner);
+        repoTargetKindByVaultRid.set(v.ridHex, authority.destination.targetKind);
+        publicationAuthorityByVaultRid.set(v.ridHex, authority);
+      } else {
+        warnings.push(
+          `skipped foreign vault '${v.name}' because an origin hint is not publication authority`,
+        );
+        continue;
       }
       vaults.push(v);
     }
-    const vaultByName = new Map<string, VaultRow>(vaults.map((v) => [v.name, v]));
-    // B2a — mesh snapshot for per-vault repo-owner derivation (org-mesh vaults
-    // publish under the mesh's org push_target, not the personal handle).
-    const meshes = await listMeshes(db);
+    const vaultByRid = new Map<string, VaultRow>(vaults.map((v) => [v.ridHex, v]));
+    const allActiveByRid = new Map<string, VaultRow>(allActive.map((v) => [v.ridHex, v]));
     const podDir = getFederationRepoDir(handle);
 
-    // release review — the per-vault visibility lives in pod.yon (the
-    // registry has no visibility column). Read the JUST-regenerated manifest so
-    // the gh-repo-create for a consciously-public vault actually creates it
-    // public, instead of the pod-wide config default. Falls back to the default
-    // for any vault absent from the manifest.
-    const visByName = new Map<string, FederationRepoVisibility>();
-    try {
-      const podYonPath = getFederationYonPath(handle);
-      if (existsSync(podYonPath)) {
-        for (const v of parseFederationYon(readFileSync(podYonPath, "utf8")).vaults) {
-          visByName.set(v.vaultName, v.visibility);
-        }
-      }
-    } catch {
-      // Unparseable manifest → every vault falls back to the default below.
+    // Equal display names currently map to the same legacy repository name.
+    // Refuse the round-trip before opening/mutating the outbox or touching git;
+    // silently publishing both RIDs to one coordinate would collapse identity.
+    const vaultRidsByCoordinate = new Map<string, string[]>();
+    for (const vault of vaults) {
+      const owner = repoOwnerByVaultRid.get(vault.ridHex)!;
+      const repo = manifestByVaultRid.get(vault.ridHex)!.repoName;
+      const coordinate = `${owner}/${repo}`.toLowerCase();
+      const rids = vaultRidsByCoordinate.get(coordinate) ?? [];
+      rids.push(vault.ridHex);
+      vaultRidsByCoordinate.set(coordinate, rids);
+    }
+    const collision = [...vaultRidsByCoordinate.entries()].find(([, rids]) => rids.length > 1);
+    if (collision !== undefined) {
+      const [coordinate, rids] = collision;
+      warnings.push(
+        `publication refused: repository coordinate '${coordinate}' resolves to multiple vault RIDs (${rids.join(
+          ", ",
+        )})`,
+      );
+      return { ...empty, reason: "ambiguous-publication-coordinate", warnings, ok: false };
     }
 
     const outbox = await openOutbox(
@@ -283,10 +352,43 @@ export async function reconcilePublishFlow(
     let podPushed = false;
 
     try {
+      // Pre-RID rows cannot prove which vault authored them. A current unique
+      // display-name match is not provenance after rename/reuse, so hold the
+      // entire outward pass before enqueue/drain until an explicit migration
+      // supplies a stable RID. Existing RID-addressed work remains untouched.
+      const existing = await listOutbox(outbox);
+      const legacyVaultItems = existing.filter(
+        (item) => item.op === "publish-vault" && parseVaultOutboxTarget(item.target) === null,
+      );
+      if (legacyVaultItems.length > 0) {
+        for (const item of legacyVaultItems) {
+          await holdOutbox(
+            outbox,
+            "publish-vault",
+            item.target,
+            LEGACY_VAULT_OUTBOX_MIGRATION_REQUIRED,
+            nowIso,
+          );
+          warnings.push(
+            `held legacy publish op '${item.target}': ${LEGACY_VAULT_OUTBOX_MIGRATION_REQUIRED}`,
+          );
+        }
+        return {
+          skipped: false,
+          handle,
+          vaultOutcomes,
+          podCommitted,
+          podPushed,
+          outboxRemaining: await countOutbox(outbox),
+          warnings,
+          ok: false,
+        };
+      }
+
       // Enqueue the full publish work-set (idempotent — re-enqueueing an
       // in-flight item from a prior interrupted run is a no-op).
       for (const v of vaults) {
-        await enqueueOutbox(outbox, "publish-vault", v.name, nowIso);
+        await enqueueOutbox(outbox, "publish-vault", vaultOutboxTarget(v.ridHex), nowIso);
       }
       await enqueueOutbox(outbox, "publish-pod", "pod", nowIso);
 
@@ -296,8 +398,29 @@ export async function reconcilePublishFlow(
       const vaultItems = pending.filter((p) => p.op === "publish-vault");
       const podItems = pending.filter((p) => p.op === "publish-pod");
 
+      let legacyOutboxHeld = false;
       for (const item of vaultItems) {
-        const vault = vaultByName.get(item.target);
+        const targetRid = parseVaultOutboxTarget(item.target);
+        // The preflight above holds every legacy row before enqueue/drain.
+        // Keep this defensive branch fail-closed if a concurrent writer adds
+        // one after the snapshot.
+        if (targetRid === null) {
+          legacyOutboxHeld = true;
+          await holdOutbox(
+            outbox,
+            "publish-vault",
+            item.target,
+            LEGACY_VAULT_OUTBOX_MIGRATION_REQUIRED,
+            nowIso,
+          );
+          warnings.push(
+            `held legacy publish op '${item.target}': ${LEGACY_VAULT_OUTBOX_MIGRATION_REQUIRED}`,
+          );
+          continue;
+        }
+        const registeredVault = allActiveByRid.get(targetRid);
+        const vault =
+          registeredVault === undefined ? undefined : vaultByRid.get(registeredVault.ridHex);
         if (vault === undefined) {
           // Stale outbox row — drop it. release review: log the drop so a
           // vanished publish is auditable, not silent.
@@ -305,35 +428,52 @@ export async function reconcilePublishFlow(
           // a row that resolves to a now-EXCLUDED pure subscriber is REGISTERED
           // (just read-only, no longer published), not "unregistered". Convergence
           // path: a pre-fix `publish-vault:<subscriber>` row is cleared here.
-          if (excludedSubscribers.has(item.target)) {
+          if (registeredVault !== undefined && excludedSubscriberRids.has(registeredVault.ridHex)) {
             warnings.push(
-              `cleared stale publish op for now read-only subscribed vault '${item.target}' (no longer published)`,
+              `cleared stale publish op for now read-only subscribed vault '${registeredVault.name}' (vault:${registeredVault.ridHex}; no longer published)`,
+            );
+          } else if (registeredVault !== undefined) {
+            warnings.push(
+              `cleared publish op for vault '${registeredVault.name}' (vault:${registeredVault.ridHex}) with no effective destination`,
             );
           } else {
-            warnings.push(`dropped stale outbox item for unregistered vault '${item.target}'`);
+            warnings.push(`dropped stale outbox item for unregistered target '${item.target}'`);
           }
           await markOutboxDone(outbox, "publish-vault", item.target);
           continue;
         }
-        const vaultHomeMesh =
-          vault.homeMeshRid === null
-            ? null
-            : (meshes.find((m) => ridsEqual(m.rid, vault.homeMeshRid)) ?? null);
+        const repoOwner = repoOwnerByVaultRid.get(vault.ridHex);
+        if (repoOwner === undefined) {
+          await markOutboxDone(outbox, "publish-vault", item.target);
+          warnings.push(
+            `cleared publish op for vault '${item.target}' with no effective destination`,
+          );
+          continue;
+        }
         const outcome = await publishOneVault(vault, {
+          registryDb: db,
           handle,
-          // B2a — org-mesh vaults get the org push_target as their repo owner.
-          repoOwner: deriveVaultRepoOwner(vaultHomeMesh, handle),
+          repoOwner,
+          repoTargetKind: repoTargetKindByVaultRid.get(vault.ridHex) ?? "user",
+          repoOwnerAuthority: foreignVaultRids.has(vault.ridHex)
+            ? "legacy-origin-hint"
+            : "effective-owned-destination",
           // dup-repo guard — never create a repo under the subscriber's handle
           // for a FOREIGN (subscribed) vault; its repo already lives under the
           // upstream owner (its `origin`). repo-create set = HOME vaults only.
-          createRemote: createRemote && !foreignVaultNames.has(vault.name),
+          createRemote: createRemote && !foreignVaultRids.has(vault.ridHex),
           push,
           pull,
           // release review — per-vault visibility from pod.yon (not the
           // pod-wide default), so a consciously-public vault is created public.
-          visibility: visByName.get(vault.name) ?? defaultVisibility,
+          visibility: manifestByVaultRid.get(vault.ridHex)?.visibility ?? defaultVisibility,
+          repoName: manifestByVaultRid.get(vault.ridHex)!.repoName,
           gh,
           git,
+          permissionObserver: args.permissionObserver ?? observePublicationPermission,
+          authority: publicationAuthorityByVaultRid.get(vault.ridHex)!,
+          podRid: policyContext.podRid!,
+          ...(policyContext.podRoot === undefined ? {} : { podRoot: policyContext.podRoot }),
         });
         vaultOutcomes.push(outcome);
         if (
@@ -385,13 +525,17 @@ export async function reconcilePublishFlow(
         // if a future outcome shape leaves repoCreated && !pushed, the pod must
         // still not advertise it).
         (o.repoCreated && !o.pushed && push);
-      const vaultProblem = vaultOutcomes.some(contentUnpushed);
+      const vaultProblem = legacyOutboxHeld || vaultOutcomes.some(contentUnpushed);
       if (podItems.length > 0) {
         try {
           const pushPod = push && !vaultProblem;
           const podCommit = await commitPodRepo(podDir, "chore(lyt): publish pod manifest", {
             push: pushPod,
             runGit: git,
+            permissionActor: handle,
+            permissionRepository: `${handle}/lyt-pod`,
+            permissionObserver: args.permissionObserver ?? observePublicationPermission,
+            permissionAttemptId: randomUUID(),
           });
           podCommitted = podCommit.committed;
           podPushed = podCommit.pushed;
@@ -449,15 +593,23 @@ export async function reconcilePublishFlow(
 }
 
 interface PublishOneVaultOpts {
+  registryDb: Client;
   handle: string;
-  // B2a — the repo owner (org push_target for an org-mesh vault; else handle).
+  // Resolved owner plus the provenance label that explains why it is safe.
   repoOwner: string;
+  repoName: string;
+  repoTargetKind: "user" | "org";
+  repoOwnerAuthority: "effective-owned-destination" | "legacy-origin-hint";
   createRemote: boolean;
   push: boolean;
   pull: boolean;
   visibility: ReturnType<typeof resolveConfig>["defaultRepoVisibility"];
   gh: FederationGhClient;
   git: GitRunner;
+  permissionObserver: PublicationPermissionObserver;
+  authority: CanonicalVaultPublicationAuthority;
+  podRid: string;
+  podRoot?: string;
 }
 
 // Per-vault publish: ensure repo+local (create gh repo if missing, no push yet)
@@ -466,7 +618,11 @@ async function publishOneVault(
   vault: VaultRow,
   opts: PublishOneVaultOpts,
 ): Promise<VaultPublishOutcome> {
-  const repoName = vaultRepoName(vault.name);
+  const repoName = opts.repoName;
+  const repository = `${opts.repoOwner}/${repoName}`;
+  const canonicalUrl = `https://github.com/${repository}.git`;
+  const permissionTarget = `github:${opts.repoTargetKind}/${opts.repoOwner}`;
+  const permissionAttemptId = randomUUID();
   const base: VaultPublishOutcome = {
     vaultName: vault.name,
     repoName,
@@ -482,14 +638,24 @@ async function publishOneVault(
   const mat = await materializeVaultPublishable(vault, {
     handle: opts.handle,
     repoOwner: opts.repoOwner,
+    repoName: opts.repoName,
+    repoTargetKind: opts.repoTargetKind,
+    repoOwnerAuthority: opts.repoOwnerAuthority,
     createRemoteIfMissing: opts.createRemote,
     push: false,
     visibility: opts.visibility,
     ghClient: opts.gh,
     runGit: opts.git,
+    permissionObserver: opts.permissionObserver,
+    permissionAttemptId,
+    registryDb: opts.registryDb,
   });
   if (mat.skipped) {
-    return { ...base, status: "skipped", message: mat.skippedReason ?? "skipped" };
+    return {
+      ...base,
+      status: mat.skippedReason === "permission-unverified" ? "failed" : "skipped",
+      message: mat.warnings.join("; ") || mat.skippedReason || "skipped",
+    };
   }
   base.repoCreated = mat.repoCreated;
   if (!opts.push) {
@@ -497,18 +663,36 @@ async function publishOneVault(
   }
 
   const cwd = vault.path;
-  let pulled = false;
+  const hasUpstream = opts.pull
+    ? await opts.git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
+        cwd,
+        allowFailure: true,
+      })
+    : null;
+  const pullRebasePush = async (
+    attempt: CanonicalVaultPublicationAttemptContext,
+  ): Promise<VaultPublishOutcome> => {
+    let pulled = false;
 
-  // 2. pull-rebase if there is an upstream and we are behind. On a
-  // conflict, ABORT (no data overwrite) and surface — the locked posture.
-  if (opts.pull) {
-    const hasUpstream = await opts.git(
-      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-      { cwd, allowFailure: true },
-    );
-    if (hasUpstream.code === 0) {
-      await opts.git(["fetch", "--quiet"], { cwd, allowFailure: true });
-      const ab = await opts.git(["rev-list", "--left-right", "--count", "HEAD...@{u}"], {
+    // 2. pull-rebase if there is an upstream and we are behind. On a
+    // conflict, ABORT (no data overwrite) and surface — the locked posture.
+    // The read-only upstream probe happens before authority acquisition so the
+    // canonical revalidation is immediately adjacent to the immutable fetch.
+    if (hasUpstream?.code === 0) {
+      const fetched = await attempt.runOutwardChild(() =>
+        opts.git(["fetch", "--quiet", canonicalUrl, "refs/heads/main"], {
+          cwd,
+          allowFailure: true,
+        }),
+      );
+      if (fetched.code !== 0) {
+        return {
+          ...base,
+          status: "failed",
+          message: "could not refresh the authorized online copy",
+        };
+      }
+      const ab = await opts.git(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], {
         cwd,
         allowFailure: true,
       });
@@ -518,7 +702,7 @@ async function publishOneVault(
       // defeated by a transient parse/exit error defaulting to the unsafe push.
       const behind = ab.code === 0 ? Number(ab.stdout.trim().split(/\s+/)[1] ?? 0) || 0 : 1;
       if (behind > 0) {
-        const rebased = await opts.git(["pull", "--rebase", "--quiet"], {
+        const rebased = await opts.git(["rebase", "--quiet", "FETCH_HEAD"], {
           cwd,
           allowFailure: true,
         });
@@ -536,40 +720,63 @@ async function publishOneVault(
         pulled = true;
       }
     }
-  }
 
-  // 3. Push.
-  const pushed = await opts.git(["push", "-u", "origin", "main"], { cwd, allowFailure: true });
-  if (pushed.code === 0) {
-    return {
-      ...base,
-      status: pulled ? "pulled-then-published" : "published",
-      pushed: true,
-      message: pulled ? "rebased remote changes + pushed" : "pushed",
-    };
+    // 3. Push to the same immutable coordinate used by the fetch above.
+    const pushed = await attempt.runOutwardChild(() =>
+      opts.git(["push", canonicalUrl, "HEAD:refs/heads/main"], {
+        cwd,
+        allowFailure: true,
+      }),
+    );
+    if (pushed.code === 0) {
+      return {
+        ...base,
+        status: pulled ? "pulled-then-published" : "published",
+        pushed: true,
+        message: pulled ? "rebased remote changes + pushed" : "pushed",
+      };
+    }
+    if (isPermissionDeniedPush(pushed.stderr)) {
+      const narrated = narrate(pushed.stderr, { op: "save your notes online" });
+      return {
+        ...base,
+        status: "failed",
+        terminal: true,
+        message:
+          `${narrated.plain} ${narrated.nextAction} ` +
+          `(If this is a vault you only subscribed to, it's read-only — save into one of your own vaults instead.)`,
+      };
+    }
+    const narrated = narrate(pushed.stderr, { op: "save your notes online" });
+    return { ...base, status: "failed", message: `${narrated.plain} ${narrated.nextAction}` };
+  };
+
+  try {
+    return await withCanonicalVaultPublicationAttempt({
+      db: opts.registryDb,
+      vaultRid: vault.rid,
+      podRid: opts.podRid,
+      ...(opts.podRoot === undefined ? {} : { podRoot: opts.podRoot }),
+      authority: opts.authority,
+      expectedRepository: repository,
+      capability: "repository-push",
+      target: permissionTarget,
+      repository,
+      actor: opts.handle,
+      attemptId: permissionAttemptId,
+      permissionObserver: opts.permissionObserver,
+      // The subject lock now covers the immutable fetch, any rebase/local
+      // history mutation, and the explicit push as one authority attempt.
+      action: pullRebasePush,
+    });
+  } catch (error) {
+    return { ...base, status: "failed", message: errMsg(error) };
   }
   // a permission-denied push is TERMINAL: surface ONE actionable line and flag
   // terminal so the drain loop does not retain it as a resumable outbox op.
   // firewall-C1 fix-pass — narrate the denial into plain sense (the firewall's
   // `auth` narration) instead of naming `gh auth status` + the remote; add the
   // read-only hint plainly. Renders on `lyt sync` via printPublishHuman.
-  if (isPermissionDeniedPush(pushed.stderr)) {
-    const narrated = narrate(pushed.stderr, { op: "save your notes online" });
-    return {
-      ...base,
-      status: "failed",
-      terminal: true,
-      message:
-        `${narrated.plain} ${narrated.nextAction} ` +
-        `(If this is a vault you only subscribed to, it's read-only — save into one of your own vaults instead.)`,
-    };
-  }
   // firewall-C1 fix-pass — the raw-stderr splice (the literal C1 leak) is replaced
   // by the firewall narration; raw stderr is dropped from the human message.
-  const narrated = narrate(pushed.stderr, { op: "save your notes online" });
-  return {
-    ...base,
-    status: "failed",
-    message: `${narrated.plain} ${narrated.nextAction}`,
-  };
 }

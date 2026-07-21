@@ -1,5 +1,9 @@
 # `lyt federation` — Your Pod
 
+Your Pod has a stable UUIDv7 identity and a mutable human-readable alias. Inspect
+it with `lyt federation alias --json`; update only the alias with
+`lyt federation alias <alias>`. The update does not change the pod RID.
+
 > `lyt init` is the canonical bootstrap and forges Your Pod automatically when
 > the local registry is empty. The `lyt federation init` verb below remains the
 > explicit surface, but most handlers should run `lyt init` instead. Run
@@ -90,7 +94,7 @@ and one `@FED_VAULT` per registered vault.
 ## Cross-pod identity — the origin coordinate (0.9.4)
 
 Locally, a vault's identity is its `rid` (a UUIDv7, minted on this machine). But
-a `rid` is *local* — two pods that both clone the same shared vault mint
+a `rid` is _local_ — two pods that both clone the same shared vault mint
 **different** rids for it. The cross-pod identity is therefore derived from the
 one globally-unique, stable property a shared vault has: its git origin.
 
@@ -100,7 +104,7 @@ one globally-unique, stable property a shared vault has: its git origin.
   same vault" the same across pods.
 - The typed-id scheme is `lyt:<type>:<id>` for every entity
   (`vault` · `mesh` · `pod` · `user` · `figment` · `pattern`).
-- `commit-SHA` identifies the *bytes at a point*, not the entity (a vault is
+- `commit-SHA` identifies the _bytes at a point_, not the entity (a vault is
   mutable) — it is a version/freshness marker, not identity.
 
 `lyt vault info <name>` surfaces a vault's origin coordinate (or `null` when the

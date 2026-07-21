@@ -38,7 +38,9 @@
 // Open-once `registryDb?` seam from line 1 per v1.A.5 (10th
 // application across v1.A.5 → v1.D.* → v1.B.* lineage).
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type { Client } from "@libsql/client";
 
@@ -46,21 +48,35 @@ import {
   adoptAndPrimeFlow,
   backfillFigmentCaches,
   closeRegistry,
+  deriveCreationOperationIdV1,
   deriveProvisionalHandle,
   federationInitFlow,
+  finalizeInitialCheckpoint,
   federationRepoName,
+  getFederationRepoDir,
   getHandleFromIdentity,
   getMeshByRid,
+  hexToUuid7Bytes,
+  inspectRegistryTopologyPreflight,
   isProvisionalIdentity,
   isValidGhHandle,
   listMeshes,
+  listFederationStates,
   listVaults,
   meshInitFlow,
+  newUuidv7Bytes,
+  observeActiveActor,
   openRegistry,
+  plannedSingleVaultEffectsV1,
   parseVaultYon,
   readIdentityCache,
   realFederationGhClient,
   regeneratePodManifestNonFatal,
+  resolveCreationPlanV1,
+  withCreationRepositoryEffectsV1,
+  resolveVaultPath,
+  uuid7BytesToDashedString,
+  vaultRepoName,
   writeProvisionalIdentity,
   type AdoptAndPrimeResult,
   type FederationGhClient,
@@ -68,6 +84,10 @@ import {
   type GhExecutor,
   type MaterializePodResult,
   type MeshGhClient,
+  type ActiveActorObservation,
+  type CreationMutationEvidence,
+  type CreationPlanV1,
+  type DestinationRequest,
   type RecoverDrop,
   type RecoverPodResult,
   type VaultCloneFn,
@@ -194,10 +214,30 @@ export interface InitBootstrapResult {
   // what was made publishable (per-vault git/commit/remote, pod commit). At init
   // this is LOCAL-only (push held); the honest card (B.3) reads it.
   publish?: MaterializePodResult;
+  /** Exact fresh-creation plan plus observed local effects for Receipt V1. */
+  creation?: {
+    plan: CreationPlanV1;
+    mutations: CreationMutationEvidence;
+    podCheckpointCommitSha?: string;
+  };
   durationMs: number;
 }
 
 export type InitBootstrapMode = "auto" | "custom" | "discover";
+
+interface BootstrapPodIdentity {
+  handle: string;
+  rid: string;
+}
+
+interface PreparedFreshCreation {
+  meshName: string;
+  handle: string;
+  provisionalHandle: string | null;
+  attemptId: string;
+  destinationRequest: DestinationRequest;
+  planned: Extract<ReturnType<typeof resolveCreationPlanV1>, { kind: "plan" }>;
+}
 
 export interface InitBootstrapCustomOverrides {
   meshName?: string;
@@ -230,6 +270,8 @@ export interface InitBootstrapArgs {
   discoveryProbe?: DiscoveryProbe;
   // Override the authenticated handle (test seam + future BYOK).
   handle?: string;
+  /** One bounded, fresh actor observation for the fresh creation attempt. */
+  observeActor?: typeof observeActiveActor;
   customOverrides?: InitBootstrapCustomOverrides;
   // W1.2 heal runner. When supplied, the flow runs it on the fresh +
   // re-init branches (NOT discovery, which is read-only) so a single
@@ -238,15 +280,9 @@ export interface InitBootstrapArgs {
   // CLI command wires the real `healPod()`; tests omit it (no heal runs). Heal
   // failure is swallowed (never-fail) — see runHealIfProvided.
   heal?: (() => Promise<HealResult>) | undefined;
-  // Brief B (B.1) — materialize-publish runner. When supplied, the flow runs it
-  // on the fresh branch only (NOT adopt, re-init, or discovery), so a
-  // single `lyt init` leaves each vault with git + an initial commit + a remote
-  // URL, and the pod.yon committed (push HELD — outward gh-create + push are the
-  // consented sync engine's job, B.2). INJECTABLE so unit tests stay hermetic
-  // (no real git subprocesses on temp vault dirs): the CLI command wires the
-  // real `(db) => materializePodLocal(db, { push: false })`; tests omit it.
-  // Receives the bootstrap's open db (open-once seam). Failure is swallowed
-  // (never-fail) — see runMaterializeIfProvided.
+  // Deprecated compatibility seam. Fresh `lyt init` no longer invokes a
+  // materializer: remote attachment/publication belongs exclusively to scoped
+  // `lyt sync --vault`, after an explicit Handler decision.
   materializePublish?: ((db: Client) => Promise<MaterializePodResult>) | undefined;
   // Re-init production seam: refresh the existing pod repository and recover
   // newly advertised vaults before integrity/index work. Tests omit it.
@@ -267,15 +303,13 @@ export interface InitBootstrapArgs {
 // .length === 0 → fresh. Lifting it as a public helper avoids duplicating
 // the detector in init.ts per project rule #9.
 export async function probeFreshState(registryDb?: Client): Promise<boolean> {
-  const ownDb = registryDb === undefined;
-  const db = registryDb ?? (await openRegistry());
-  try {
-    const meshes = await listMeshes(db);
-    const vaults = await listVaults(db);
-    return meshes.length === 0 && vaults.length === 0;
-  } finally {
-    if (ownDb) await closeRegistry(db);
+  if (registryDb === undefined) {
+    const topology = inspectRegistryTopologyPreflight();
+    return topology.meshCount === 0 && topology.vaultCount === 0;
   }
+  const meshes = await listMeshes(registryDb);
+  const vaults = await listVaults(registryDb);
+  return meshes.length === 0 && vaults.length === 0;
 }
 
 // MF1 (V-A-11) — shared PROVISIONAL-cache test (read-only, no side effects). True
@@ -335,6 +369,27 @@ export async function initBootstrapFlow(args: InitBootstrapArgs): Promise<InitBo
   const startedAtMs = nowMs(args.nowIso);
 
   const ownDb = args.registryDb === undefined;
+  // Fresh creation is planned against a physically read-only snapshot.  In
+  // particular, a missing registry must not be created or migrated merely to
+  // decide what identities/effects a first `lyt init` will own.
+  const readOnlyTopology = ownDb ? inspectRegistryTopologyPreflight() : null;
+  let branch: InitBootstrapBranch | null = null;
+  let adoptHandle: string | null = null;
+  let preparedFresh: PreparedFreshCreation | null = null;
+  if (readOnlyTopology !== null) {
+    if (args.mode === "discover") {
+      branch = "discovery";
+    } else if (readOnlyTopology.meshCount === 0 && readOnlyTopology.vaultCount === 0) {
+      adoptHandle = await probeAdoptable(args);
+      branch = adoptHandle !== null ? "adopt" : "fresh";
+      if (branch === "fresh") {
+        preparedFresh = await prepareFreshCreation(args, readOnlyTopology.podIdentities);
+      }
+    } else {
+      branch = "re-init";
+    }
+  }
+
   const db = args.registryDb ?? (await openRegistry());
 
   try {
@@ -342,19 +397,27 @@ export async function initBootstrapFlow(args: InitBootstrapArgs): Promise<InitBo
     const meshes = await listMeshes(db);
     const vaults = await listVaults(db);
 
+    if (
+      readOnlyTopology !== null &&
+      (readOnlyTopology.meshCount !== meshes.length ||
+        readOnlyTopology.vaultCount !== vaults.length)
+    ) {
+      throw new Error(
+        "Bootstrap topology changed after its read-only creation plan; retry lyt init.",
+      );
+    }
+
     // Branch decision (federation-design §5 + brief; V-A-11 adds ADOPT).
-    let branch: InitBootstrapBranch;
-    let adoptHandle: string | null = null;
-    if (args.mode === "discover") {
+    if (branch === null && args.mode === "discover") {
       branch = "discovery";
-    } else if (meshes.length === 0 && vaults.length === 0) {
+    } else if (branch === null && meshes.length === 0 && vaults.length === 0) {
       // V-A-11 — a FRESH registry prefers ADOPT when a remote `{handle}/lyt-pod`
       // exists (clone its content), else scaffolds a FRESH pod. probeAdoptable is
       // GUARDED (gh flake / no-gh / provisional-local-first → null → fresh), so it
       // never aborts the common fresh path (MF1, SC3/SC7).
       adoptHandle = await probeAdoptable(args);
       branch = adoptHandle !== null ? "adopt" : "fresh";
-    } else {
+    } else if (branch === null) {
       branch = "re-init";
     }
 
@@ -384,15 +447,23 @@ export async function initBootstrapFlow(args: InitBootstrapArgs): Promise<InitBo
       );
     }
     if (branch === "fresh") {
-      const result = await doFreshBranch(args, db);
+      if (preparedFresh === null) {
+        const existingPodIdentities = (await listFederationStates(db)).map((row) => ({
+          handle: row.handle,
+          rid: row.fedRidHex,
+        }));
+        preparedFresh = await prepareFreshCreation(args, existingPodIdentities);
+      }
+      const result = await doFreshBranch(args, db, preparedFresh);
       const heal = await runHealIfProvided(args);
-      const publish = await runMaterializeIfProvided(args, db);
+      // Fresh creation is local-only.  Even an injected legacy materializer
+      // must not create/attach/push a remote from `lyt init`; scoped sync owns
+      // the first outward mutation.
       return finalize(
         {
           ...result,
           branch,
           ...(heal !== null ? { heal } : {}),
-          ...(publish !== null ? { publish } : {}),
         },
         startedAtMs,
         args.nowIso,
@@ -449,25 +520,6 @@ async function runHealIfProvided(args: InitBootstrapArgs): Promise<HealResult | 
     const msg = err instanceof Error ? err.message : String(err);
     // eslint-disable-next-line no-console
     console.error(`lyt init: heal step failed non-fatally — ${msg}`);
-    return null;
-  }
-}
-
-// Brief B (B.1) — run the injected materialize-publish runner, swallowing any
-// failure so it can NEVER fail an init (never-fail posture, same as heal/regen).
-// Returns null when no runner was supplied (hermetic-test default) or it threw.
-// Runs AFTER the pod.yon regen so the pod commit captures the populated manifest.
-async function runMaterializeIfProvided(
-  args: InitBootstrapArgs,
-  db: Client,
-): Promise<MaterializePodResult | null> {
-  if (args.materializePublish === undefined) return null;
-  try {
-    return await args.materializePublish(db);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // eslint-disable-next-line no-console
-    console.error(`lyt init: materialize-publish step failed non-fatally — ${msg}`);
     return null;
   }
 }
@@ -544,103 +596,138 @@ async function doAdoptBranch(
   };
 }
 
-async function doFreshBranch(
+/** Build the complete first-init plan without opening a writable registry. */
+async function prepareFreshCreation(
   args: InitBootstrapArgs,
-  db: Client,
-): Promise<Omit<InitBootstrapResult, "branch" | "durationMs">> {
+  existingPodIdentities: readonly BootstrapPodIdentity[],
+): Promise<PreparedFreshCreation> {
   const meshName = args.customOverrides?.meshName ?? "personal";
-  const onPhase = args.onPhase ?? (() => {});
-
-  // V-A-1 (Phase E) — establish identity BEFORE the scaffold. meshInitFlow +
-  // the vault scaffold call getIdentity() / getHandleFromIdentity(), which
-  // HARD-THROW gh-less ("Identity refresh failed: GitHub CLI is not
-  // authenticated"). The provisional minting used to run AFTER meshInitFlow, so
-  // gh-less `lyt init --auto` threw MID-SCAFFOLD and left a partial pod
-  // (registry.db + patterns/ + a half-built vaults/ with no personal/main —
-  // the very state that then errored `no vault named 'personal/main'`).
-  // Resolving — or minting a PROVISIONAL local identity — FIRST means the
-  // scaffold's getIdentity() resolves from the just-written cache and the
-  // gh-less `--auto` degrades to a LOCAL pod, exactly like the interactive
-  // wizard (the brief's reference), instead of half-failing.
-  //
-  // no gh handle resolves → mint a provisional identity
-  // (default OS username) + forge LOCAL-ONLY (no gh probe, no remote). `lyt
-  // sync` reconciles to the real gh handle at connect. A provisional cache for
-  // THIS handle → stay local-only too (don't gh-probe).
-  let handle = args.handle ?? safeIdentityResolve();
+  const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+  const cachedIdentity = readIdentityCache();
+  const observedActor =
+    args.handle === undefined && cachedIdentity === null
+      ? await (args.observeActor ?? observeActiveActor)({ attemptId })
+      : null;
+  let handle = args.handle ?? cachedIdentity?.handle ?? observedActor?.actor ?? null;
   let localOnly = false;
+  let provisionalHandle: string | null = null;
   if (handle === null) {
     handle = deriveProvisionalHandle();
-    writeProvisionalIdentity(handle);
+    provisionalHandle = handle;
     localOnly = true;
   } else if (args.handle === undefined) {
-    // MF1 — provisional-cache → local-first via the shared resolveLocalFirst
-    // predicate. The handle-match guard stays: only treat as local-only when the
-    // provisional cache is THIS handle.
     const cached = readIdentityCache();
     if (cached !== null && cached.handle === handle && resolveLocalFirst(cached)) {
       localOnly = true;
     }
   }
 
-  // (a) Scaffold the personal mesh (which scaffolds personal/main as the
-  // mesh's main vault per meshInitFlow). `noPush: true` per the ratified default;
-  // the handler explicitly publishes later via `lyt sync`. The
-  // identity established above lets the scaffold's getIdentity() resolve
-  // locally gh-less (V-A-1).
+  if (existingPodIdentities.length > 1) {
+    throw new Error("Fresh bootstrap requires exactly one local pod identity.");
+  }
+  if (existingPodIdentities.length === 1 && existingPodIdentities[0]!.handle !== handle) {
+    throw new Error(
+      `Fresh bootstrap identity conflict: local pod belongs to '${existingPodIdentities[0]!.handle}', not '${handle}'.`,
+    );
+  }
+
+  const destinationRequest = bootstrapDestinationRequest(args, localOnly);
+  const actor: ActiveActorObservation =
+    destinationRequest.kind === "local"
+      ? {
+          attempt_id: attemptId,
+          observed_at: new Date().toISOString(),
+          result: "unknown",
+          actor: null,
+          evidence_class: "unavailable",
+        }
+      : (observedActor ?? (await (args.observeActor ?? observeActiveActor)({ attemptId })));
+  const subject = { kind: "mesh" as const, repositoryName: vaultRepoName(`${meshName}/main`) };
+  const resolved = resolveCreationPlanV1({
+    request: destinationRequest,
+    subject,
+    actor,
+    intendedEffects: withCreationRepositoryEffectsV1(
+      plannedSingleVaultEffectsV1({
+        operationId: deriveCreationOperationIdV1({
+          request: destinationRequest,
+          subject,
+          scope: `${meshName}/main\0${resolveVaultPath(`${meshName}/main`)}`,
+        }),
+        pod:
+          existingPodIdentities.length === 1
+            ? { kind: "existing", rid: existingPodIdentities[0]!.rid }
+            : { kind: "create", handle },
+        mesh: { kind: "create", name: meshName },
+        vaultName: `${meshName}/main`,
+        vaultRoot: resolveVaultPath(`${meshName}/main`),
+      }),
+      existingPodIdentities.length === 1
+        ? [
+            {
+              repositoryRoot: getFederationRepoDir(existingPodIdentities[0]!.handle),
+              exactPaths: ["pod.yon"],
+            },
+          ]
+        : [],
+    ),
+  });
+  if (resolved.kind === "refusal") throw new Error(resolved.message);
+  return { meshName, handle, provisionalHandle, attemptId, destinationRequest, planned: resolved };
+}
+
+async function doFreshBranch(
+  args: InitBootstrapArgs,
+  db: Client,
+  prepared: PreparedFreshCreation,
+): Promise<Omit<InitBootstrapResult, "branch" | "durationMs">> {
+  const { meshName, handle, provisionalHandle, attemptId, destinationRequest, planned } = prepared;
+  const onPhase = args.onPhase ?? (() => {});
+  // The creation binding is already complete from the read-only preflight.
+  // Only now may bootstrap establish the planned pod and mesh locally.
+  // Apply begins only after the complete creation plan and identity conflict
+  // check above. Materialize the canonical pod locally before mesh creation:
+  // this creates one stable registry identity and local Git repo, but performs
+  // no remote probe, create, or push.
+  if (provisionalHandle !== null) writeProvisionalIdentity(provisionalHandle);
+  await onPhase("create", `your pod repo (${handle}/lyt-pod)`);
+  const fedResult = await federationInitFlow({
+    handle,
+    pushToRemote: false,
+    createRemoteIfMissing: false,
+    localOnly: true,
+    checkpointMode: "deferred",
+    ...(planned.plan.intended_effects.identity.kind === "create"
+      ? { plannedFedRidBytes: hexToUuid7Bytes(planned.plan.intended_effects.identity.rid) }
+      : {}),
+    db,
+    ...(args.federationGhClient !== undefined ? { ghClient: args.federationGhClient } : {}),
+  });
+  const federation: InitBootstrapFederation = {
+    handle: fedResult.handle,
+    fedRidHex: fedResult.fedRidHex,
+    branch: fedResult.branch,
+    localPath: fedResult.localPath,
+    federationYonPath: fedResult.federationYonPath,
+    remoteCreated: fedResult.remoteCreated,
+    pushed: fedResult.pushed,
+    remoteFullName: fedResult.remoteFullName,
+  };
   await onPhase("git-init", "your personal mesh + main vault");
   const meshResult = await meshInitFlow({
     name: meshName,
     noPush: true,
+    creation: {
+      destinationRequest,
+      creationPlan: planned.plan,
+      attemptId,
+    },
     // Open-once seam (A.4): reuse the bootstrap's registry connection so
     // mesh-init does not open a 2nd one (nested-open SQLITE_BUSY risk).
     db,
+    checkpointMode: "deferred",
     ...(args.meshGhClient !== undefined ? { ghClient: args.meshGhClient } : {}),
   });
-
-  // (b) Forge the federation repo locally. `pushToRemote: false` per the ratified default
-  // default. The federation init's own three-branch state-machine handles the
-  // case where the remote repo already exists on GH (Branch B adopted) — we
-  // don't second-guess it here. localOnly (resolved above) forges the pod
-  // without any gh probe/remote.
-  let federation: InitBootstrapFederation | undefined;
-  if (handle !== null) {
-    // Forging phase: federationInitFlow runs a sync prelude (registry probe,
-    // git init, pod.yon write) THEN its own per-op gh spinner for the
-    // `gh repo create` spawn. Re-label the spanning spinner to "Forging…"
-    // here so the sync prelude is covered too (it was the silent gap F7
-    // wrapped only the spawn — leaving the prelude dark).
-    await onPhase("create", `your pod repo (${handle}/lyt-pod)`);
-    try {
-      const fedResult = await federationInitFlow({
-        handle,
-        pushToRemote: false,
-        localOnly,
-        db,
-        ...(args.federationGhClient !== undefined ? { ghClient: args.federationGhClient } : {}),
-      });
-      federation = {
-        handle: fedResult.handle,
-        fedRidHex: fedResult.fedRidHex,
-        branch: fedResult.branch,
-        localPath: fedResult.localPath,
-        federationYonPath: fedResult.federationYonPath,
-        remoteCreated: fedResult.remoteCreated,
-        pushed: fedResult.pushed,
-        remoteFullName: fedResult.remoteFullName,
-      };
-    } catch (err) {
-      // Federation init failure is NON-FATAL per the ratified default — the
-      // personal mesh + personal/main vault are already on disk; the
-      // handler can re-invoke `lyt init` (which lands in re-init branch)
-      // or run `lyt federation init` directly to recover. Emit the
-      // failure as a console.error so the handler sees it without
-      // forcing the whole bootstrap to fail.
-      const msg = err instanceof Error ? err.message : String(err);
-      // eslint-disable-next-line no-console
-      console.error(`lyt init (fresh): federation init failed non-fatally — ${msg}`);
-    }
-  }
 
   // (Brief A) — regenerate the derived pod manifest from the now-populated
   // registry so `lyt init` (fresh) leaves a POPULATED pod.yon listing
@@ -651,6 +738,29 @@ async function doFreshBranch(
       handle,
       ...(args.nowIso !== undefined ? { nowIso: args.nowIso } : {}),
     });
+  }
+
+  // The pod manifest changes only after the mesh/vault topology exists. Its
+  // one creation checkpoint must therefore run here, after regeneration, not
+  // inside the earlier pod scaffold forge.
+  const intendedPodCheckpoint = planned.plan.intended_effects.checkpoints.find(
+    (checkpoint) => checkpoint.repository_root === fedResult.localPath,
+  );
+  if (intendedPodCheckpoint === undefined) {
+    throw new Error("Fresh bootstrap plan is missing its exact pod checkpoint.");
+  }
+  const podCheckpointResult = finalizeInitialCheckpoint({
+    vaultPath: fedResult.localPath,
+    paths: [...intendedPodCheckpoint.exact_paths],
+    expectedContentDigests: new Map(),
+  });
+  if (podCheckpointResult.status !== "committed") {
+    throw new Error("Fresh bootstrap could not finalize its exact pod checkpoint.");
+  }
+  const podCheckpoint = assertPlannedPodCheckpointPaths(planned.plan, fedResult.localPath);
+  const meshCheckpointResult = finalizeInitialCheckpoint(meshResult.checkpointContext);
+  if (meshCheckpointResult.status !== "committed") {
+    throw new Error("Fresh bootstrap could not finalize its exact mesh-main checkpoint.");
   }
 
   // W2.2 — index the freshly-scaffolded vault so it is search-fresh on first
@@ -666,8 +776,99 @@ async function doFreshBranch(
       mainVaultPath: meshResult.mainVault.path,
     },
     ...(federation !== undefined ? { federation } : {}),
+    creation: {
+      plan: planned.plan,
+      mutations: {
+        registryRows:
+          meshResult.mutations.registryRows +
+          (planned.plan.intended_effects.identity.kind === "create" ? 1 : 0),
+        topologyBindings: meshResult.mutations.topologyBindings,
+        localDatabases: meshResult.mutations.localDatabases,
+        filesystemWrites: meshResult.mutations.filesystemWrites + 1,
+        destinationPolicyRecords: meshResult.mutations.destinationPolicyRecords,
+        failureLogRecords: meshResult.mutations.failureLogRecords,
+        checkpointCommits:
+          meshResult.mutations.checkpointCommits +
+          (podCheckpoint === null ? 0 : 1) +
+          (meshCheckpointResult.status === "committed" ? 1 : 0),
+        checkpointRepositories: [
+          ...meshResult.mutations.checkpointRepositories.filter(
+            (repository) => repository.repositoryRoot !== meshResult.mainVault.path,
+          ),
+          {
+            repositoryRoot: meshResult.mainVault.path,
+            paths: meshCheckpointResult.paths,
+            commitSha: meshCheckpointResult.commitSha!,
+            ...(meshCheckpointResult.beforeCommitSha === undefined
+              ? {}
+              : { beforeCommitSha: meshCheckpointResult.beforeCommitSha }),
+            clean: true,
+          },
+          ...(podCheckpoint === null
+            ? []
+            : [
+                {
+                  repositoryRoot: fedResult.localPath,
+                  paths: podCheckpoint.paths,
+                  commitSha: podCheckpoint.commitSha,
+                  clean: true,
+                },
+              ]),
+        ],
+        checkpointPaths: [
+          ...meshResult.mutations.checkpointPaths,
+          ...(podCheckpoint?.paths ?? []),
+        ].sort(),
+      },
+      ...(podCheckpoint === null ? {} : { podCheckpointCommitSha: podCheckpoint.commitSha }),
+    },
     reconciledVaultPaths,
   };
+}
+
+function assertPlannedPodCheckpointPaths(
+  plan: CreationPlanV1,
+  podRoot: string,
+): { paths: string[]; commitSha: string } | null {
+  const intended = plan.intended_effects.checkpoints.find(
+    (checkpoint) => checkpoint.repository_root === podRoot,
+  );
+  if (intended === undefined) return null;
+  const observed = intended.exact_paths.filter((path) => existsSync(join(podRoot, path))).sort();
+  if (observed.length !== intended.exact_paths.length) {
+    throw new Error("Fresh bootstrap pod files differ from the immutable creation plan.");
+  }
+  let commitSha: string;
+  try {
+    commitSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: podRoot,
+      encoding: "utf8",
+      windowsHide: true,
+    }).trim();
+  } catch {
+    throw new Error("Fresh bootstrap pod checkpoint has no observed commit.");
+  }
+  if (commitSha.length === 0)
+    throw new Error("Fresh bootstrap pod checkpoint has no observed SHA.");
+  return { paths: observed.map((path) => `${podRoot}:${path}`), commitSha };
+}
+
+function bootstrapDestinationRequest(
+  args: InitBootstrapArgs,
+  localOnly: boolean,
+): DestinationRequest {
+  if (localOnly) return { kind: "local" };
+  const customTarget = args.customOverrides?.pushTarget?.trim();
+  if (args.mode !== "custom" || customTarget === undefined || customTarget.length === 0) {
+    return { kind: "auto" };
+  }
+  if (customTarget.startsWith("github:user/") || customTarget.startsWith("github:org/")) {
+    return { kind: "target", target: customTarget.toLowerCase() };
+  }
+  if (customTarget.startsWith("org:")) {
+    return { kind: "target", target: `github:org/${customTarget.slice(4).toLowerCase()}` };
+  }
+  return { kind: "target", target: `github:user/${customTarget.toLowerCase()}` };
 }
 
 async function doReInitBranch(
@@ -767,13 +968,15 @@ async function doDiscoveryBranch(
   );
 
   // Cross-check against the local registry. A repo is "already in
-  // registry" when one of the registered meshes has `push_target` that
+  // registry" when one of the registered meshes has a legacy origin hint that
   // matches `<handle>/<name>` (i.e. a known mesh-main repo) OR matches
   // the bare name (legacy lyt- prefix). We use a Set for O(1) lookup
   // even though discovery sets are small.
-  const knownPushTargets = new Set<string>();
+  // This is discovery de-duplication only. These compatibility hints never
+  // authorize creation, retargeting, or publication.
+  const knownLegacyOriginHints = new Set<string>();
   for (const m of meshes) {
-    if (m.pushTarget !== null) knownPushTargets.add(m.pushTarget);
+    if (m.pushTarget !== null) knownLegacyOriginHints.add(m.pushTarget);
   }
   // Also cross-check the vault.git_url surface in case a vault was
   // adopted from a public repo that didn't go through `lyt mesh init`.
@@ -795,7 +998,9 @@ async function doDiscoveryBranch(
     fullName: r.fullName,
     kind: r.kind,
     alreadyInRegistry:
-      r.alreadyInRegistry || knownPushTargets.has(r.fullName) || knownVaultUrls.has(r.fullName),
+      r.alreadyInRegistry ||
+      knownLegacyOriginHints.has(r.fullName) ||
+      knownVaultUrls.has(r.fullName),
   }));
   annotated.sort((a, b) => a.fullName.localeCompare(b.fullName));
 

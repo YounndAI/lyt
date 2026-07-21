@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-vault",
-  "version": "0.13.5",
+  "version": "0.20.0",
   "description": "Lyt vault primitive — CLI verbs to create and manage editor-neutral markdown vaults with a .lyt scaffold.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -38,7 +38,6 @@
   "files": [
     "dist",
     "templates",
-    "obsidian-plugins",
     "scripts/postinstall.mjs",
     "README.md",
     "LICENSE",
@@ -46,8 +45,60 @@
     "CONTRIBUTING.md",
     "SECURITY.md"
   ],
+  "lytRelease": {
+    "requiredAssets": [
+      {
+        "path": "./README.md",
+        "kind": "file"
+      },
+      {
+        "path": "./LICENSE",
+        "kind": "file"
+      },
+      {
+        "path": "./NOTICE",
+        "kind": "file"
+      },
+      {
+        "path": "./CONTRIBUTING.md",
+        "kind": "file"
+      },
+      {
+        "path": "./SECURITY.md",
+        "kind": "file"
+      },
+      {
+        "path": "./dist",
+        "kind": "tree"
+      },
+      {
+        "path": "./scripts/postinstall.mjs",
+        "kind": "file"
+      },
+      {
+        "path": "./templates",
+        "kind": "tree"
+      },
+      {
+        "path": "./dist/help/topics",
+        "kind": "tree"
+      },
+      {
+        "path": "./dist/patterns",
+        "kind": "tree"
+      },
+      {
+        "path": "./dist/scaffold/defaults",
+        "kind": "tree"
+      },
+      {
+        "path": "./dist/install-provider-manifest.json",
+        "kind": "file"
+      }
+    ]
+  },
   "scripts": {
-    "build": "tsc && node ./scripts/copy-help-topics.mjs && node ./scripts/copy-patterns.mjs && node ./scripts/copy-yon-defaults.mjs",
+    "build": "tsc && node ./scripts/copy-help-topics.mjs && node ./scripts/copy-patterns.mjs && node ./scripts/copy-yon-defaults.mjs && node ./scripts/generate-install-provider-manifest.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
@@ -59,6 +110,7 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
+    "better-sqlite3": "^11.10.0",
     "commander": "^12.1.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
@@ -71,6 +123,7 @@
   },
   "devDependencies": {
     "@lyt/typescript-config": "*",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.5",
     "@types/tar": "^6.1.13",
     "rimraf": "*",

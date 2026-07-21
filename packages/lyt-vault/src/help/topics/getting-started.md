@@ -15,7 +15,8 @@ Five minutes from a fresh machine to a working vault.
 npm install -g @younndai/lyt@alpha
 ```
 
-There is no `latest` release yet — the `alpha` dist-tag is required.
+The example uses the staged `alpha` channel; `latest` is also supported. Keep
+the configured channel explicit with `lyt update --channel alpha|latest`.
 
 ## 2. Bootstrap with the wizard
 
@@ -23,12 +24,12 @@ There is no `latest` release yet — the `alpha` dist-tag is required.
 lyt init
 ```
 
-`lyt init` is the canonical bootstrap. It detects your environment, runs
-`gh auth login` if needed, installs the Lyt skills and agent manual, probes
-GitHub for an existing pod on your handle (cross-machine adopt-detect), creates
-your `personal` mesh and first vault, forges Your Pod (`{handle}/lyt-pod`), and
-captures a welcome note. Run `lyt init --wizard --dry-run` to preview every step
-without writing (`--dry-run` is valid only in combination with `--wizard`).
+`lyt init` is the canonical bootstrap. It verifies prerequisites and existing
+GitHub authentication, installs the Lyt skills and agent manual, probes for an
+existing pod (cross-machine adopt-detect), and creates or adopts one local
+pod/mesh/main-vault checkpoint. It never publishes or creates demo content. Run
+`lyt init --wizard --dry-run` to preview every step without writing (`--dry-run`
+is valid only in combination with `--wizard`).
 
 ## 3. Or create a vault by hand
 
@@ -47,13 +48,23 @@ This scaffolds `~/lyt/vaults/alex/main/` with:
 - `notes/welcome.md` — optional starter Figment (suppress with `--no-starter-figment`)
 - `.gitignore`, `README.md`
 
-A `git init` runs by default; `--no-git` skips it. `--commit-initial` makes a
-single conventional commit with the scaffold files.
+A `git init` runs by default; `--no-git` skips it. Creation automatically makes
+one local checkpoint containing only its exact planned files; `--commit-initial`
+is retained as a compatibility flag.
 
 `lyt vault init alex/main` is **create-if-missing**: it creates the `alex` mesh
 if it doesn't exist, then the vault. A bare `lyt vault init notes` lands in your
 `personal` mesh. Re-running `init` on a vault that already exists stops and tells
 you (it never silently re-scaffolds).
+
+Destination choice is separate from the mesh name. Use `--target
+github:user/<owner>` or `--target github:org/<owner>` for an explicit online
+destination, or `--local` for local-only. With no flag, automatic mode uses the
+authenticated GitHub owner when it can be observed; otherwise it keeps the new
+mesh local and recommends going online for safety and redundancy. Creation
+itself never publishes: Receipt V1 reports terminal status, destination,
+checkpoint/mutation evidence, and exact next-sync evidence. Inspect policy
+source afterward through read-only vault/mesh info.
 
 A vault's identity is its `rid` (a UUIDv7); the `{mesh}/{vault}` name is computed
 from its home mesh and leaf. Every verb can address the vault by `alex/main`, by

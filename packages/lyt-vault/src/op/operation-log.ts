@@ -40,13 +40,20 @@
 // at enqueue and the ACTUAL value after apply — `markOpApplied` writes back
 // what really happened, so a half-landed op is never mislabelled in history.
 
-import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { dirname, join, normalize, resolve } from "node:path";
 
 import { createClient, type Client } from "@libsql/client";
+import type { InArgs, InStatement, ResultSet } from "@libsql/client";
+import BetterSqlite3 from "better-sqlite3";
 
 import { getLytHome } from "../util/paths.js";
 import { newUuidv7Bytes } from "../util/uuid7.js";
+import {
+  assertReadableReceiptSchema,
+  assertSupportedOperationLogSchema,
+  migrateOperationLog,
+} from "./operation-log-migrations.js";
 import type { Inverse, SyncHorizon } from "./operation.js";
 
 /**
@@ -93,11 +100,116 @@ export interface OpLogRow {
 
 const OP_LOG_BUSY_TIMEOUT_MS = 5000;
 
+const operationLogStoreIdentities = new WeakMap<Client, string>();
+
+function normalizedOperationLogStoreIdentity(path: string): string {
+  const absolute = normalize(resolve(path));
+  let physical = absolute;
+  try {
+    physical = realpathSync.native(absolute);
+  } catch {
+    // The client creates a missing database lazily. The resolved absolute path
+    // is still a stable identity until the file exists.
+  }
+  const normalized = normalize(physical);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** Internal metadata seam for per-store receipt write coordination. */
+export function getOperationLogStoreIdentity(db: Client): string {
+  const identity = operationLogStoreIdentities.get(db);
+  if (identity === undefined) {
+    throw new Error("operation-log client is missing its physical store identity");
+  }
+  return identity;
+}
+
 const SELECT_COLS =
   "SELECT id, kind, horizon, file_set, inverse_json, status, created_at, applied_at FROM op_log";
 
+export const POD_REPAIR_OPERATION_ID_SQL = `CASE
+  WHEN json_valid(file_set)
+   AND json_array_length(file_set) = 1
+   AND json_type(file_set, '$[0]') = 'text'
+   AND json_valid(json_extract(file_set, '$[0]'))
+  THEN json_extract(json_extract(file_set, '$[0]'), '$.operation_id')
+  ELSE NULL
+END`;
+
 export function getOpLogPath(): string {
   return join(getLytHome(), "op-log.db");
+}
+
+type SqlValue = string | number | bigint | Uint8Array | null;
+
+export interface ReadOnlyOperationLogClient {
+  execute(statement: InStatement | string, args?: InArgs): Promise<ResultSet>;
+}
+
+export type ReadOnlyOperationLogOpenResult =
+  | Readonly<{ kind: "missing"; path: string }>
+  | Readonly<{
+      kind: "open";
+      path: string;
+      client: ReadOnlyOperationLogClient;
+      close(): void;
+    }>;
+
+function assertReceiptReadStatement(sql: string): void {
+  const normalized = sql.trimStart().replace(/^(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/\s*)*/u, "");
+  if (!/^SELECT\b/iu.test(normalized)) {
+    throw new Error("read-only operation-log capability accepts SELECT statements only");
+  }
+}
+
+function operationLogReadOnlyClient(db: BetterSqlite3.Database): ReadOnlyOperationLogClient {
+  return {
+    async execute(statement: InStatement | string, args?: InArgs): Promise<ResultSet> {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      const values = (typeof statement === "string" ? args : statement.args) as
+        readonly SqlValue[] | Record<string, SqlValue> | undefined;
+      assertReceiptReadStatement(sql);
+      const prepared = db.prepare(sql);
+      const rows = (
+        values === undefined
+          ? prepared.all()
+          : Array.isArray(values)
+            ? prepared.all(...values)
+            : prepared.all(values)
+      ) as Record<string, SqlValue>[];
+      const columns = rows.length === 0 ? [] : Object.keys(rows[0]!);
+      return {
+        columns,
+        columnTypes: [],
+        rows,
+        rowsAffected: 0,
+        lastInsertRowid: undefined,
+        toJSON: () => ({ columns, rows }),
+      } as unknown as ResultSet;
+    },
+  };
+}
+
+/** Open the existing receipt store physically read-only and never migrate it. */
+export async function openOpLogReadOnly(opts?: {
+  path?: string;
+}): Promise<ReadOnlyOperationLogOpenResult> {
+  const path = opts?.path ?? getOpLogPath();
+  if (!existsSync(path)) return Object.freeze({ kind: "missing" as const, path });
+  const db = new BetterSqlite3(path, { readonly: true, fileMustExist: true, timeout: 0 });
+  const client = operationLogReadOnlyClient(db);
+  try {
+    await assertReadableReceiptSchema(client as unknown as Client);
+    return Object.freeze({
+      kind: "open" as const,
+      path,
+      client,
+      close: () => db.close(),
+    });
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 export async function openOpLog(opts?: { path?: string }): Promise<Client> {
@@ -105,8 +217,10 @@ export async function openOpLog(opts?: { path?: string }): Promise<Client> {
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = createClient({ url: `file:${dbPath}` });
   try {
+    await assertSupportedOperationLogSchema(db);
     await db.execute("PRAGMA journal_mode=DELETE");
     await db.execute(`PRAGMA busy_timeout=${OP_LOG_BUSY_TIMEOUT_MS}`);
+    await migrateOperationLog(db);
     await db.execute(
       `CREATE TABLE IF NOT EXISTS op_log (
  id BLOB PRIMARY KEY,
@@ -119,6 +233,19 @@ export async function openOpLog(opts?: { path?: string }): Promise<Client> {
  applied_at TEXT
       )`,
     );
+    await db.execute(
+      `CREATE INDEX IF NOT EXISTS op_log_pod_repair_operation_idx
+         ON op_log(kind, (${POD_REPAIR_OPERATION_ID_SQL}))`,
+    );
+    await db.execute(
+      `CREATE INDEX IF NOT EXISTS operations_operation_id_kind_idx
+         ON operations(operation, operation_id)`,
+    );
+    await db.execute(
+      `CREATE INDEX IF NOT EXISTS operation_attempts_latest_idx
+         ON operation_attempts(operation_id, started_at DESC, attempt_id DESC)`,
+    );
+    operationLogStoreIdentities.set(db, normalizedOperationLogStoreIdentity(dbPath));
     return db;
   } catch (err) {
     db.close();

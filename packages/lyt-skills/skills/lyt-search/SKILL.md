@@ -3,6 +3,9 @@ name: lyt-search
 description: >
   Search a Lyt pod (or a single mesh or vault) using the tiered-cascade engine — Tier 0 arcs (0.95) → Tier 1 lanes (0.90) → Tier 2 FTS5 (0.70) → Tier 3 edges (0.50) — with confidence ranking. Trigger when the user runs /lyt-search <query>, or says "search my pod for X", "find anything about X across my vaults", "search across all meshes for X", "what's in my pod about X", or similar phrasing on a query wider than a single vault. Wraps the `lyt search` CLI verb — federation scope by default; --vault / --mesh narrow scope; --limit caps results. Returns ranked Figments with vault, mesh, snippet, and confidence. Companion to lyt-recall (single-vault scope) for narrower local searches.
 visibility: public
+skill-version: 1.0.0
+requires-lyt: ">=0.20.0 <0.21.0"
+contract-version: 1.0.0
 lyt-version: 0.5.0
 capabilities: [search]
 runtimes: [claude, codex, agents]

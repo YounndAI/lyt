@@ -14,8 +14,20 @@
  * limitations under the License.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { closeRegistry, openRegistry } from "../registry/client.js";
+import { getFederationRoot } from "../util/federation-paths.js";
+import { readPodIdentity } from "../util/identity-cache.js";
 import { getIdentity } from "../util/identity.js";
+import { getMachineId } from "../util/writer-id.js";
+import { parseFederationYon } from "../yon/federation-read.js";
+import {
+  readCurrentMachine,
+  updateCurrentMachineAlias,
+  type MachineLedgerRecord,
+} from "../yon/machine-ledger.js";
 
 // Per arc §7 — machine stance is role *composition*, not a discrete mode.
 // Defaults to client + automator-runner + mesh-syncer (typical solo);
@@ -39,6 +51,13 @@ export const DEFAULT_MACHINE_ROLES: readonly MachineRole[] = Object.freeze([
 export interface MachineStatus {
   roles: MachineRole[];
   region: string;
+  machineId: string;
+  accountIdentity: string;
+  alias: string | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  lastSync: string | null;
+  // 0.20 compatibility alias for accountIdentity.
   identity: string;
 }
 
@@ -85,11 +104,34 @@ export async function readMachineState(): Promise<{ roles: MachineRole[]; region
 
 export async function machineStatusFlow(): Promise<MachineStatus> {
   const state = await readMachineState();
+  const accountIdentity = getIdentity();
+  const machineId = getMachineId();
+  const machine = readCurrentMachine(undefined, machineId);
   return {
     roles: state.roles,
     region: state.region,
-    identity: getIdentity(),
+    machineId,
+    accountIdentity,
+    alias: machine?.alias ?? null,
+    firstSeen: machine?.firstSeen ?? null,
+    lastSeen: machine?.lastSeen ?? null,
+    lastSync: machine?.lastSync ?? null,
+    identity: accountIdentity,
   };
+}
+
+export function machineAliasUpdateFlow(alias: string): MachineLedgerRecord {
+  const podRoot = getFederationRoot();
+  const identity = readPodIdentity(podRoot);
+  const manifestPath = join(podRoot, "pod.yon");
+  if (identity?.podRid === undefined || !existsSync(manifestPath)) {
+    throw new Error("Cannot update machine alias before the pod repository and identity are initialized.");
+  }
+  const manifest = parseFederationYon(readFileSync(manifestPath, "utf8"));
+  if (manifest.federation.fedRidHex !== identity.podRid) {
+    throw new Error("Cannot update machine alias: pod repository identity does not match identity.yon.");
+  }
+  return updateCurrentMachineAlias(alias, { podRoot, accountIdentity: getIdentity() });
 }
 
 export interface MachineRoleEnableArgs {

@@ -15,6 +15,7 @@
  */
 
 import type { Client } from "@libsql/client";
+import { randomUUID } from "node:crypto";
 
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import {
@@ -47,6 +48,14 @@ import {
   type CachedIdentity,
 } from "../../util/identity-cache.js";
 import { regeneratePodManifestNonFatal } from "./regenerate.js";
+import {
+  withFreshPublicationPermission,
+  type CanonicalVaultPublicationAttemptContext,
+} from "./publication-authority.js";
+import {
+  observePublicationPermission,
+  type PublicationPermissionObserver,
+} from "./publication-permission.js";
 
 // (2026-06-04) — the CONNECT self-heal.
 //
@@ -107,6 +116,8 @@ export interface ConnectPodArgs {
   runGit?: ConnectGitRunner | undefined;
   registryDb?: Client | undefined; // open-once seam
   nowIso?: string | undefined;
+  permissionObserver?: PublicationPermissionObserver | undefined;
+  permissionAttemptId?: string | undefined;
   // D.3-GUARD HIL — invoked when an existing remote pod collides with local
   // content. Returns true to ADOPT the remote (the default safe choice), false
   // to keep local. EITHER WAY connect does NOT blind-push (the merge is gap #5).
@@ -129,6 +140,8 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
   const git = args.runGit ?? defaultRunGit;
   const nowIso = args.nowIso ?? new Date().toISOString();
   const warnings: string[] = [];
+  const permissionObserver = args.permissionObserver ?? observePublicationPermission;
+  const permissionAttemptId = args.permissionAttemptId ?? randomUUID();
 
   const base: ConnectPodResult = {
     status: "not-needed",
@@ -183,7 +196,8 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
         provisionalHandle,
         // firewall-C1 fix-pass — drop the raw `gh` CLI + the raw error text; plain
         // sign-in guidance (the raw error stays out of the human message).
-        message: "Lyt couldn't read your GitHub account details. Sign in to your GitHub account, then re-run `lyt sync`.",
+        message:
+          "Lyt couldn't read your GitHub account details. Sign in to your GitHub account, then re-run `lyt sync`.",
       };
     }
     if (!isValidGhHandle(realHandle)) {
@@ -210,7 +224,9 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       // let the publish pass surface any real network issue authoritatively.
       // firewall-C1 fix-pass — plain non-fatal note; the raw error text (which can
       // carry git/gh output) stays out of the human warning.
-      warnings.push(`Lyt couldn't check whether you already have a pod online — you may be offline or signed out.`);
+      warnings.push(
+        `Lyt couldn't check whether you already have a pod online — you may be offline or signed out.`,
+      );
     }
     if (remoteExists) {
       // Phase C amendment-5 — the remote repo EXISTS, but is it a GENUINE
@@ -235,7 +251,10 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       if (routeToGuard) {
         const existingRemote = federationRepoFullName(realHandle);
         const adopt = args.confirmAdoptExistingRemote
-          ? await args.confirmAdoptExistingRemote({ existingRemote, localHandle: provisionalHandle })
+          ? await args.confirmAdoptExistingRemote({
+              existingRemote,
+              localHandle: provisionalHandle,
+            })
           : true; // default: adopt the remote (non-destructive — local is preserved)
         return {
           ...base,
@@ -271,10 +290,31 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
     // retry. On failure we leave EVERYTHING provisional (state + identity
     // untouched) and return a deferred status so the next `lyt sync` retries.
     let podRepoCreated = false;
+    const repository = `${realHandle}/${federationRepoName()}`;
+    const target = `github:user/${realHandle}`;
+    const authorized = <T>(
+      capability: "repository-create" | "repository-push",
+      action: (context: CanonicalVaultPublicationAttemptContext) => Promise<T>,
+    ) =>
+      withFreshPublicationPermission({
+        capability,
+        target,
+        repository,
+        actor: realHandle,
+        attemptId: permissionAttemptId,
+        policyEpoch: 0,
+        permissionObserver,
+        publicationSubject: { identity: `pod:${repository.toLowerCase()}`, podRoot: podDir },
+        action,
+      });
     if (!remoteExists) {
       const visibility = resolveConfig().defaultRepoVisibility;
       try {
-        await gh.createRepo(realHandle, federationRepoName(), visibility, POD_REPO_DESCRIPTION);
+        await authorized("repository-create", (attempt) =>
+          attempt.runOutwardChild(() =>
+            gh.createRepo(realHandle, federationRepoName(), visibility, POD_REPO_DESCRIPTION),
+          ),
+        );
       } catch (err) {
         return {
           ...base,
@@ -289,7 +329,11 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       }
       podRepoCreated = true;
       try {
-        await gh.setRepoTopics(realHandle, federationRepoName(), POD_TOPICS);
+        await authorized("repository-push", (attempt) =>
+          attempt.runOutwardChild(() =>
+            gh.setRepoTopics(realHandle, federationRepoName(), POD_TOPICS),
+          ),
+        );
       } catch (err) {
         warnings.push(
           `Your pod is set up online, but Lyt couldn't finish labeling it (this is harmless).`,
@@ -331,9 +375,13 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       allowFailure: true,
     });
     if (hasOrigin.code === 0) {
-      await git(["remote", "set-url", "origin", originUrl], { cwd: podDir, allowFailure: true });
+      await authorized("repository-push", () =>
+        git(["remote", "set-url", "origin", originUrl], { cwd: podDir, allowFailure: true }),
+      );
     } else {
-      await git(["remote", "add", "origin", originUrl], { cwd: podDir, allowFailure: true });
+      await authorized("repository-push", () =>
+        git(["remote", "add", "origin", originUrl], { cwd: podDir, allowFailure: true }),
+      );
     }
 
     const note =

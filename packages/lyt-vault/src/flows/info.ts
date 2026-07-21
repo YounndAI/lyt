@@ -26,6 +26,7 @@ import {
   listVaults,
   type VaultRow,
 } from "../registry/repo.js";
+import { getMeshByRid } from "../registry/meshes-repo.js";
 import { computeDisplayName, vaultOriginCoordinate } from "../registry/vault-addressing.js";
 import {
   deriveLocalWritable,
@@ -34,6 +35,7 @@ import {
   type WritabilityVerdict,
 } from "./writability.js";
 import { reprobeVaultAccessLost } from "./access-reprobe.js";
+import { presentVaultDestination, type DestinationPresentation } from "./destination-presentation.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 import { detectLicenseFromContent, type DetectedLicense } from "../util/license-detect.js";
 import { ridsEqual } from "../util/uuid7.js";
@@ -75,6 +77,15 @@ export interface InfoFlowResult {
     memscopeRid: string | null;
     homeMeshRid: string | null;
     gitUrl: string | null;
+    acquisitionSource: VaultRow["source"];
+    destination: DestinationPresentation;
+    permissionObservation: {
+      scope: "ephemeral";
+      result: "verified" | "denied" | "unknown";
+      evidence: WritabilityVerdict["reason"];
+    };
+    onlineState: "unknown";
+    upstreamState: "unknown";
     createdAt: string | null;
     registeredAt: string;
     lastVerifiedAt: string | null;
@@ -113,14 +124,7 @@ export interface InfoFlowResult {
 }
 
 export interface InfoVaultFlowOpts {
-  // v1.G.2 — injectable gh executor for the writability probe. Tests
-  // pass a fake GhExecutor; production defaults to spawning the real
-  // `gh` CLI via util/gh-discover.ts's default executor.
   gh?: GhExecutor;
-  // A6-1 (0.12.0 Phase D fix-pass) — injectable gh-auth verdict for the access
-  // re-probe. Defaults to the real `gh auth status`; tests inject a deterministic
-  // verdict so a not-found under known-good auth reads as a genuine revoke while a
-  // not-found under unauthed/expired auth stays `unknown` (never `access_lost`).
   ghAuthOk?: () => boolean | null;
 }
 
@@ -185,16 +189,10 @@ export async function infoVaultFlow(
         : reprobe === "recovered"
           ? "active"
           : vault.status;
-    // Order matters: deriveVaultWritable runs the V-A-10 git_url self-heal (below);
-    // deriveLocalWritable reuses the now-cached verdict for any subscription probe.
     const writability = await deriveVaultWritable(vault, db, ghOpts);
     const localWritability = await deriveLocalWritable(vault, db, ghOpts);
-
-    // V-A-10: deriveVaultWritable self-heals a null git_url from the live
-    // origin and persists it. `vault` was loaded before that heal, so re-read
-    // the healed value when it was null — otherwise this first call would emit
-    // writable:true alongside a stale gitUrl:null in the same payload.
     const gitUrlOut = vault.gitUrl ?? (await getVaultByRid(db, vault.rid))?.gitUrl ?? null;
+    const homeMesh = vault.homeMeshRid === null ? null : await getMeshByRid(db, vault.homeMeshRid);
 
     const displayName = await computeDisplayName(db, vault);
     const originCoordinate = vaultOriginCoordinate({ ...vault, gitUrl: gitUrlOut });
@@ -212,6 +210,11 @@ export async function infoVaultFlow(
         memscopeRid: vault.memscopeRidHex,
         homeMeshRid: vault.homeMeshRidHex,
         gitUrl: gitUrlOut,
+        acquisitionSource: vault.source,
+        destination: presentVaultDestination(vault, homeMesh),
+        permissionObservation: presentPermissionObservation(writability),
+        onlineState: "unknown",
+        upstreamState: "unknown",
         createdAt: vault.createdAt,
         registeredAt: vault.registeredAt,
         lastVerifiedAt: vault.lastVerifiedAt,
@@ -237,6 +240,21 @@ export async function infoVaultFlow(
   } finally {
     await closeRegistry(db);
   }
+}
+
+function presentPermissionObservation(
+  writability: WritabilityVerdict,
+): { scope: "ephemeral"; result: "verified" | "denied" | "unknown"; evidence: WritabilityVerdict["reason"] } {
+  return {
+    scope: "ephemeral",
+    result:
+      writability.reason === "gh-viewerCanPush-true"
+        ? "verified"
+        : writability.reason === "gh-viewerCanPush-false"
+          ? "denied"
+          : "unknown",
+    evidence: writability.reason,
+  };
 }
 
 async function measureVault(path: string): Promise<{ sizeBytes: number; fileCount: number }> {

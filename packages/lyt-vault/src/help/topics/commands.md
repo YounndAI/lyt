@@ -25,6 +25,9 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   reports freshness without writing. Normal scoped `--json` includes the
   scoped-publication receipt; `--no-publish` holds both scoped and pod-wide
   publication. See `lyt help sync`.
+- `lyt sync --check --vault <qualified-vault> --json` — inspect exactly one
+  vault without filesystem, registry, index, Git, repository, or sibling-vault
+  mutation.
 - `lyt status [--json]` — publish-drift trust surface (per-vault + pod: unpushed /
   no-remote / clean). Distinct from `lyt mesh status` (the topology renderer).
 - `lyt doctor [--json|--full]` — git/gh/node/npm checks, registry integrity,
@@ -36,19 +39,33 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   discovered Lyt vaults by mesh for adopt / skip.
 - `lyt mcp start` — start the MCP server over stdio for AI agents.
 - `lyt help [<topic>] [--markdown]` — verb-group overview or a rendered topic.
+- `lyt outdated [--channel alpha|latest] [--json]` — read-only channel currency
+  check. It never changes the saved channel.
+- `lyt update [--check] [--yes] [--channel alpha|latest] [--switch-channel]
+[--allow-downgrade] [--resume <operation-id>] [--configure] [--json]` —
+  confirmation-gated staged update. The replacement binary performs managed
+  reconciliation and returns a Receipt/resume action.
+- `lyt install reconcile [--apply] [--resume <operation-id>] [--json]` — inspect
+  managed skills/manuals; read-only by default. `--apply` executes the exact
+  plan. Update-owned sealing flags are internal resume coordinates, not normal
+  user entrypoints.
 
 ## Vault lifecycle
 
 - `lyt vault init <name>` — scaffold a fresh vault under `~/lyt/vaults/<name>`.
   Accepts `{mesh}/{vault}` (create-if-missing: creates the mesh if absent, the
   vault if absent, **stops if the vault exists**) or a bare name (→ `personal/`).
-  Supports `--mesh <mesh>`, `--push-to <handle>` (make an auto-created mesh a
-  sharing mesh; default local-only), `--description`, `--ask-description`,
+  Supports `--mesh <mesh>`, `--local`, `--target github:user|org/<owner>`, and
+  legacy `--push-to <handle>` (explicit destination override; the mesh name is
+  never treated as a GitHub owner), `--description`, `--ask-description`,
   `--topic <name>` (repeatable), `--no-starter-figment`, `--path <dir>`,
   `--parent <rid>`, `--tier-hint`, `--template empty|obsidian-default`,
-  `--no-git`, `--commit-initial`, `--json` (machine-readable init result,
-  including mesh assignment and the explicit sync-next-step receipt).
-- `lyt vault adopt <path>` — upgrade an existing Obsidian vault to Lyt-aware
+  `--no-git`, `--commit-initial` (compatibility; exact local checkpoints are
+  automatic), `--json` (machine-readable init result,
+  including terminal status, destination/checkpoint/mutation evidence, and
+  explicit next-sync evidence. `next_action` appears only when non-null; inspect
+  destination source afterward with read-only vault/mesh info.
+- `lyt vault adopt <path>` — upgrade an existing markdown vault to Lyt-aware
   (adds `.lyt/`, never edits existing markdown).
 - `lyt vault join <path>` — register an already-Lyt-aware vault on this machine
   (typical after `git clone`).
@@ -88,7 +105,7 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   dates; `purpose`/`topic` left blank + flagged; provenance-stamped). Never
   overwrites existing values; idempotent. `--dry-run` previews (read-only, writes
   nothing); writes locally by default, `--push` also commits + pushes. Not `lyt
-  repair` (repair stays registry/mesh-only).
+repair` (repair stays registry/mesh-only).
 - `lyt vault reconcile <name> [--apply] [--push] [--json]` — detect drift between a
   vault's markdown on disk and its search index: figments with missing frontmatter
   and figments not yet indexed. Detect-only by default; `--apply` backfills then
@@ -126,7 +143,7 @@ See `lyt help mesh` and `lyt help federation`. In brief:
   (`@FED_MESH`) entry needs a durable ledger retraction (a mesh tombstone —
   deferred to a later 0.12.x lane). Pruning an orphan mesh clears its `doctor`
   structural-invariant warn. Prune acts on your locally-synced view; run `lyt
-  sync` first for an authoritative decision (a peer's un-synced backing can
+sync` first for an authoritative decision (a peer's un-synced backing can
   otherwise resurrect a pruned mesh).
 - `lyt federation init|list|rebuild` — Your Pod (`{handle}/lyt-pod`).
 
@@ -147,6 +164,8 @@ See `lyt help mesh` and `lyt help federation`. In brief:
 - `lyt provenance trace <file|rid> [--json]` — follow the `@STAMP` chain.
 - `lyt identity show|refresh` — GitHub-authoritative identity, cached locally.
 - `lyt machine status [--json]` — this machine's roles + region.
+- `lyt machine alias <alias> [--json]` — set this machine's synchronized alias.
+- `lyt federation alias [alias] [--json]` — inspect or update Your Pod's alias; its RID stays stable.
 - `lyt housekeep [--dry-run|--rotate-now]` — monthly ledger rotation. See
   `lyt help ledgers` and `lyt help housekeep`.
 

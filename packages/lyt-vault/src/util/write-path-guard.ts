@@ -15,37 +15,42 @@
  */
 
 import { lstatSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, parse, resolve } from "node:path";
 
-// Shared write-path guard for handler-influenced materialization targets.
-// Existing components from the target leaf through root are lstat-checked;
-// missing components are safe because the caller creates them fresh.
-export function assertNoSymlinkOnWritePath(root: string, target: string): void {
-  const rootR = resolve(root);
-  const targetR = resolve(target);
-  const chain: string[] = [];
-  let cur = targetR;
-  for (;;) {
-    chain.push(cur);
-    if (cur === rootR) break;
-    const up = dirname(cur);
-    if (up === cur) {
-      throw new Error(`Refusing to write to ${target}: it is outside the allowed root ${rootR}.`);
-    }
-    cur = up;
-  }
-  for (const path of chain) {
+/** Refuse a write if its leaf or any existing parent is a link/reparse point. */
+export function assertSafeWritePath(path: string): void {
+  let current = resolve(path);
+  const root = parse(current).root;
+  while (true) {
     try {
-      if (lstatSync(path).isSymbolicLink()) {
-        throw new Error(
-          `Refusing to write to ${target}: the write-path component ${JSON.stringify(path)} ` +
-            `is a symlink/junction. A reparse point could redirect the write outside ${rootR}. ` +
-            `Remove or replace the link with a real directory and retry.`,
-        );
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`Refusing write through symlink or reparse point: ${current}`);
       }
-    } catch (err) {
-      if (err instanceof Error && "code" in err && err.code === "ENOENT") continue;
-      throw err;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw error;
     }
+    if (current === root) return;
+    current = dirname(current);
   }
+}
+
+export const assertNoReparsePointInPath = assertSafeWritePath;
+
+// Existing callers provide an allowed root as well as a target. Keep that
+// boundary contract while sharing the leaf-and-parent reparse inspection used
+// by fresh scaffold writes.
+export function assertNoSymlinkOnWritePath(root: string, target: string): void {
+  const rootResolved = resolve(root);
+  const targetResolved = resolve(target);
+  let current = targetResolved;
+  while (current !== rootResolved) {
+    const parent = dirname(current);
+    if (parent === current) {
+      throw new Error(`Refusing to write to ${target}: it is outside the allowed root ${rootResolved}.`);
+    }
+    current = parent;
+  }
+  assertSafeWritePath(targetResolved);
 }

@@ -33,19 +33,22 @@
 // otherwise → exit 0
 
 import { Command } from "commander";
+import { createHash } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 
 import {
   checkCurrency,
   closeRegistry,
+  creationCheckpointPathDigest,
+  creationLocalMutationCount,
   embeddingsOfferGate,
   formatCurrencyLine,
   getHandleFromIdentity,
   markAsked,
-  materializePodLocal,
   openRegistry,
   readIdentityCache,
-  reconcilePublishFlow,
+  newUuidv7Bytes,
+  parseReceiptV1ForEmission,
   recoverVaultsFromPodManifest,
   reconstructionExitCode,
   ReadlinePromptHandler,
@@ -56,10 +59,12 @@ import {
   startSpinner,
   syncPodLedgerFlow,
   validateMeshName,
+  uuid7BytesToDashedString,
   type IPromptHandler,
   type PhaseSpinnerHandle,
   type PodCardData,
   type SpinnerOp,
+  type ReceiptV1,
 } from "@younndai/lyt-vault";
 
 import {
@@ -95,336 +100,453 @@ export function buildLytInitCommand(): Command {
     )
     .option(
       "--wizard",
-      "Force the 12-phase setup wizard (detect/install Node + gh + agent runtime, gh auth login, install Lyt skills, install agent manual, cross-machine adopt-detect, create personal mesh + first vault + federation repo, pod-map vault, first-use demo). Conflicts with --auto/--custom/--discover/--json.",
+      "Force guided setup: verify prerequisites and authentication, install agent integrations, detect/adopt another machine, then create one local pod/mesh/main-vault checkpoint. It never publishes, generates a pod-map, or creates demo content. Conflicts with --auto/--custom/--discover/--json.",
     )
     .option(
       "--dry-run",
-      "Only valid with --wizard. Walks all 12 wizard phases without spawn invocations or filesystem writes.",
+      "Only valid with --wizard. Plans setup without spawn invocations or filesystem writes.",
     )
     .option("--json", "Emit deterministic JSON")
     .action(async (opts: LytInitCliOpts) => {
-      // v1.G.13 Gap 1 — no-flag fresh-state wizard auto-route. When the
-      // handler runs `lyt init` with NO mode flags AND the registry is
-      // empty (first-init), enter the wizard. Re-init state falls through
-      // to the existing --auto default. Non-TTY first-init errors out per
-      // the ratified default.
-      const noMode =
-        opts.auto !== true &&
-        opts.custom !== true &&
-        opts.discover !== true &&
-        opts.wizard !== true &&
-        opts.json !== true &&
-        opts.dryRun !== true;
-      if (noMode) {
-        let isFresh: boolean;
-        try {
-          isFresh = await probeFreshState();
-        } catch (err) {
-          // Probe failure (registry unreachable) — surface and exit.
-          const msg = err instanceof Error ? err.message : String(err);
-          emitError(false, { error: "first-init-probe-failed", message: msg });
-          process.exitCode = 1;
-          return;
+      const startedAt = new Date().toISOString();
+      const operationId = uuid7BytesToDashedString(newUuidv7Bytes());
+      const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+      const originalLog = console.log;
+      // Receipt V1 is the sole stdout value; established human/compatibility
+      // renderers remain visible as diagnostics on stderr.
+      console.log = (...args: unknown[]) => console.error(...args);
+      try {
+        // v1.G.13 Gap 1 — no-flag fresh-state wizard auto-route. When the
+        // handler runs `lyt init` with NO mode flags AND the registry is
+        // empty (first-init), enter the wizard. Re-init state falls through
+        // to the existing --auto default. Non-TTY first-init errors out per
+        // the ratified default.
+        const noMode =
+          opts.auto !== true &&
+          opts.custom !== true &&
+          opts.discover !== true &&
+          opts.wizard !== true &&
+          opts.json !== true &&
+          opts.dryRun !== true;
+        if (noMode) {
+          let isFresh: boolean;
+          try {
+            isFresh = await probeFreshState();
+          } catch (err) {
+            // Probe failure (registry unreachable) — surface and exit.
+            const msg = err instanceof Error ? err.message : String(err);
+            emitError(
+              false,
+              { error: "first-init-probe-failed", message: msg },
+              { operationId, attemptId, startedAt },
+            );
+            process.exitCode = 1;
+            return;
+          }
+          if (isFresh) {
+            if (process.stdin.isTTY !== true) {
+              emitError(
+                false,
+                {
+                  error: "first-init-requires-tty",
+                  message:
+                    "lyt init: interactive required for first-init; use --auto for non-interactive bootstrap.",
+                },
+                { operationId, attemptId, startedAt },
+              );
+              process.exitCode = 3;
+              return;
+            }
+            // TTY + fresh → route through the existing --wizard branch by
+            // flipping the flag. Single code path for both explicit
+            // `--wizard` and the no-flag first-init auto-route.
+            opts.wizard = true;
+          }
+          // Otherwise (re-init state) fall through to existing --auto default.
         }
-        if (isFresh) {
-          if (process.stdin.isTTY !== true) {
-            emitError(false, {
-              error: "first-init-requires-tty",
-              message:
-                "lyt init: interactive required for first-init; use --auto for non-interactive bootstrap.",
-            });
+
+        // v1.G.4 — --wizard takes a dedicated branch; mutually exclusive
+        // with the existing auto/custom/discover/json modes (the wizard
+        // composes mesh+vault+federation init itself).
+        if (opts.wizard === true) {
+          if (
+            opts.auto === true ||
+            opts.custom === true ||
+            opts.discover === true ||
+            opts.json === true
+          ) {
+            emitError(
+              false,
+              {
+                error: "flag-conflict",
+                message:
+                  "lyt init --wizard is mutually exclusive with --auto, --custom, --discover, and --json.",
+              },
+              { operationId, attemptId, startedAt },
+            );
+            process.exitCode = 2;
+            return;
+          }
+          if (opts.dryRun !== true && process.stdin.isTTY !== true) {
+            emitError(
+              false,
+              {
+                error: "wizard-requires-tty",
+                message:
+                  "lyt init --wizard requires an interactive terminal (or pass --dry-run for a non-TTY phase walk).",
+              },
+              { operationId, attemptId, startedAt },
+            );
             process.exitCode = 3;
             return;
           }
-          // TTY + fresh → route through the existing --wizard branch by
-          // flipping the flag. Single code path for both explicit
-          // `--wizard` and the no-flag first-init auto-route.
-          opts.wizard = true;
+          // Under --dry-run, use a non-interactive default handler so the
+          // wizard can be smoke-tested without stdin. Real interactive runs
+          // use the readline-backed handler.
+          const handler: IPromptHandler & { close?: () => void } =
+            opts.dryRun === true ? makeDryRunDefaultsHandler() : new ReadlinePromptHandler();
+          try {
+            const result = await runWizard({
+              promptHandler: handler,
+              dryRun: opts.dryRun === true,
+            });
+            // F3 (console-DX): scannable setup-summary block — a header/footer rule
+            // + status glyphs (✓ done · ⊘ skipped · ✗ failed) replacing the flat
+            // `[ok] Phase N (name): msg` lines that had no visible start/end.
+            const summaryLines = [
+              "",
+              "── Setup summary ──────────────────────────────────",
+              ...result.phases.map((ph) => {
+                const glyph = ph.skipped === true ? "⊘" : ph.ok ? "✓" : "✗";
+                const num = String(ph.phase).padStart(2, " ");
+                return `  ${glyph} Phase ${num}  ${ph.name} — ${ph.message}`;
+              }),
+              "───────────────────────────────────────────────────",
+            ];
+            // Human progress stays on stderr so the terminal Receipt V1 remains
+            // the only stdout payload for agent and JSON consumers.
+            // eslint-disable-next-line no-console
+            console.error(summaryLines.join("\n"));
+            if (result.status !== "completed") {
+              // G1 (a review finding) — when the halt was a reconstruction with DROPPED
+              // vaults, surface the classified exit code (11 state-drift · 12
+              // owner-misresolved/bug) to the shell; otherwise a generic 1.
+              const adoptPhase = result.phases.find((ph) => ph.name === "adopt-pod");
+              process.exitCode = adoptPhase?.data?.reconstructExitCode ?? 1;
+            }
+            emitRootInitReceipt(
+              makeRootInitReceipt({
+                operationId:
+                  result.creation === undefined
+                    ? operationId
+                    : uuid7BytesToDashedString(
+                        Buffer.from(result.creation.plan.intended_effects.operation_id, "hex"),
+                      ),
+                attemptId: result.creation?.plan.attempt.attempt_id ?? attemptId,
+                startedAt,
+                logicalKey: result.creation?.plan.logical_replay_key ?? {
+                  mode: "wizard",
+                  dryRun: opts.dryRun === true,
+                },
+                status:
+                  result.status === "completed"
+                    ? result.creation === undefined ||
+                      creationLocalMutationCount(result.creation.mutations) === 0
+                      ? "no-op"
+                      : "success"
+                    : result.creation !== undefined &&
+                        creationLocalMutationCount(result.creation.mutations) > 0
+                      ? "partial"
+                      : "failed",
+                local:
+                  result.creation === undefined
+                    ? 0
+                    : creationLocalMutationCount(result.creation.mutations),
+                ...(result.creation === undefined
+                  ? {}
+                  : {
+                      creation: result.creation as NonNullable<InitBootstrapResult["creation"]>,
+                    }),
+                ...(result.status === "completed"
+                  ? {}
+                  : {
+                      error: {
+                        code: "wizard-incomplete",
+                        summary: "Lyt setup did not complete.",
+                        retryable: true,
+                      },
+                      next: {
+                        code: "resume-lyt-init",
+                        summary: "Correct the reported phase and rerun lyt init.",
+                      },
+                      exitCode: Number(process.exitCode ?? 1),
+                    }),
+              }),
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            emitError(
+              false,
+              { error: "wizard-error", message: msg },
+              { operationId, attemptId, startedAt },
+            );
+            process.exitCode = 1;
+          } finally {
+            handler.close?.();
+          }
+          return;
         }
-        // Otherwise (re-init state) fall through to existing --auto default.
-      }
-
-      // v1.G.4 — --wizard takes a dedicated branch; mutually exclusive
-      // with the existing auto/custom/discover/json modes (the wizard
-      // composes mesh+vault+federation init itself).
-      if (opts.wizard === true) {
-        if (
-          opts.auto === true ||
-          opts.custom === true ||
-          opts.discover === true ||
-          opts.json === true
-        ) {
-          emitError(false, {
-            error: "flag-conflict",
-            message:
-              "lyt init --wizard is mutually exclusive with --auto, --custom, --discover, and --json.",
-          });
+        // --dry-run is only valid with --wizard (the wizard branch returned
+        // above; reaching here means --dry-run was passed without --wizard).
+        if (opts.dryRun === true) {
+          emitError(
+            opts.json === true,
+            {
+              error: "flag-conflict",
+              message: "lyt init: --dry-run is only valid in combination with --wizard.",
+            },
+            { operationId, attemptId, startedAt },
+          );
           process.exitCode = 2;
           return;
         }
-        if (opts.dryRun !== true && process.stdin.isTTY !== true) {
-          emitError(false, {
-            error: "wizard-requires-tty",
-            message:
-              "lyt init --wizard requires an interactive terminal (or pass --dry-run for a non-TTY phase walk).",
-          });
+        // Flag conflict: --auto + --custom.
+        if (opts.auto === true && opts.custom === true) {
+          emitError(
+            opts.json === true,
+            {
+              error: "flag-conflict",
+              message:
+                "lyt init: --auto and --custom are mutually exclusive. Omit both (defaults to --auto), or pick one.",
+            },
+            { operationId, attemptId, startedAt },
+          );
+          process.exitCode = 2;
+          return;
+        }
+        // Flag conflict: --discover with prompts is nonsensical (read-only).
+        if (opts.discover === true && opts.custom === true) {
+          emitError(
+            opts.json === true,
+            {
+              error: "flag-conflict",
+              message:
+                "lyt init: --discover and --custom are mutually exclusive (--discover is read-only).",
+            },
+            { operationId, attemptId, startedAt },
+          );
+          process.exitCode = 2;
+          return;
+        }
+        // --custom requires a TTY (incl. JSON mode where prompts make no sense).
+        if (opts.custom === true && (process.stdin.isTTY !== true || opts.json === true)) {
+          emitError(
+            opts.json === true,
+            {
+              error: "custom-requires-tty",
+              message:
+                "lyt init --custom requires an interactive terminal and cannot be combined with --json.",
+            },
+            { operationId, attemptId, startedAt },
+          );
           process.exitCode = 3;
           return;
         }
-        // Under --dry-run, use a non-interactive default handler so the
-        // wizard can be smoke-tested without stdin. Real interactive runs
-        // use the readline-backed handler.
-        const handler: IPromptHandler & { close?: () => void } =
-          opts.dryRun === true ? makeDryRunDefaultsHandler() : new ReadlinePromptHandler();
-        try {
-          const result = await runWizard({
-            promptHandler: handler,
-            dryRun: opts.dryRun === true,
-          });
-          // F3 (console-DX): scannable setup-summary block — a header/footer rule
-          // + status glyphs (✓ done · ⊘ skipped · ✗ failed) replacing the flat
-          // `[ok] Phase N (name): msg` lines that had no visible start/end.
-          const summaryLines = [
-            "",
-            "── Setup summary ──────────────────────────────────",
-            ...result.phases.map((ph) => {
-              const glyph = ph.skipped === true ? "⊘" : ph.ok ? "✓" : "✗";
-              const num = String(ph.phase).padStart(2, " ");
-              return `  ${glyph} Phase ${num}  ${ph.name} — ${ph.message}`;
-            }),
-            "───────────────────────────────────────────────────",
-          ];
-          // eslint-disable-next-line no-console
-          console.log(summaryLines.join("\n"));
-          if (result.status !== "completed") {
-            // G1 (a review finding) — when the halt was a reconstruction with DROPPED
-            // vaults, surface the classified exit code (11 state-drift · 12
-            // owner-misresolved/bug) to the shell; otherwise a generic 1.
-            const adoptPhase = result.phases.find((ph) => ph.name === "adopt-pod");
-            process.exitCode = adoptPhase?.data?.reconstructExitCode ?? 1;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          emitError(false, { error: "wizard-error", message: msg });
-          process.exitCode = 1;
-        } finally {
-          handler.close?.();
-        }
-        return;
-      }
-      // --dry-run is only valid with --wizard (the wizard branch returned
-      // above; reaching here means --dry-run was passed without --wizard).
-      if (opts.dryRun === true) {
-        emitError(opts.json === true, {
-          error: "flag-conflict",
-          message: "lyt init: --dry-run is only valid in combination with --wizard.",
-        });
-        process.exitCode = 2;
-        return;
-      }
-      // Flag conflict: --auto + --custom.
-      if (opts.auto === true && opts.custom === true) {
-        emitError(opts.json === true, {
-          error: "flag-conflict",
-          message:
-            "lyt init: --auto and --custom are mutually exclusive. Omit both (defaults to --auto), or pick one.",
-        });
-        process.exitCode = 2;
-        return;
-      }
-      // Flag conflict: --discover with prompts is nonsensical (read-only).
-      if (opts.discover === true && opts.custom === true) {
-        emitError(opts.json === true, {
-          error: "flag-conflict",
-          message:
-            "lyt init: --discover and --custom are mutually exclusive (--discover is read-only).",
-        });
-        process.exitCode = 2;
-        return;
-      }
-      // --custom requires a TTY (incl. JSON mode where prompts make no sense).
-      if (opts.custom === true && (process.stdin.isTTY !== true || opts.json === true)) {
-        emitError(opts.json === true, {
-          error: "custom-requires-tty",
-          message:
-            "lyt init --custom requires an interactive terminal and cannot be combined with --json.",
-        });
-        process.exitCode = 3;
-        return;
-      }
 
-      const mode: InitBootstrapMode =
-        opts.discover === true ? "discover" : opts.custom === true ? "custom" : "auto";
+        const mode: InitBootstrapMode =
+          opts.discover === true ? "discover" : opts.custom === true ? "custom" : "auto";
 
-      // --custom three-prompt walkthrough (per the ratified default + federation-
-      // design §5:228-234; main vault name SKIPPED per naming-convention).
-      let customOverrides: InitBootstrapCustomOverrides | undefined;
-      if (mode === "custom") {
-        try {
-          customOverrides = await runCustomPrompts();
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          emitError(opts.json === true, {
-            error: "custom-prompt-error",
-            message: msg,
-          });
-          process.exitCode = 1;
-          return;
-        }
-      }
-
-      // v1.GP F7-followup — phase-spanning init spinner. Drive a persistent
-      // spinner across the WHOLE bootstrap so the surrounding sync work (mesh
-      // forge, vault scaffold, libSQL writes, git init, pod.yon write)
-      // no longer runs with a dead/frozen indicator. Active only for the
-      // human-output FRESH/auto path: --json stays escape-code-free + the
-      // discovery/re-init branches are fast read-only paths with no silent
-      // gap to cover. The spinner's onPhase re-labels + yields to the event
-      // loop at each boundary; per-op gh/git spinners deep in the flow defer
-      // to it (single-spinner invariant in util/spinner.ts). Cursor restored
-      // on stop() AND on throw via the finally below.
-      const useSpinner = opts.json !== true && mode !== "discover";
-      const spinner: PhaseSpinnerHandle | undefined = useSpinner ? startSpinner() : undefined;
-      const flowArgs: InitBootstrapArgs = {
-        mode,
-        // W1.2 heal on every `lyt init` bootstrap. The flow gates
-        // this to the fresh + re-init branches (discovery stays read-only),
-        // so a single `lyt init` re-aligns skills + agent manual + patterns.
-        // Wired ONLY at the command layer so flow/integration unit tests
-        // (which call initBootstrapFlow directly without `heal`) never write
-        // to the real ~/.claude / ~/.codex / ~/.agents.
-        heal: () => healPod(),
-        // Brief B (B.1) — materialize each vault into a publishable LOCAL state
-        // (git + initial commit + remote URL) and commit pod.yon, with push +
-        // gh-create HELD (push: false). Outward publish is the consented sync
-        // engine's job (B.2), triggered by the staged-HIL prompt (B.3). Wired
-        // ONLY here so flow/integration tests stay hermetic (no git subprocesses
-        // on temp vault dirs).
-        // in a local-first context (no gh provisional
-        // identity), hold the remote too (setRemote:false): the provisional
-        // handle must never land in a vault `origin` URL. Connect re-materializes
-        // with the real handle + setRemote:true.
-        materializePublish: (db) =>
-          materializePodLocal(db, { push: false, setRemote: !isLocalFirstContext() }),
-        refreshExistingPod: async (db) => {
-          const refreshed = await syncPodLedgerFlow({
-            registryDb: db,
-            push: false,
-            refreshOnly: true,
-          });
-          if (refreshed.status === "conflict" || refreshed.status === "error") {
-            throw new Error(`existing pod refresh failed: ${refreshed.reason ?? refreshed.status}`);
-          }
-          if (refreshed.status === "skipped") return;
-          const recovered = await recoverVaultsFromPodManifest({
-            handle: getHandleFromIdentity(),
-            registryDb: db,
-          });
-          const exitCode = reconstructionExitCode(recovered);
-          if (exitCode !== 0) {
-            throw new Error(
-              recovered.refusedReason ??
-                recovered.drops[0]?.reason ??
-                "pod manifest recovery was incomplete",
-            );
-          }
-        },
-        ...(customOverrides !== undefined ? { customOverrides } : {}),
-        ...(spinner !== undefined
-          ? {
-              onPhase: async (op: string, label: string): Promise<void> => {
-                spinner.phase(op as SpinnerOp, label);
-                // Yield so the render interval fires AT the boundary — the
-                // label + elapsed visibly advance even though frames can't
-                // animate inside a single blocking sync call.
-                await new Promise<void>((r) => setImmediate(r));
+        // --custom three-prompt walkthrough (per the ratified default + federation-
+        // design §5:228-234; main vault name SKIPPED per naming-convention).
+        let customOverrides: InitBootstrapCustomOverrides | undefined;
+        if (mode === "custom") {
+          try {
+            customOverrides = await runCustomPrompts();
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            emitError(
+              opts.json === true,
+              {
+                error: "custom-prompt-error",
+                message: msg,
               },
-            }
-          : {}),
-      };
+              { operationId, attemptId, startedAt },
+            );
+            process.exitCode = 1;
+            return;
+          }
+        }
 
-      try {
-        const result = await initBootstrapFlow(flowArgs);
-        // Stop the spanning spinner BEFORE printing the result/card so its
-        // teardown (clear-line + show-cursor) doesn't clobber the output.
-        spinner?.stop();
-        if (opts.json === true) {
-          emitJsonResult(result);
-        } else {
-          emitHumanResult(result);
-          // W1.2 — surface the heal summary (skills/manual/patterns realign).
-          if (result.heal !== undefined) {
-            // eslint-disable-next-line no-console
-            console.log(summarizeHeal(result.heal));
+        // v1.GP F7-followup — phase-spanning init spinner. Drive a persistent
+        // spinner across the WHOLE bootstrap so the surrounding sync work (mesh
+        // forge, vault scaffold, libSQL writes, git init, pod.yon write)
+        // no longer runs with a dead/frozen indicator. Active only for the
+        // human-output FRESH/auto path: --json stays escape-code-free + the
+        // discovery/re-init branches are fast read-only paths with no silent
+        // gap to cover. The spinner's onPhase re-labels + yields to the event
+        // loop at each boundary; per-op gh/git spinners deep in the flow defer
+        // to it (single-spinner invariant in util/spinner.ts). Cursor restored
+        // on stop() AND on throw via the finally below.
+        const useSpinner = opts.json !== true && mode !== "discover";
+        const spinner: PhaseSpinnerHandle | undefined = useSpinner ? startSpinner() : undefined;
+        const flowArgs: InitBootstrapArgs = {
+          mode,
+          // W1.2 heal on every `lyt init` bootstrap. The flow gates
+          // this to the fresh + re-init branches (discovery stays read-only),
+          // so a single `lyt init` re-aligns skills + agent manual + patterns.
+          // Wired ONLY at the command layer so flow/integration unit tests
+          // (which call initBootstrapFlow directly without `heal`) never write
+          // to the real ~/.claude / ~/.codex / ~/.agents.
+          heal: () => healPod(),
+          // Brief B (B.1) — materialize each vault into a publishable LOCAL state
+          // (git + initial commit + remote URL) and commit pod.yon, with push +
+          // gh-create HELD (push: false). Outward publish is the consented sync
+          // engine's job (B.2), triggered by the staged-HIL prompt (B.3). Wired
+          // ONLY here so flow/integration tests stay hermetic (no git subprocesses
+          // on temp vault dirs).
+          // in a local-first context (no gh provisional
+          // identity), hold the remote too (setRemote:false): the provisional
+          // handle must never land in a vault `origin` URL. Connect re-materializes
+          // during init; explicit scoped sync owns remote attachment.
+          refreshExistingPod: async (db) => {
+            const refreshed = await syncPodLedgerFlow({
+              registryDb: db,
+              push: false,
+              refreshOnly: true,
+            });
+            if (refreshed.status === "conflict" || refreshed.status === "error") {
+              throw new Error(
+                `existing pod refresh failed: ${refreshed.reason ?? refreshed.status}`,
+              );
+            }
+            if (refreshed.status === "skipped") return;
+            const recovered = await recoverVaultsFromPodManifest({
+              handle: getHandleFromIdentity(),
+              registryDb: db,
+            });
+            const exitCode = reconstructionExitCode(recovered);
+            if (exitCode !== 0) {
+              throw new Error(
+                recovered.refusedReason ??
+                  recovered.drops[0]?.reason ??
+                  "pod manifest recovery was incomplete",
+              );
+            }
+          },
+          ...(customOverrides !== undefined ? { customOverrides } : {}),
+          ...(spinner !== undefined
+            ? {
+                onPhase: async (op: string, label: string): Promise<void> => {
+                  spinner.phase(op as SpinnerOp, label);
+                  // Yield so the render interval fires AT the boundary — the
+                  // label + elapsed visibly advance even though frames can't
+                  // animate inside a single blocking sync call.
+                  await new Promise<void>((r) => setImmediate(r));
+                },
+              }
+            : {}),
+        };
+
+        try {
+          const result = await initBootstrapFlow(flowArgs);
+          // Stop the spanning spinner BEFORE printing the result/card so its
+          // teardown (clear-line + show-cursor) doesn't clobber the output.
+          spinner?.stop();
+          if (opts.json === true) {
+            emitJsonResult(result);
+          } else {
+            emitHumanResult(result);
+            // W1.2 — surface the heal summary (skills/manual/patterns realign).
+            if (result.heal !== undefined) {
+              // eslint-disable-next-line no-console
+              console.log(summarizeHeal(result.heal));
+            }
+            // WS2 — render the pod card at the end of `lyt init --auto` too
+            // (previously wizard-only). Fresh branch only.
+            if (result.branch === "fresh") {
+              emitAutoPodCard(result);
+            } else if (result.branch === "adopt" && result.adopt !== undefined) {
+              emitAdoptPodCard(result);
+            }
+            // Brief B (B.3) — staged-HIL publish prompt. After the honest
+            // (staged) card, ASK whether to publish now (default-Yes per the ratified default).
+            // On yes → the consented sync engine pushes pod + vaults. Outward
+            // effect ONLY behind this explicit consent.
+            console.error(
+              "Not published. Run `lyt sync` when you want to publish scoped vault changes.",
+            );
+            // Phase C (C4) — interactive-only embeddings offer on the
+            // `--custom` walkthrough. The offer gate self-suppresses when the
+            // model is already cached OR the invocation isn't interactive
+            // (isEmbeddingsInteractive), so this never prompts under --json / a
+            // non-TTY. Scoped to `--custom` only: `--auto` is non-interactive BY
+            // DEFINITION (F-C.1) and MUST NOT fetch or prompt → it never reaches
+            // this call. Accept → owned fetch; decline → enable-later hint (no
+            // persistence; Phase D owns decline-state).
+            // (We're in the non-JSON human branch, so json is always false here.)
+            if (mode === "custom") {
+              await maybeOfferEmbeddings(false);
+            }
+            // stay-current slice — after a successful init, nudge if this Lyt is
+            // behind. CACHE-ONLY: surfaces a fresh cached currency result (populated
+            // by a prior `outdated`/`doctor`) but NEVER probes the registry, so init
+            // stays strictly non-blocking + network-free. Silent when current /
+            // offline / no cache (a fresh install is current anyway).
+            const currency = await checkCurrency({ cacheOnly: true });
+            if (currency.stale) {
+              // eslint-disable-next-line no-console
+              console.log(`\nHeads up: ${formatCurrencyLine(currency)}`);
+            }
           }
-          // WS2 — render the pod card at the end of `lyt init --auto` too
-          // (previously wizard-only). Fresh branch only; the lyt-pod-map line
-          // is omitted because --auto does not generate a pod-map vault.
-          if (result.branch === "fresh") {
-            emitAutoPodCard(result);
-          } else if (result.branch === "adopt" && result.adopt !== undefined) {
-            emitAdoptPodCard(result);
+          // Re-init with ALL-failed integrity → exit 1 (matches v1.B.2
+          // skip-and-warn precedent + brief default).
+          if (
+            result.branch === "re-init" &&
+            result.integrityIssues !== undefined &&
+            result.integrityIssues.length > 0 &&
+            result.integrityIssues.every((i) => i.status !== "ok")
+          ) {
+            process.exitCode = 1;
           }
-          // Brief B (B.3) — staged-HIL publish prompt. After the honest
-          // (staged) card, ASK whether to publish now (default-Yes per the ratified default).
-          // On yes → the consented sync engine pushes pod + vaults. Outward
-          // effect ONLY behind this explicit consent.
-          await maybePromptAndPublish(result);
-          // Phase C (C4) — interactive-only embeddings offer on the
-          // `--custom` walkthrough. The offer gate self-suppresses when the
-          // model is already cached OR the invocation isn't interactive
-          // (isEmbeddingsInteractive), so this never prompts under --json / a
-          // non-TTY. Scoped to `--custom` only: `--auto` is non-interactive BY
-          // DEFINITION (F-C.1) and MUST NOT fetch or prompt → it never reaches
-          // this call. Accept → owned fetch; decline → enable-later hint (no
-          // persistence; Phase D owns decline-state).
-          // (We're in the non-JSON human branch, so json is always false here.)
-          if (mode === "custom") {
-            await maybeOfferEmbeddings(false);
+          // a review finding — adopt attempted but the clone failed: clean non-zero exit (the
+          // actionable error was already rendered by emitHumanResult/emitJsonResult).
+          if (result.branch === "adopt" && result.adoptError !== undefined) {
+            process.exitCode = 1;
           }
-          // stay-current slice — after a successful init, nudge if this Lyt is
-          // behind. CACHE-ONLY: surfaces a fresh cached currency result (populated
-          // by a prior `outdated`/`doctor`) but NEVER probes the registry, so init
-          // stays strictly non-blocking + network-free. Silent when current /
-          // offline / no cache (a fresh install is current anyway).
-          const currency = await checkCurrency({ cacheOnly: true });
-          if (currency.stale) {
-            // eslint-disable-next-line no-console
-            console.log(`\nHeads up: ${formatCurrencyLine(currency)}`);
+          // A structured adopt result can still be semantically incomplete. Carry
+          // the recover-pod classification to the actual process exit while leaving
+          // JSON on stdout complete and parseable (11 state drift, 12 owner bug,
+          // 13 refused manifest).
+          if (result.branch === "adopt" && result.adopt !== undefined) {
+            const exitCode = initBootstrapSemanticExitCode(result);
+            if (exitCode !== 0) process.exitCode = exitCode;
           }
+          emitRootInitReceipt(
+            receiptForBootstrapResult({
+              result,
+              operationId,
+              attemptId,
+              startedAt,
+              mode,
+              exitCode: Number(process.exitCode ?? 0),
+            }),
+          );
+        } catch (err) {
+          // Restore the cursor + clear the spinner line before the error path.
+          spinner?.stop();
+          const message = err instanceof Error ? err.message : String(err);
+          emitError(
+            opts.json === true,
+            {
+              error: "init-bootstrap-error",
+              message,
+            },
+            { operationId, attemptId, startedAt },
+          );
+          process.exitCode = 2;
         }
-        // Re-init with ALL-failed integrity → exit 1 (matches v1.B.2
-        // skip-and-warn precedent + brief default).
-        if (
-          result.branch === "re-init" &&
-          result.integrityIssues !== undefined &&
-          result.integrityIssues.length > 0 &&
-          result.integrityIssues.every((i) => i.status !== "ok")
-        ) {
-          process.exitCode = 1;
-        }
-        // a review finding — adopt attempted but the clone failed: clean non-zero exit (the
-        // actionable error was already rendered by emitHumanResult/emitJsonResult).
-        if (result.branch === "adopt" && result.adoptError !== undefined) {
-          process.exitCode = 1;
-        }
-        // A structured adopt result can still be semantically incomplete. Carry
-        // the recover-pod classification to the actual process exit while leaving
-        // JSON on stdout complete and parseable (11 state drift, 12 owner bug,
-        // 13 refused manifest).
-        if (result.branch === "adopt" && result.adopt !== undefined) {
-          const exitCode = initBootstrapSemanticExitCode(result);
-          if (exitCode !== 0) process.exitCode = exitCode;
-        }
-      } catch (err) {
-        // Restore the cursor + clear the spinner line before the error path.
-        spinner?.stop();
-        const message = err instanceof Error ? err.message : String(err);
-        emitError(opts.json === true, {
-          error: "init-bootstrap-error",
-          message,
-        });
-        process.exitCode = 2;
+      } finally {
+        console.log = originalLog;
       }
     });
 }
@@ -734,10 +856,7 @@ function emitHumanResult(res: InitBootstrapResult): void {
 // Mirrors the wizard's emitPodCard sourcing but for the bootstrap result:
 // pod repo full name + local path come from the federation chokepoint
 // (res.federation), the mesh + main-vault row from res.meshAssignment. The
-// lyt-pod-map line is OMITTED because `--auto` does not generate a pod-map
-// vault (only the wizard's P11 does) — PodCardData simply leaves
-// podMapVaultPath unset so renderPodCard skips that block. Best-effort: a
-// missing federation (no handle) skips the card (the warn line already
+// Best-effort: a missing federation (no handle) skips the card (the warn line already
 // printed by emitHumanResult covers that case).
 function emitAutoPodCard(res: InitBootstrapResult): void {
   const fed = res.federation;
@@ -757,7 +876,7 @@ function emitAutoPodCard(res: InitBootstrapResult): void {
     hyperlinksEnabled: process.stdout.isTTY === true,
     // Brief B (B.3) — init materializes LOCALLY (push held); the card is honest
     // that the pod is staged, not published, and points at `lyt sync`. The HIL
-    // publish prompt (maybePromptAndPublish) runs after the card.
+    // explicit scoped sync remains the sole publication owner.
     // a no-gh provisional pod is "local-only" (NOT
     // connected), a stronger honesty than "staged" (which implies gh is wired).
     publishState: isLocalFirstContext() ? "local-only" : "staged",
@@ -802,85 +921,6 @@ function emitAdoptPodCard(res: InitBootstrapResult): void {
   console.log(renderNextSteps({ unpublished: true }));
   // eslint-disable-next-line no-console
   console.log("");
-}
-
-// Brief B (B.3) — the staged-HIL publish prompt. Runs after the honest card on
-// the fresh + re-init human paths. Default-Yes ([Y/n]) per the ratified default: publishing is
-// the expected end-state and the prompt itself is the explicit consent (no
-// surprise push). On yes → the B.2 reconcile engine (push=true) does the outward
-// gh-create + push, resumable via the outbox. Non-interactive (no TTY) leaves
-// the pod staged + prints the honest `lyt sync` nudge (never blocks on stdin).
-async function maybePromptAndPublish(res: InitBootstrapResult): Promise<void> {
-  const pub = res.publish;
-  if (pub === undefined || pub.skipped) return; // no pod / nothing materialized
-
-  // a local-first (no-gh provisional) pod has no gh to
-  // publish to; the publish prompt would fail. Connect is `lyt sync`'s job (the
-  // self-heal). Nudge there instead of prompting to publish.
-  if (isLocalFirstContext()) {
-    // eslint-disable-next-line no-console
-    console.log(
-      "\nYour pod is local-only (not connected to GitHub). Run `lyt sync` to connect + back it up.",
-    );
-    return;
-  }
-
-  const vaultCount = pub.vaults.filter((v) => !v.skipped).length;
-
-  if (process.stdin.isTTY !== true) {
-    // eslint-disable-next-line no-console
-    console.log(
-      "\nYour pod is staged locally (not published). Run `lyt sync` to publish it to GitHub.",
-    );
-    return;
-  }
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  let yes: boolean;
-  try {
-    const ans = (
-      await rl.question(
-        `\nPublish your pod to GitHub now? (pushes your pod + ${vaultCount} vault repo(s)) [Y/n]: `,
-      )
-    )
-      .trim()
-      .toLowerCase();
-    // default-Yes: empty (Enter) or y/yes → publish.
-    yes = ans === "" || ans === "y" || ans === "yes";
-  } finally {
-    rl.close();
-  }
-
-  if (!yes) {
-    // eslint-disable-next-line no-console
-    console.log("Staged. Run `lyt sync` when you're ready to publish to GitHub.");
-    return;
-  }
-
-  // eslint-disable-next-line no-console
-  console.log("Publishing your pod to GitHub…");
-  const result = await reconcilePublishFlow({ push: true });
-  if (result.skipped) {
-    // eslint-disable-next-line no-console
-    console.log(`Publish skipped — ${result.reason ?? "no pod"}.`);
-    return;
-  }
-  const pushed = result.vaultOutcomes.filter((o) => o.pushed).length;
-  if (result.ok) {
-    // eslint-disable-next-line no-console
-    console.log(`✓ Published to GitHub — ${pushed} vault repo(s) + your pod.`);
-  } else {
-    // eslint-disable-next-line no-console
-    console.log(
-      `⚠ Partial publish — ${pushed} vault(s) pushed; ${result.outboxRemaining} op(s) pending. Re-run \`lyt sync\` to finish (resumable, no data lost).`,
-    );
-    for (const o of result.vaultOutcomes) {
-      if (o.status === "conflict" || o.status === "failed") {
-        // eslint-disable-next-line no-console
-        console.log(`  ${o.status}: ${o.vaultName} — ${o.message}`);
-      }
-    }
-  }
 }
 
 // Phase C (C4) — the `--custom`-path interactive embeddings offer. Wraps
@@ -932,7 +972,9 @@ async function maybeOfferEmbeddings(json: boolean): Promise<void> {
         // Only when we have a live registry (the inert-seam default path, where
         // registryDb is undefined, keeps its no-persistence behavior).
         ...(registryDb !== undefined
-          ? { onSurfaced: async () => void (await markAsked(registryDb!, new Date().toISOString())) }
+          ? {
+              onSurfaced: async () => void (await markAsked(registryDb!, new Date().toISOString())),
+            }
           : {}),
       });
     } finally {
@@ -987,12 +1029,196 @@ function isLocalFirstContext(): boolean {
   }
 }
 
-function emitError(json: boolean, body: Record<string, unknown>): void {
-  if (json) {
-    // eslint-disable-next-line no-console
-    console.error(JSON.stringify(body, null, 2));
-  } else {
-    // eslint-disable-next-line no-console
-    console.error(`lyt init: ${String(body["message"] ?? body["error"])}`);
+function receiptForBootstrapResult(args: {
+  result: InitBootstrapResult;
+  operationId: string;
+  attemptId: string;
+  startedAt: string;
+  mode: InitBootstrapMode;
+  exitCode: number;
+}): ReceiptV1 {
+  const creation = args.result.creation;
+  const publish = args.result.publish;
+  const materialized = publish?.vaults.filter((vault) => !vault.skipped).length ?? 0;
+  const local =
+    creation === undefined
+      ? (publish?.podCommitted === true ? 1 : 0) +
+        materialized +
+        (args.result.reconciledVaultPaths?.length ?? 0)
+      : creationLocalMutationCount(creation.mutations);
+  const failed = args.exitCode !== 0;
+  const status = failed ? (local > 0 ? "partial" : "failed") : local > 0 ? "success" : "no-op";
+  return makeRootInitReceipt({
+    operationId:
+      creation === undefined
+        ? args.operationId
+        : uuid7BytesToDashedString(Buffer.from(creation.plan.intended_effects.operation_id, "hex")),
+    attemptId: creation?.plan.attempt.attempt_id ?? args.attemptId,
+    startedAt: args.startedAt,
+    logicalKey: creation?.plan.logical_replay_key ?? {
+      mode: args.mode,
+      branch: args.result.branch,
+    },
+    status,
+    local,
+    branch: args.result.branch,
+    vaultCount: creation?.plan.intended_effects.vaults.length ?? materialized,
+    ...(creation === undefined ? {} : { creation }),
+    ...(failed
+      ? {
+          error: {
+            code: "init-incomplete",
+            summary: "Lyt initialization did not complete.",
+            retryable: true,
+          },
+          next: {
+            code: "resume-lyt-init",
+            summary: "Inspect the reported state and rerun lyt init.",
+          },
+          exitCode: args.exitCode,
+        }
+      : {}),
+  });
+}
+
+function makeRootInitReceipt(args: {
+  operation?: "lyt-init" | "cli-parse";
+  operationId: string;
+  attemptId: string;
+  startedAt: string;
+  logicalKey: unknown;
+  status: "success" | "no-op" | "refused" | "partial" | "failed";
+  local: number;
+  branch?: string;
+  vaultCount?: number;
+  creation?: NonNullable<InitBootstrapResult["creation"]>;
+  error?: { code: string; summary: string; retryable: boolean };
+  next?: { code: string; summary: string };
+  exitCode?: number;
+}): ReceiptV1 {
+  const refused = args.status === "refused";
+  const after: ReceiptV1["evidence"]["after"] = [];
+  if (args.branch) after.push({ kind: "init-branch", subject: args.branch });
+  if ((args.vaultCount ?? 0) > 0) {
+    after.push({
+      kind: "creation-scope",
+      subject: "locally materialized creation scope",
+      count: args.vaultCount,
+    });
   }
+  if (args.creation !== undefined) {
+    after.push({
+      kind: "creation-plan",
+      subject: args.creation.plan.logical_replay_key,
+    });
+    after.push({
+      kind: "creation-checkpoints",
+      subject: "repository-qualified creation checkpoint evidence",
+      digest: creationCheckpointPathDigest(args.creation.mutations),
+      count: args.creation.mutations.checkpointRepositories.length,
+    });
+    if (args.creation.plan.children.length > 0) {
+      after.push({
+        kind: "creation-children",
+        subject: "bound child creation plans",
+        digest: createHash("sha256")
+          .update(
+            JSON.stringify(
+              args.creation.plan.children.map((child) => child.logical_replay_key).sort(),
+            ),
+          )
+          .digest("hex"),
+        count: args.creation.plan.children.length,
+      });
+    }
+  }
+  after.push({ kind: "publication", subject: "not-published" });
+  after.push({ kind: "next-sync", subject: "lyt sync" });
+  return parseReceiptV1ForEmission({
+    schema_id: "lyt.receipt",
+    schema_version: { major: 1, minor: 0 },
+    operation_id: args.operationId,
+    attempt_id: args.attemptId,
+    operation: args.operation ?? "lyt-init",
+    scope: { kind: "system" },
+    timestamps: { started_at: args.startedAt, finished_at: new Date().toISOString() },
+    replay: {
+      disposition: refused ? "rejected" : "new",
+      // A child CreationPlan already owns the opaque replay digest. Preserve it
+      // directly; hashing a hash produces a different operation identity.
+      key_digest:
+        typeof args.logicalKey === "string" && /^sha256:[a-f0-9]{64}$/i.test(args.logicalKey)
+          ? args.logicalKey.slice("sha256:".length).toLowerCase()
+          : createHash("sha256").update(JSON.stringify(args.logicalKey)).digest("hex"),
+    },
+    status: args.status,
+    exit_code: args.exitCode ?? (args.status === "success" || args.status === "no-op" ? 0 : 2),
+    mutations: { local: args.local, remote: 0 },
+    evidence: { before: [], after },
+    next_action: args.next ?? null,
+    error: args.error ?? null,
+  });
+}
+
+export function makeRootCliParseReceipt(): ReceiptV1 {
+  const operationId = uuid7BytesToDashedString(newUuidv7Bytes());
+  const attemptId = uuid7BytesToDashedString(newUuidv7Bytes());
+  return makeRootInitReceipt({
+    operation: "cli-parse",
+    operationId,
+    attemptId,
+    startedAt: new Date().toISOString(),
+    logicalKey: { command: "lyt", outcome: "parser-refusal" },
+    status: "refused",
+    local: 0,
+    error: {
+      code: "invalid-cli-arguments",
+      summary: "Lyt command arguments were refused.",
+      retryable: false,
+    },
+    next: {
+      code: "correct-cli-arguments",
+      summary: "Correct the command arguments and retry.",
+    },
+    exitCode: 2,
+  });
+}
+
+function emitRootInitReceipt(receipt: ReceiptV1): void {
+  process.stdout.write(`${JSON.stringify(receipt)}\n`);
+}
+
+function emitError(
+  json: boolean,
+  body: Record<string, unknown>,
+  identity?: { operationId: string; attemptId: string; startedAt: string },
+): void {
+  const message = String(body["message"] ?? body["error"] ?? "Lyt initialization failed.");
+  // eslint-disable-next-line no-console
+  console.error(json ? JSON.stringify(body) : `lyt init: ${message}`);
+  const operationId = identity?.operationId ?? uuid7BytesToDashedString(newUuidv7Bytes());
+  const attemptId = identity?.attemptId ?? uuid7BytesToDashedString(newUuidv7Bytes());
+  const code = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(String(body["error"]))
+    ? String(body["error"])
+    : "lyt-init-refused";
+  emitRootInitReceipt(
+    makeRootInitReceipt({
+      operationId,
+      attemptId,
+      startedAt: identity?.startedAt ?? new Date().toISOString(),
+      logicalKey: { error: code },
+      status: "refused",
+      local: 0,
+      error: {
+        code,
+        summary: "Lyt initialization request was refused.",
+        retryable: false,
+      },
+      next: {
+        code: "correct-lyt-init",
+        summary: "Correct the reported init arguments and retry.",
+      },
+      exitCode: Number(process.exitCode ?? 2) || 2,
+    }),
+  );
 }

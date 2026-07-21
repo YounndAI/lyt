@@ -1,13 +1,14 @@
 # `lyt help skills` — Lyt harness skills
 
-> Skills are agent-facing wrappers around `lyt pattern run`. They ship in `@younndai/lyt-skills` and install into the user's agent harness (Claude Code: `~/.claude/skills/`; Codex: `~/.codex/skills/`; agents-compatible harnesses: `~/.agents/skills/`). Each skill is a directory with a `SKILL.md` frontmatter file the harness loads on startup.
+> Skills are focused agent-facing guides over supported Lyt CLI routes. Pattern-backed skills use `lyt pattern run`; lifecycle and inspection skills call their CLI verbs directly. They ship in `@younndai/lyt-skills` and install into the user's agent harness (Claude Code: `~/.claude/skills/`; Codex: `~/.codex/skills/`; agents-compatible harnesses: `~/.agents/skills/`).
 
 ---
 
-## The 11 default skills
+## The 12 default skills
 
 | Skill                 | Wraps                          | What it does                                |
 | --------------------- | ------------------------------ | ------------------------------------------- |
+| `/lyt-create`         | `lyt mesh init` + `vault init` | Create a mesh or vault; return Receipt V1   |
 | `/lyt-capture`        | knowledge-capture + capture    | Save a Figment to `<vault>/notes/`          |
 | `/lyt-recall`         | `lyt search --vault`           | Ranked search within a single vault         |
 | `/lyt-search`         | `lyt search`                   | Ranked search across the pod / mesh / vault |
@@ -16,7 +17,7 @@
 | `/lyt-alias`          | `lyt alias`                    | Manage pod-local vault aliases (name → rid) |
 | `/lyt-primer-context` | `lyt primer` + `vault info`    | Prime an agent with vault/mesh/pod context  |
 | `/lyt-sync`           | gated git pull/commit/push     | Sync a vault under the writable gate        |
-| `/lyt-adopt`          | `lyt vault adopt`              | Bring an existing Obsidian vault into pod   |
+| `/lyt-adopt`          | `lyt vault adopt`              | Bring an existing markdown vault into pod   |
 | `/lyt-update`         | `lyt outdated` + `lyt update`  | Check for + install a newer Lyt release     |
 | `/lyt-pattern`        | meta — manages `lyt pattern *` | Direct verb invocation + pattern management |
 
@@ -33,6 +34,7 @@ lyt skills list --runtime codex --json
 lyt skills install
 lyt skills install lyt-capture lyt-search --runtime codex
 lyt skills install --runtime all --copy --force --json
+lyt install reconcile --apply --json
 ```
 
 `lyt skills list` reports the bundled skills and their state in each requested runtime. `lyt skills install` with no names installs all bundled skills; pass one or more exact names to install only that selection. An unknown name exits nonzero and prints the valid names.
@@ -52,6 +54,11 @@ Exit behavior is stable and independent of human or JSON output:
 - `4` — the target exists but is neither a directory nor a symlink, so Lyt refuses to touch it.
 
 After install, the harness picks up new skills on next session start.
+During `lyt update`, the old binary stages a sealed operation, installs the
+candidate, and launches the new binary's reconciliation. Consume its Receipt
+and any non-null resume action, then run `lyt doctor --json` and start a fresh
+agent session. Standalone `lyt install reconcile` inspects managed skills and
+manuals; it is read-only unless `--apply` is supplied and does not replace the CLI.
 
 ---
 
@@ -77,7 +84,7 @@ user: /lyt-capture
   │
   ▼ CLI writes the file
   │
-  ▼ skill confirms to user; user opens the file in Obsidian to fill body
+  ▼ skill confirms to user; user opens the file in their markdown editor
 ```
 
 ---
@@ -120,7 +127,7 @@ The harness reads `name` to register the slash command, `description` to compute
 
 If two skills declare the same `name`, the harness's behavior depends on its lookup order (Claude Code: alphabetical by directory name). For Lyt-specific patterns:
 
-- The 11 default skills ship with names `lyt-*` to avoid colliding with user-installed skills.
+- The 12 default skills ship with names `lyt-*` to avoid colliding with user-installed skills.
 - A user installing a pattern whose verb name matches a built-in (e.g., a second pattern's `capture` verb) will have the second skill auto-generated as `/lyt-<pattern-id>-capture` to avoid clobbering `/lyt-capture`.
 
-See also: `lyt help patterns` for the verb infrastructure these skills wrap.
+See also: `lyt help patterns` for the verb infrastructure used by pattern-backed workflows.

@@ -14,22 +14,26 @@
  * limitations under the License.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import * as lytVaultSourceBridge from "@younndai/lyt-vault";
 import {
   buildVaultCommitMessage,
-  classifyPorcelainLine,
   closeRegistry,
   deriveWriteGate,
+  GIT_READ_ONLY_POLICY,
   GitRemoteProvider,
   getHandleFromIdentity,
+  getVaultByRid,
   isAccessRemoved,
   isConfigPath,
   isFigmentPath,
   isLytDbCorrupt,
   isPermissionDeniedPush,
   listMeshes,
+  listFederationStates,
   migrateVaultGitignoreIndexRule,
   listSubscriptionsForMesh,
   listVaults,
@@ -37,6 +41,9 @@ import {
   narrateAccessRemoved,
   normalizeGitHubRepoCoordinate,
   openRegistry,
+  observePublicationPermission,
+  parseFederationYon,
+  withCanonicalVaultPublicationAttempt,
   readFigmentTitle,
   readFrozenLock,
   realIdentityRunner,
@@ -57,7 +64,27 @@ import {
   type RemoteProvider,
   type SyncHorizon,
   type VaultRow,
+  type PublicationPermissionObserver,
+  type CanonicalVaultPublicationAuthority,
+  type PushTarget,
+  type PullTarget,
 } from "@younndai/lyt-vault";
+
+// Structural source-wave bridge: mesh typechecks against the last built vault
+// declaration, while runtime/tests resolve the current vault source.
+const inspectWindowsGitPath = (
+  lytVaultSourceBridge as typeof lytVaultSourceBridge & {
+    inspectWindowsGitPath(
+      root: string,
+      relativePath: string,
+    ): {
+      readonly ok: boolean;
+      readonly requiresGitLongPaths: boolean;
+      readonly fullPathLength: number;
+      readonly refusal?: { readonly code: string };
+    };
+  }
+).inspectWindowsGitPath;
 
 // Increment 1 · Phase A.4 — the sync flow emits a SyncOperation per pushing
 // vault so its reversibility horizon is read back from the ACTUAL push result.
@@ -110,20 +137,24 @@ export interface ConflictContext {
  * (programmatic callers / legacy tests), the flow preserves its pre-A1 behavior:
  * abort + a plain `conflict` report.
  */
-export type ConflictResolver = (
-  ctx: ConflictContext,
-) => ConflictChoice | Promise<ConflictChoice>;
+export type ConflictResolver = (ctx: ConflictContext) => ConflictChoice | Promise<ConflictChoice>;
 
 export interface VaultSyncReport {
   name: string;
   path: string;
   status: VaultSyncStatus;
   message: string;
+  /** Local housekeeping changed tracked Lyt state after this vault's publication pass. */
+  pendingLytMutation?: boolean;
   ahead?: number;
   behind?: number;
   dirtyCount?: number;
   meshContextResolved?: boolean;
   errorOutput?: string;
+  /** A bounded, control-escaped refusal proving why Lyt did not stage this batch. */
+  pathRefusal?: SyncPathRefusalEvidence;
+  /** False means this sync invocation did not mutate the Git index. */
+  staged?: false;
   // v1.C.2 — true when this vault is referenced by at least one
   // @MESH_SUBSCRIPTION row in some registered mesh's mesh.yon (i.e. the
   // vault is BOTH home in its own mesh AND a subscription target from
@@ -163,6 +194,25 @@ export interface VaultSyncReport {
   // the plain keep-mine/theirs/both choice (absent when there was no conflict, or
   // when no resolver was supplied and the legacy `conflict` report was returned).
   conflictResolution?: ConflictChoice;
+  /** Local terminal events not yet confirmed present on the online copy. */
+  pendingPublication?: number;
+  /** Latest local event includes pending; latest published reads tracked SoT only. */
+  latestLocalSync?: string;
+  latestPublishedSync?: string;
+  /** Provenance failures never relabel the actual sync outcome. */
+  syncProvenanceWarning?: string;
+  podAlias?: string | null;
+  lastSyncMachineId?: string;
+  lastSyncMachineAlias?: string | null;
+  lastSyncAccount?: string | null;
+}
+
+export interface SyncPathRefusalEvidence {
+  readonly code: string;
+  readonly path: string;
+  readonly pathLength: number;
+  readonly fullPathLength: number;
+  readonly requiresGitLongPaths: boolean;
 }
 
 export interface SyncFrictionHint {
@@ -182,6 +232,8 @@ export type GitRunner = (args: readonly string[], opts: GitRunOptions) => Promis
 
 export interface SyncFlowArgs {
   vaultNames?: readonly string[];
+  /** Exact registry identities to sync. Preferred over display names for scoped work. */
+  vaultRids?: readonly string[];
   resolveMeshContext?: boolean;
   runGit?: GitRunner;
   now?: Date;
@@ -215,19 +267,116 @@ export interface SyncFlowArgs {
   ghAuthOk?: () => boolean | null;
   /** local-only saves writable local work and never touches a network seam. */
   networkMode?: "online" | "local-only";
-  /** Expected GitHub owner/repo for guarded online syncs, keyed by canonical vault name. */
-  expectedOriginByVault?: Readonly<Record<string, string>>;
+  /**
+   * Deprecated compatibility marker. Online work is always authority-gated;
+   * setting this to false no longer restores implicit publication authority.
+   */
+  enforceOnlineAuthority?: boolean;
+  /** Canonical online authority keyed only by stable vault RID hex. */
+  onlineAuthorityByVaultRid?: Readonly<Record<string, SyncOnlineVaultAuthority>>;
+  permissionObserver?: PublicationPermissionObserver;
+  permissionAttemptId?: string;
+}
+
+export interface SyncPublicationAuthority {
+  actor: string;
+  target: string;
+  repository: string;
+  vaultRid: Uint8Array;
+  podRid: string;
+  podRoot?: string;
+  policy: CanonicalVaultPublicationAuthority;
+}
+
+// Structural source-wave bridge: lyt-mesh typechecks against the last built
+// lyt-vault declaration, while runtime/tests resolve the current source.
+interface PublicationAttemptContext {
+  runOutwardChild<T>(child: () => Promise<T>): Promise<T>;
+}
+
+export interface SyncOnlineVaultAuthority {
+  expectedOrigin: string;
+  publication: SyncPublicationAuthority;
 }
 
 const MESH_CONTEXT_PATH = ".lyt/mesh-context.md";
 
+interface ProvenanceBridge {
+  acknowledgePromotedSyncProvenance(vaultPath: string, eventIds: readonly string[]): void;
+  getMachineId(): string;
+  getIdentity(): string;
+  getFederationRoot(): string;
+  housekeepFlow(args: { vaultRid: string; ledger: "sync"; machineId: string }): Promise<unknown>;
+  getSyncProvenanceStatus(vaultPath: string): {
+    pendingPublication: number;
+    degradedPending: number;
+    latestLocalSync: {
+      timestamp: string;
+      machineId: string;
+      alias: string | null;
+      account: string | null;
+      podAlias: string | null;
+    } | null;
+    latestPublishedSync: { timestamp: string } | null;
+  };
+  promotePendingSyncProvenance(vaultPath: string, machineId: string): string[];
+  ensureSyncProvenancePendingIgnored(vaultPath: string): unknown;
+  sanitizeSyncProvenanceText(value: string): string;
+  queueSyncProvenance(args: {
+    vaultPath: string;
+    podRid: string;
+    vaultRid: string;
+    machineId: string;
+    podAlias?: string | null;
+    alias: string | null;
+    account: string | null;
+    timestamp?: string;
+    outcome: string;
+    details: string;
+  }): unknown;
+  readCurrentMachine(
+    podRoot?: string,
+    machineId?: string,
+  ): {
+    alias: string;
+    accountIdentity: string | null;
+  } | null;
+  registerCurrentMachine(args?: { accountIdentity?: string; podRoot?: string }): {
+    alias: string;
+    accountIdentity: string | null;
+  };
+  recordCurrentMachineSyncSuccess(args?: {
+    accountIdentity?: string;
+    machineId?: string;
+    podRoot?: string;
+  }): unknown;
+  readPodIdentity(podRoot: string): { podAlias?: string; podRid?: string } | null;
+  readPodAlias(podRoot: string, podRid: string): { alias: string } | null;
+  readSyncProvenance(
+    vaultPath: string,
+  ): Array<{ machineId: string; hlc: { wallMs: number; counter: number }; seq: number }>;
+  appendSyncObserved(args: {
+    podRoot?: string;
+    vaultRid: string;
+    sourceMachineId: string;
+    throughHlc: { wallMs: number; counter: number };
+    throughSeq: number;
+  }): unknown;
+}
+
+const provenance = lytVaultSourceBridge as typeof lytVaultSourceBridge & ProvenanceBridge;
+
 export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult> {
   const runGit = args.runGit ?? defaultRunGit;
   const networkMode = args.networkMode ?? "online";
+  if (networkMode === "online" && args.onlineAuthorityByVaultRid === undefined) {
+    throw new Error(
+      'Online sync requires canonical publication authority; pass networkMode: "local-only" for no-publish work.',
+    );
+  }
   // Increment 1 · Phase A.4 — the git-remote port. Default wraps the SAME runGit
   // seam, so behavior is unchanged when no fake is injected.
-  const remote =
-    networkMode === "online" ? (args.remote ?? new GitRemoteProvider(runGit)) : null;
+  const remote = networkMode === "online" ? (args.remote ?? new GitRemoteProvider(runGit)) : null;
   const now = args.now ?? new Date();
   // A6-1 (0.12.0 Phase D fix-pass) — the gh-auth verdict, consulted only on a
   // fetch-404 to distinguish a genuine revoke from an unauthed/expired 404.
@@ -237,6 +386,7 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       : () => null;
   const db = await openRegistry();
   let candidates: VaultRow[];
+  let podRid: string | null = null;
   // v1.C.2 — derive the set of subscribed-vault rids across all
   // registered meshes BEFORE iterating, so each report can be tagged
   // with `subscribed: true` when applicable. Subscribed vaults are
@@ -262,10 +412,14 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
   const readOnlyRidHexes = new Set<string>();
   try {
     const all = await listVaults(db);
+    const federationStates = await listFederationStates(db);
+    podRid = federationStates.length === 1 ? federationStates[0]!.fedRidHex : null;
     candidates =
-      args.vaultNames && args.vaultNames.length > 0
-        ? all.filter((v) => args.vaultNames!.includes(v.name))
-        : all;
+      args.vaultRids !== undefined
+        ? all.filter((v) => args.vaultRids!.includes(v.ridHex))
+        : args.vaultNames && args.vaultNames.length > 0
+          ? all.filter((v) => args.vaultNames!.includes(v.name))
+          : all;
     const meshes = await listMeshes(db);
     for (const m of meshes) {
       const subs = await listSubscriptionsForMesh(db, m.rid);
@@ -275,7 +429,8 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     }
     for (const v of candidates) {
       const ridHex = uuid7BytesToHex(v.rid);
-      if (networkMode === "local-only") {
+      const policyOnline = networkMode === "online" && authorityForVault(args, v) !== undefined;
+      if (!policyOnline) {
         if (subscribedRidHexes.has(ridHex)) readOnlyRidHexes.add(ridHex);
         continue;
       }
@@ -287,21 +442,213 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
   }
 
   const reports: VaultSyncReport[] = [];
+  let machine: { machineId: string; alias: string | null; account: string | null } | null = null;
+  const podRoot = resolveProvenPodRoot(podRid);
+  try {
+    if (podRoot === null) throw new Error("pod identity is not materialized");
+    const machineId = provenance.getMachineId();
+    let account: string | null = null;
+    try {
+      account = provenance.getIdentity();
+    } catch {
+      // Machine presence is local pod state and must not depend on forge auth.
+    }
+    const current = provenance.registerCurrentMachine(
+      account === null ? { podRoot } : { accountIdentity: account, podRoot },
+    );
+    machine = { machineId, alias: current.alias, account: current.accountIdentity };
+  } catch {
+    // Per-vault reports surface the inability to record; sync behavior is unchanged.
+  }
   for (const v of candidates) {
     const ridHex = uuid7BytesToHex(v.rid);
-    const report = await syncOneVault(
-      v,
-      runGit,
-      remote,
-      now,
-      args.resolveMeshContext === true,
-      args.message,
-      readOnlyRidHexes.has(ridHex),
-      args.resolveConflict,
-      ghAuthOk,
-      networkMode,
-      args.expectedOriginByVault?.[v.name],
-    );
+    const onlineAuthority = authorityForVault(args, v);
+    const vaultNetworkMode =
+      networkMode === "online" && onlineAuthority !== undefined ? "online" : "local-only";
+    let promotedEventIds: string[] = [];
+    let hadNonProvenanceChanges = false;
+    let provenanceWarning: string | undefined;
+    let report: VaultSyncReport;
+    try {
+      report = await syncOneVault(
+        v,
+        runGit,
+        remote,
+        now,
+        args.resolveMeshContext === true,
+        args.message,
+        readOnlyRidHexes.has(ridHex),
+        args.resolveConflict,
+        ghAuthOk,
+        vaultNetworkMode,
+        onlineAuthority?.expectedOrigin,
+        onlineAuthority?.publication,
+        args.permissionObserver ?? observePublicationPermission,
+        args.permissionAttemptId ?? randomUUID(),
+        false,
+        undefined,
+        machine === null || podRid === null
+          ? undefined
+          : async () => {
+              try {
+                const before = await readPorcelainStatus(runGit, v.path);
+                hadNonProvenanceChanges = before.some((record) =>
+                  porcelainPaths([record]).some(
+                    (path) => !path.replaceAll("\\", "/").startsWith(".lyt/ledgers/sync/"),
+                  ),
+                );
+                provenance.ensureSyncProvenancePendingIgnored(v.path);
+                await provenance.housekeepFlow({
+                  vaultRid: ridHex,
+                  ledger: "sync",
+                  machineId: machine!.machineId,
+                });
+                if (vaultNetworkMode === "online") {
+                  promotedEventIds = provenance.promotePendingSyncProvenance(
+                    v.path,
+                    machine!.machineId,
+                  );
+                }
+              } catch (err) {
+                provenanceWarning = `Could not prepare pending sync provenance: ${safeProvenanceError(err)}`;
+              }
+            },
+      );
+    } catch (error) {
+      if (machine !== null && podRid !== null) {
+        try {
+          provenance.queueSyncProvenance({
+            vaultPath: v.path,
+            podRid,
+            vaultRid: ridHex,
+            machineId: machine.machineId,
+            podAlias:
+              provenance.readPodAlias(
+                onlineAuthority?.publication.podRoot ?? provenance.getFederationRoot(),
+                podRid,
+              )?.alias ?? null,
+            alias: machine.alias,
+            account: machine.account,
+            timestamp: new Date().toISOString(),
+            outcome: "error",
+            details: JSON.stringify({ message: safeProvenanceError(error) }),
+          });
+        } catch {
+          // Preserve and rethrow the original sync failure.
+        }
+      }
+      throw error;
+    }
+    const provenanceOnlyPublication =
+      promotedEventIds.length > 0 &&
+      !hadNonProvenanceChanges &&
+      (report.status === "committed" || report.status === "pushed");
+    if (promotedEventIds.length > 0 && syncReachedPublication(report.status, vaultNetworkMode)) {
+      try {
+        provenance.acknowledgePromotedSyncProvenance(v.path, promotedEventIds);
+      } catch (err) {
+        provenanceWarning = `Could not acknowledge published sync provenance: ${safeProvenanceError(err)}`;
+      }
+    }
+    if (provenanceOnlyPublication) {
+      report.status = "clean";
+      report.dirtyCount = 0;
+      report.message =
+        vaultNetworkMode === "online"
+          ? "Up to date with the online copy."
+          : "Up to date locally; no online service was contacted.";
+    }
+    if (machine === null || podRid === null) {
+      provenanceWarning ??=
+        "Sync provenance identity is unavailable; the sync outcome was not relabelled.";
+    } else if (!(
+      (promotedEventIds.length > 0 &&
+        !hadNonProvenanceChanges &&
+        (report.status === "clean" ||
+          report.status === "committed" ||
+          report.status === "pushed")) ||
+      (promotedEventIds.length === 0 &&
+        !hadNonProvenanceChanges &&
+        report.status === "clean" &&
+        provenance.getSyncProvenanceStatus(v.path).latestPublishedSync !== null)
+    )) {
+      try {
+        provenance.queueSyncProvenance({
+          vaultPath: v.path,
+          podRid,
+          vaultRid: ridHex,
+          machineId: machine.machineId,
+          podAlias:
+            provenance.readPodAlias(
+              onlineAuthority?.publication.podRoot ?? provenance.getFederationRoot(),
+              podRid,
+            )?.alias ?? null,
+          alias: machine.alias,
+          account: machine.account,
+          timestamp: new Date().toISOString(),
+          outcome: report.status,
+          details: JSON.stringify({
+            message: report.message,
+            ...(report.ahead === undefined ? {} : { ahead: report.ahead }),
+            ...(report.behind === undefined ? {} : { behind: report.behind }),
+            ...(report.dirtyCount === undefined ? {} : { dirtyCount: report.dirtyCount }),
+            ...(report.horizon === undefined ? {} : { horizon: report.horizon }),
+          }),
+        });
+      } catch (err) {
+        provenanceWarning = `Could not queue sync provenance: ${safeProvenanceError(err)}`;
+      }
+    }
+    try {
+      const status = provenance.getSyncProvenanceStatus(v.path);
+      report.pendingPublication = status.pendingPublication;
+      if (status.degradedPending > 0) {
+        provenanceWarning ??= `${status.degradedPending} pending sync provenance file(s) are unreadable and retained for recovery.`;
+      }
+      if (status.latestLocalSync !== null)
+        report.latestLocalSync = status.latestLocalSync.timestamp;
+      if (status.latestLocalSync !== null) {
+        report.podAlias = status.latestLocalSync.podAlias;
+        report.lastSyncMachineId = status.latestLocalSync.machineId;
+        report.lastSyncMachineAlias = status.latestLocalSync.alias;
+        report.lastSyncAccount = status.latestLocalSync.account;
+      }
+      if (status.latestPublishedSync !== null)
+        report.latestPublishedSync = status.latestPublishedSync.timestamp;
+    } catch (err) {
+      provenanceWarning ??= `Could not read sync provenance: ${safeProvenanceError(err)}`;
+    }
+    if (provenanceWarning !== undefined) report.syncProvenanceWarning = provenanceWarning;
+    if (machine !== null && vaultNetworkMode === "online" && isReachedOnlineStatus(report.status)) {
+      try {
+        const bySource = new Map<
+          string,
+          { hlc: { wallMs: number; counter: number }; seq: number }
+        >();
+        for (const event of provenance.readSyncProvenance(v.path)) {
+          const current = bySource.get(event.machineId);
+          if (
+            current === undefined ||
+            event.hlc.wallMs > current.hlc.wallMs ||
+            (event.hlc.wallMs === current.hlc.wallMs &&
+              (event.hlc.counter > current.hlc.counter ||
+                (event.hlc.counter === current.hlc.counter && event.seq > current.seq)))
+          )
+            bySource.set(event.machineId, event);
+        }
+        for (const [sourceMachineId, through] of bySource) {
+          provenance.appendSyncObserved({
+            podRoot: provenance.getFederationRoot(),
+            vaultRid: ridHex,
+            sourceMachineId,
+            throughHlc: through.hlc,
+            throughSeq: through.seq,
+          });
+        }
+      } catch {
+        // Pending/local-only observations never advance published watermarks.
+      }
+    }
     if (subscribedRidHexes.has(ridHex)) {
       report.subscribed = true;
     }
@@ -326,6 +673,17 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       }
     }
     reports.push(report);
+  }
+  if (machine !== null && reports.some((report) => isSuccessfulEligibleStatus(report.status))) {
+    try {
+      provenance.recordCurrentMachineSyncSuccess({
+        machineId: machine.machineId,
+        ...(podRoot === null ? {} : { podRoot }),
+        ...(machine.account === null ? {} : { accountIdentity: machine.account }),
+      });
+    } catch {
+      // Machine status persistence cannot relabel completed vault outcomes.
+    }
   }
   // 0.12.0 Phase D · A6 — reconcile the registry from what the loop observed. Done
   // once, post-loop (syncOneVault has no db handle); best-effort — a persist hiccup
@@ -374,6 +732,75 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       r.status !== "origin-mismatch",
   );
   return { reports, ok, frictionHints: deriveFrictionHints(reports) };
+}
+
+function resolveProvenPodRoot(podRid: string | null): string | null {
+  if (podRid === null) return null;
+  const podRoot = provenance.getFederationRoot();
+  const manifestPath = join(podRoot, "pod.yon");
+  const gitPath = join(podRoot, ".git");
+  if (!existsSync(manifestPath) || !existsSync(gitPath)) return null;
+  try {
+    const rootStat = lstatSync(podRoot);
+    const manifestStat = lstatSync(manifestPath);
+    const gitStat = lstatSync(gitPath);
+    if (
+      rootStat.isSymbolicLink() ||
+      !rootStat.isDirectory() ||
+      manifestStat.isSymbolicLink() ||
+      !manifestStat.isFile() ||
+      gitStat.isSymbolicLink() ||
+      !(gitStat.isDirectory() || gitStat.isFile())
+    ) {
+      return null;
+    }
+    return parseFederationYon(readFileSync(manifestPath, "utf8")).federation.fedRidHex === podRid
+      ? podRoot
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSuccessfulEligibleStatus(status: VaultSyncStatus): boolean {
+  return (
+    status === "clean" ||
+    status === "committed" ||
+    status === "pushed" ||
+    status === "pulled" ||
+    status === "diverged-synced"
+  );
+}
+
+function syncReachedPublication(
+  status: VaultSyncStatus,
+  networkMode: "online" | "local-only",
+): boolean {
+  if (networkMode === "local-only") return false;
+  return (
+    status === "pushed" || status === "diverged-synced" || status === "pulled" || status === "clean"
+  );
+}
+
+function safeProvenanceError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return provenance.sanitizeSyncProvenanceText(message).slice(0, 256);
+}
+
+function authorityForVault(
+  args: SyncFlowArgs,
+  vault: VaultRow,
+): SyncOnlineVaultAuthority | undefined {
+  const ridHex = uuid7BytesToHex(vault.rid);
+  const online = args.onlineAuthorityByVaultRid?.[ridHex];
+  if (online === undefined || uuid7BytesToHex(online.publication.vaultRid) !== ridHex) {
+    return undefined;
+  }
+  return normalizeGitHubRepoCoordinate(
+    `https://github.com/${online.expectedOrigin}`,
+  )?.toLowerCase() === online.publication.repository.toLowerCase()
+    ? online
+    : undefined;
 }
 
 // Arc §10.4 — on a sync that hits a friction-worthy outcome, surface a
@@ -524,6 +951,12 @@ async function syncOneVault(
   ghAuthOk: () => boolean | null = () => realIdentityRunner.ghAuthStatus(),
   networkMode: "online" | "local-only" = "online",
   expectedOrigin?: string,
+  publicationAuthority?: SyncPublicationAuthority,
+  permissionObserver: PublicationPermissionObserver = observePublicationPermission,
+  permissionAttemptId: string = randomUUID(),
+  authorityHeld = false,
+  publicationAttempt?: PublicationAttemptContext,
+  beforeEligibleSync?: () => void | Promise<void>,
 ): Promise<VaultSyncReport> {
   const base: VaultSyncReport = {
     name: vault.name,
@@ -558,13 +991,9 @@ async function syncOneVault(
   }
 
   if (networkMode === "local-only") {
-    const status = await runGit(["status", "--porcelain"], { cwd: vault.path });
-    const statusLines = status.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trimEnd())
-      .filter((line) => line.length > 0);
-    const dirtyCount = statusLines.length;
     if (readOnly) {
+      const statusRecords = await readPorcelainStatus(runGit, vault.path);
+      const dirtyCount = statusRecords.length;
       await reconcileVaultCaches(vault.path, vault.name, { skipGitignoreMigration: true });
       return {
         ...base,
@@ -574,13 +1003,16 @@ async function syncOneVault(
           "This is a read-only shared vault; local-only sync made no Git changes and contacted no online service.",
       };
     }
+    await beforeEligibleSync?.();
+    const statusRecords = await readPorcelainStatus(runGit, vault.path);
+    const dirtyCount = statusRecords.length;
     let committed = false;
-    const paths = statusLines
-      .map((line) => parsePorcelainPath(line))
-      .filter((path): path is string => path !== null);
-    if (paths.length > 0) {
-      await runGit(["add", "--", ...paths], { cwd: vault.path });
-      const commitMsg = messageOverride ?? buildSyncCommitMessage(vault, statusLines, now);
+    if (statusRecords.length > 0) {
+      const staging = await stagePorcelainRecords(runGit, vault.path, statusRecords);
+      if (!staging.staged) {
+        return stagingRefusalReport(base, dirtyCount, staging.pathRefusal);
+      }
+      const commitMsg = messageOverride ?? buildSyncCommitMessage(vault, statusRecords, now);
       const commitRes = await runGit(["commit", "-m", commitMsg], {
         cwd: vault.path,
         allowFailure: true,
@@ -600,31 +1032,243 @@ async function syncOneVault(
 
   if (remote === null) throw new Error("online sync requires a remote provider");
 
+  let pushTarget: PushTarget | null = null;
+  let pullTarget: PullTarget | null = null;
+  let validatedFetchUrl = "";
+  let canonicalOriginMissing = false;
   if (expectedOrigin !== undefined) {
-    const origin = await runGit(["remote", "get-url", "origin"], {
+    const pushRemote = "origin";
+    const origin = await runGit(["remote", "get-url", "--push", pushRemote], {
       cwd: vault.path,
       allowFailure: true,
     });
-    if (origin.code === 0) {
-      const actual = normalizeGitHubRepoCoordinate(origin.stdout);
+    const pushUrl = origin.stdout.trim();
+    if (origin.code !== 0 || pushUrl.length === 0) {
+      canonicalOriginMissing = true;
+    } else {
+      const actual = normalizeGitHubRepoCoordinate(pushUrl);
       if (actual === null || actual.toLowerCase() !== expectedOrigin.toLowerCase()) {
         return {
           ...base,
           status: "origin-mismatch",
-          message: `Online sync refused: expected ${expectedOrigin}, found ${actual ?? (origin.stdout.trim() || "an unrecognized origin")}.`,
+          message: `Online sync refused: expected ${expectedOrigin}, found ${actual ?? pushUrl}.`,
         };
       }
+      pushTarget = { url: pushUrl, refspec: "" };
+    }
+    const fetchOrigin = await runGit(["remote", "get-url", pushRemote], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    validatedFetchUrl = fetchOrigin.stdout.trim();
+    const fetchCoordinate =
+      fetchOrigin.code === 0 ? normalizeGitHubRepoCoordinate(validatedFetchUrl) : null;
+    if (fetchOrigin.code !== 0 || validatedFetchUrl.length === 0) {
+      canonicalOriginMissing = true;
+    } else if (
+      fetchCoordinate === null ||
+      fetchCoordinate.toLowerCase() !== expectedOrigin.toLowerCase()
+    ) {
+      return {
+        ...base,
+        status: "origin-mismatch",
+        message: `Online sync refused: expected ${expectedOrigin}, found ${fetchCoordinate ?? (validatedFetchUrl || "missing origin")}.`,
+      };
     }
   }
 
-  // Fetch first so ahead/behind reflects truth (if upstream is configured).
+  // A canonical owned vault with neither origin nor upstream is a legitimate
+  // first-publication candidate. Keep this public flow local-only and return
+  // `no-upstream`; the command layer alone may route that outcome to the
+  // existing scoped materializer. Any inconsistent state with an upstream but
+  // no canonical origin remains fail-closed before fetch or local mutation.
   const upstreamRes = await runGit(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
     cwd: vault.path,
     allowFailure: true,
   });
   const hasUpstreamFlag = upstreamRes.code === 0;
+  // A hostile/stale branch binding can be present even when `@{u}` does not
+  // currently resolve (for example, its remote-tracking ref has not been
+  // fetched yet). Refuse that state before treating the vault as a legitimate
+  // first-publication candidate.
+  if (expectedOrigin !== undefined) {
+    const currentBranch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    const currentBranchName = currentBranch.stdout.trim();
+    if (currentBranch.code === 0 && currentBranchName.length > 0) {
+      const configuredRemote = await runGit(
+        ["config", "--get", `branch.${currentBranchName}.remote`],
+        { cwd: vault.path, allowFailure: true },
+      );
+      if (configuredRemote.code === 0 && configuredRemote.stdout.trim() !== "origin") {
+        return {
+          ...base,
+          status: "origin-mismatch",
+          message: "Online sync refused: the current branch does not track the authorized origin.",
+        };
+      }
+    }
+  }
+  if (canonicalOriginMissing && hasUpstreamFlag) {
+    return {
+      ...base,
+      status: "origin-mismatch",
+      message: `Online sync refused: expected ${expectedOrigin}, but origin is missing while an upstream is configured.`,
+    };
+  }
   if (hasUpstreamFlag) {
-    const fetched = await runGit(["fetch", "--quiet"], { cwd: vault.path, allowFailure: true });
+    const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    const branchName = branch.stdout.trim();
+    const branchRemote =
+      branch.code === 0 && branchName.length > 0
+        ? await runGit(["config", "--get", `branch.${branchName}.remote`], {
+            cwd: vault.path,
+            allowFailure: true,
+          })
+        : { code: 1, stdout: "", stderr: "" };
+    const mergeRef =
+      branch.code === 0 && branchName.length > 0
+        ? await runGit(["config", "--get", `branch.${branchName}.merge`], {
+            cwd: vault.path,
+            allowFailure: true,
+          })
+        : { code: 1, stdout: "", stderr: "" };
+    const destinationRef = mergeRef.stdout.trim();
+    const branchRemoteName = branchRemote.stdout.trim();
+    const expectedUpstream = `${branchRemoteName}/${destinationRef.replace(/^refs\/heads\//, "")}`;
+    if (
+      branchRemote.code !== 0 ||
+      branchRemoteName.length === 0 ||
+      (expectedOrigin !== undefined && branchRemoteName !== "origin") ||
+      mergeRef.code !== 0 ||
+      !destinationRef.startsWith("refs/heads/") ||
+      destinationRef === "refs/heads/" ||
+      upstreamRes.stdout.trim() !== expectedUpstream
+    ) {
+      return {
+        ...base,
+        status: "origin-mismatch",
+        message: "Online sync refused: the authorized origin branch could not be resolved.",
+      };
+    }
+    const validRef = await runGit(["check-ref-format", destinationRef], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    if (validRef.code !== 0) {
+      return {
+        ...base,
+        status: "origin-mismatch",
+        message: "Online sync refused: the authorized origin branch is invalid.",
+      };
+    }
+    if (validatedFetchUrl.length === 0) {
+      const fetchOrigin = await runGit(["remote", "get-url", branchRemoteName], {
+        cwd: vault.path,
+        allowFailure: true,
+      });
+      validatedFetchUrl = fetchOrigin.stdout.trim();
+    }
+    if (
+      validatedFetchUrl.length === 0 ||
+      validatedFetchUrl.startsWith("-") ||
+      /[\0\r\n]/u.test(validatedFetchUrl)
+    ) {
+      return {
+        ...base,
+        status: "origin-mismatch",
+        message: "Online sync refused: the authorized sync source is invalid.",
+      };
+    }
+    pullTarget = { url: validatedFetchUrl, ref: destinationRef };
+    if (pushTarget !== null) pushTarget = { ...pushTarget, refspec: `HEAD:${destinationRef}` };
+  }
+  if (hasUpstreamFlag) {
+    if (pullTarget === null) {
+      return {
+        ...base,
+        status: "origin-mismatch",
+        message: "Online sync refused: no authorized sync source was resolved.",
+      };
+    }
+    if (publicationAuthority !== undefined && !authorityHeld) {
+      // Keep the repository binding explicit even while lyt-mesh typechecks
+      // against the last built lyt-vault declaration during this source wave.
+      const canonicalAttempt = {
+        vaultRid: publicationAuthority.vaultRid,
+        podRid: publicationAuthority.podRid,
+        ...(publicationAuthority.podRoot === undefined
+          ? {}
+          : { podRoot: publicationAuthority.podRoot }),
+        authority: publicationAuthority.policy,
+        expectedRepository: publicationAuthority.repository,
+        capability: "repository-push" as const,
+        target: publicationAuthority.target,
+        repository: publicationAuthority.repository,
+        actor: publicationAuthority.actor,
+        attemptId: permissionAttemptId,
+        permissionObserver,
+        action: async (attempt?: PublicationAttemptContext) => {
+          if (attempt === undefined) {
+            throw new Error("Publication refused: subject-lock renewal context is unavailable.");
+          }
+          const currentDb = await openRegistry();
+          try {
+            const current = await getVaultByRid(currentDb, publicationAuthority.vaultRid);
+            if (
+              current === null ||
+              current.path !== vault.path ||
+              current.status !== "active" ||
+              current.source !== "own"
+            ) {
+              throw new Error(
+                "Publication refused: vault identity changed before the outward action.",
+              );
+            }
+          } finally {
+            await closeRegistry(currentDb);
+          }
+          // Repeat the local coordinate/ref validation while the subject lock is
+          // held. The recursive pass skips only this authority wrapper; its
+          // immutable-URL fetch, rebase/local history changes, and explicit push
+          // all remain inside the same subject-lock lifetime.
+          return syncOneVault(
+            vault,
+            runGit,
+            remote,
+            now,
+            resolveMeshContext,
+            messageOverride,
+            readOnly,
+            resolveConflict,
+            ghAuthOk,
+            networkMode,
+            expectedOrigin,
+            publicationAuthority,
+            permissionObserver,
+            permissionAttemptId,
+            true,
+            attempt,
+            beforeEligibleSync,
+          );
+        },
+      };
+      return withCanonicalVaultPublicationAttempt(canonicalAttempt);
+    }
+    const fetchChild = () =>
+      runGit(["fetch", "--quiet", pullTarget.url, pullTarget.ref], {
+        cwd: vault.path,
+        allowFailure: true,
+      });
+    const fetched =
+      publicationAttempt === undefined
+        ? await fetchChild()
+        : await publicationAttempt.runOutwardChild(fetchChild);
     if (fetched.code !== 0) {
       // 0.12.0 Phase D · A6 — a `Repository not found` / 404 on fetch means our
       // access was revoked (or the repo was deleted) — a DEFINITE access-loss,
@@ -664,17 +1308,13 @@ async function syncOneVault(
     }
   }
 
-  const status = await runGit(["status", "--porcelain"], { cwd: vault.path });
-  const statusLines = status.stdout
-    .split(/\r?\n/)
-    .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0);
-  const dirtyCount = statusLines.length;
+  let statusRecords = await readPorcelainStatus(runGit, vault.path);
+  let dirtyCount = statusRecords.length;
 
   let ahead = 0;
   let behind = 0;
   if (hasUpstreamFlag) {
-    const ab = await runGit(["rev-list", "--left-right", "--count", "HEAD...@{u}"], {
+    const ab = await runGit(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], {
       cwd: vault.path,
       allowFailure: true,
     });
@@ -715,10 +1355,27 @@ async function syncOneVault(
       // copy silently stops receiving. Autostash stashes the edit, replays the
       // (fast-forward — a pure subscriber has no local commits) pull, then pops
       // the edit back.
-      const pulled = await runGit(["pull", "--rebase", "--autostash", "--quiet"], {
+      if (pullTarget === null) {
+        return {
+          ...base,
+          status: "origin-mismatch",
+          message: "Online sync refused: no authorized sync source was resolved.",
+          ahead,
+          behind,
+          dirtyCount,
+        };
+      }
+      const refetched = await runGit(["fetch", "--quiet", pullTarget.url, pullTarget.ref], {
         cwd: vault.path,
         allowFailure: true,
       });
+      const pulled =
+        refetched.code === 0
+          ? await runGit(["rebase", "--autostash", "--quiet", "FETCH_HEAD"], {
+              cwd: vault.path,
+              allowFailure: true,
+            })
+          : refetched;
       if (pulled.code === 0) {
         // Edge: `--autostash` COMPLETES the pull (exit 0, upstream received) yet
         // can leave the tree with an UNRESOLVED autostash-pop conflict when the
@@ -766,8 +1423,7 @@ async function syncOneVault(
             .split(/\r?\n/)
             .map((l) => l.trim())
             .filter((l) => l.length > 0);
-          const treeClean =
-            reset.code === 0 && recheck.code === 0 && residualUnmerged.length === 0;
+          const treeClean = reset.code === 0 && recheck.code === 0 && residualUnmerged.length === 0;
           const stashHint =
             `Your edit was kept safely in this vault's git stash — view it with ` +
             `\`git -C "${vault.path}" stash show -p\`, or bring it back with ` +
@@ -830,7 +1486,7 @@ async function syncOneVault(
     //
     // Both are `readonlyDiverged: true` (the recovery rider fires); the WORDING
     // differs so the user takes the right (and safe) action.
-    const untrackedCount = statusLines.filter((l) => l.startsWith("??")).length;
+    const untrackedCount = statusRecords.filter((record) => record.xy === "??").length;
     const trackedDirtyCount = dirtyCount - untrackedCount;
     const diverged = ahead > 0 || dirtyCount > 0;
     if (diverged) {
@@ -888,6 +1544,10 @@ async function syncOneVault(
     };
   }
 
+  await beforeEligibleSync?.();
+  statusRecords = await readPorcelainStatus(runGit, vault.path);
+  dirtyCount = statusRecords.length;
+
   // v1.M.0 (P0-b) — single-reconcile guard. Each sync reconciles the .db
   // caches AT MOST ONCE, via reconcileVaultCaches(). It fires after a local
   // commit OR after a successful pull (the two ways on-disk SoT can change
@@ -895,20 +1555,19 @@ async function syncOneVault(
   // from reconciling twice.
   let reconciled = false;
 
-  // Stage + commit dirty changes (explicit paths only, never `git add -A`).
+  // Stage + commit dirty changes from Git's literal NUL-delimited path records.
   let committed = false;
   if (dirtyCount > 0) {
-    const paths = statusLines
-      .map((line) => parsePorcelainPath(line))
-      .filter((p): p is string => p !== null);
-    if (paths.length > 0) {
-      // Use `--` separator to keep paths from being interpreted as flags/refs.
-      await runGit(["add", "--", ...paths], { cwd: vault.path });
+    if (statusRecords.length > 0) {
+      const staging = await stagePorcelainRecords(runGit, vault.path, statusRecords);
+      if (!staging.staged) {
+        return stagingRefusalReport(base, dirtyCount, staging.pathRefusal);
+      }
       // Brief C (F2) — metadata-driven commit message (subject + per-figment
       // body, +new/~updated/-deleted from git status), unless the caller
       // supplied an explicit `message` override (e.g. an agent's semantic
       // summary). The deterministic path NEVER calls an LLM.
-      const commitMsg = messageOverride ?? buildSyncCommitMessage(vault, statusLines, now);
+      const commitMsg = messageOverride ?? buildSyncCommitMessage(vault, statusRecords, now);
       const commitRes = await runGit(["commit", "-m", commitMsg], {
         cwd: vault.path,
         allowFailure: true,
@@ -961,7 +1620,21 @@ async function syncOneVault(
     // default GitRemoteProvider wraps the SAME `git pull --rebase --quiet` with
     // allowFailure, so `pulled.code`/`pulled.stderr` below are unchanged and the
     // conflict-recovery path is byte-identical.
-    const pulled = await remote.pull(vault.path);
+    if (pullTarget === null) {
+      return {
+        ...base,
+        status: "origin-mismatch",
+        message: "Online sync refused: no authorized sync source was resolved.",
+        ahead,
+        behind,
+        dirtyCount,
+      };
+    }
+    const pullChild = () => remote.pull(vault.path, pullTarget);
+    const pulled =
+      publicationAttempt === undefined
+        ? await pullChild()
+        : await publicationAttempt.runOutwardChild(pullChild);
     // v1.A.2 Lock 0.2 / v1.D.1b / v1.D.2b / v1.D.3a — after a successful
     // pull, reconcile the .db caches (ledger → lanes → arcs → fts) so
     // audit-export / provenance-trace / lanes / arcs / FTS search see
@@ -1061,10 +1734,10 @@ async function syncOneVault(
         }
         // mine → keep local ( `-X ours` ); theirs → keep online ( `-X theirs` ).
         const strategyOpt = choice === "mine" ? "ours" : "theirs";
-        const merged = await runGit(
-          ["merge", "--no-edit", `-X${strategyOpt}`, "@{u}"],
-          { cwd: vault.path, allowFailure: true },
-        );
+        const merged = await runGit(["merge", "--no-edit", `-X${strategyOpt}`, "FETCH_HEAD"], {
+          cwd: vault.path,
+          allowFailure: true,
+        });
         if (merged.code !== 0) {
           // The strategy merge didn't complete cleanly (rare — e.g. a
           // rename/rename). Abort to a safe state (local intact) and fall back to
@@ -1092,7 +1765,7 @@ async function syncOneVault(
           await reconcileVaultCaches(vault.path, vault.name);
           reconciled = true;
         }
-        const ab2 = await runGit(["rev-list", "--left-right", "--count", "HEAD...@{u}"], {
+        const ab2 = await runGit(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], {
           cwd: vault.path,
           allowFailure: true,
         });
@@ -1130,19 +1803,42 @@ async function syncOneVault(
   // honest horizon + reversibility class to the report.
   let syncOp: SyncOperation | null = null;
   if (ahead > 0) {
+    if (pushTarget === null || pushTarget.refspec.length === 0) {
+      return {
+        ...base,
+        status: "origin-mismatch",
+        message: "Online sync refused: no authorized push destination was resolved.",
+        ahead,
+        behind,
+        dirtyCount,
+      };
+    }
     // Emit a SyncOperation that OWNS the push through the RemoteProvider port.
     // Its horizon is READ BACK from the actual push result (pushed vs
     // committed-not-pushed) — never asserted from the verb. `lastPushResult`
     // carries the raw code+stderr, so the terminal-vs-retryable classification
-    // below is byte-identical to the pre-A.4 inline `runGit(["push"])` path.
+    // below remains unchanged while the destination is explicit.
     // NOTE (A.4 scope, release review a review finding): unlike CaptureOperation, this op is
     // NOT persisted to the op-log — a `pushed` sync is un-undoable (`none`) and
     // the `committed-not-pushed` reset-commit executor is deferred (class-only),
     // so there is nothing for `lyt undo` to replay yet. It is emitted for the
     // report's honest horizon only; op-log persistence lands with the executor.
     syncOp = new SyncOperation(
-      { vaultName: vault.name, vaultPath: vault.path, hasOutgoing: true },
-      { remote },
+      {
+        vaultName: vault.name,
+        vaultPath: vault.path,
+        hasOutgoing: true,
+        pushTarget,
+      },
+      {
+        remote,
+        // Canonical online attempts enter this operation only after the
+        // immutable fetch boundary acquired the subject lock above. The push
+        // therefore shares one authority lifetime with fetch/rebase/local
+        // history mutation instead of probing a second, narrower permission.
+        executeAuthorizedPush: async (push) =>
+          publicationAttempt === undefined ? push() : publicationAttempt.runOutwardChild(push),
+      },
     );
     await syncOp.apply();
     const pushed = syncOp.lastPushResult ?? { pushed: false, code: -1, stderr: "" };
@@ -1192,9 +1888,7 @@ async function syncOneVault(
         errorOutput: pushed.stderr,
         // Increment 1 · Phase A.4 (release review a review finding/a review finding) — carry the honest
         // horizon onto the generic push-failure report too (see note above).
-        ...(syncOp !== null
-          ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class }
-          : {}),
+        ...(syncOp !== null ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class } : {}),
       };
     }
   }
@@ -1226,7 +1920,8 @@ async function syncOneVault(
   // version was kept (the machine `status` stays the honest pushed/diverged
   // label). `both` returns earlier, so only mine/theirs reach here.
   if (conflictChoice === "mine") {
-    message = "You and your online copy changed the same note(s) — Lyt kept your version and saved it online.";
+    message =
+      "You and your online copy changed the same note(s) — Lyt kept your version and saved it online.";
   } else if (conflictChoice === "theirs") {
     message = "You and your online copy changed the same note(s) — Lyt kept the online version.";
   }
@@ -1242,9 +1937,7 @@ async function syncOneVault(
     // Increment 1 · Phase A.4 — attach the honest horizon + reversibility class
     // when a push was attempted (ahead > 0). Read back from the SyncOperation's
     // actual push result; absent on pull-only / up-to-date / no-push syncs.
-    ...(syncOp !== null
-      ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class }
-      : {}),
+    ...(syncOp !== null ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class } : {}),
   };
 }
 
@@ -1256,59 +1949,187 @@ async function syncOneVault(
 // permission/auth co-signal; a bare 403 (secondary rate-limit) or a bare SSH
 // "access rights" connection failure stays NON-terminal (retry-safe).
 
-function parsePorcelainPath(line: string): string | null {
-  // Porcelain v1 lines: "XY <path>" or "XY <orig> -> <new>" (renames).
-  if (line.length < 4) return null;
-  const rest = line.slice(3);
-  const arrow = rest.indexOf(" -> ");
-  if (arrow >= 0) {
-    return decodeGitQuotedPath(rest.slice(arrow + 4));
-  }
-  return decodeGitQuotedPath(rest);
+interface PorcelainV1Record {
+  xy: string;
+  /** Destination/current path. Git emits this first under `-z`. */
+  path: string;
+  /** Original path for rename/copy records. */
+  sourcePath?: string;
 }
 
-// Git porcelain quotes pathnames using C-style escapes. Those quote characters
-// are presentation, not part of the filename, and must never reach argv.
-function decodeGitQuotedPath(path: string): string {
-  if (path.length < 2 || path[0] !== '"' || path[path.length - 1] !== '"') return path;
-  const bytes: number[] = [];
-  const inner = path.slice(1, -1);
-  for (let i = 0; i < inner.length; i += 1) {
-    const codePoint = inner.codePointAt(i)!;
-    const char = String.fromCodePoint(codePoint);
-    if (char !== "\\") {
-      bytes.push(...Buffer.from(char, "utf8"));
-      if (codePoint > 0xffff) i += 1;
-      continue;
+const PORCELAIN_V1_STATUS_CHARS = new Set([" ", "M", "T", "A", "D", "R", "C", "U", "?", "!"]);
+
+function malformedPorcelain(reason: "record" | "rename-source"): never {
+  const detail =
+    reason === "rename-source"
+      ? "missing rename/copy source record"
+      : "truncated or invalid record";
+  throw new Error(`Malformed Git status output: ${detail}.`);
+}
+
+/** Parse `git status --porcelain=v1 -z` without line, quote, or arrow interpretation. */
+function parsePorcelainV1Z(output: string): PorcelainV1Record[] {
+  if (output.length === 0) return [];
+  const records: PorcelainV1Record[] = [];
+  let cursor = 0;
+  while (cursor < output.length) {
+    const end = output.indexOf("\0", cursor);
+    if (end < 0) malformedPorcelain("record");
+    const raw = output.slice(cursor, end);
+    if (
+      raw.length < 4 ||
+      raw[2] !== " " ||
+      raw.slice(3).length === 0 ||
+      !PORCELAIN_V1_STATUS_CHARS.has(raw[0]!) ||
+      !PORCELAIN_V1_STATUS_CHARS.has(raw[1]!)
+    ) {
+      malformedPorcelain("record");
     }
-    const escaped = inner[++i];
-    if (escaped === undefined) return path;
-    const simple: Record<string, number> = {
-      a: 0x07,
-      b: 0x08,
-      t: 0x09,
-      n: 0x0a,
-      v: 0x0b,
-      f: 0x0c,
-      r: 0x0d,
-      '"': 0x22,
-      "\\": 0x5c,
-    };
-    if (simple[escaped] !== undefined) {
-      bytes.push(simple[escaped]);
-      continue;
+    const xy = raw.slice(0, 2);
+    const path = raw.slice(3);
+    cursor = end + 1;
+    if (/[RC]/.test(xy)) {
+      const sourceEnd = output.indexOf("\0", cursor);
+      if (sourceEnd < 0 || sourceEnd === cursor) malformedPorcelain("rename-source");
+      records.push({ xy, path, sourcePath: output.slice(cursor, sourceEnd) });
+      cursor = sourceEnd + 1;
+    } else {
+      records.push({ xy, path });
     }
-    if (/[0-7]/.test(escaped)) {
-      let octal = escaped;
-      while (octal.length < 3 && i + 1 < inner.length && /[0-7]/.test(inner[i + 1]!)) {
-        octal += inner[++i]!;
-      }
-      bytes.push(Number.parseInt(octal, 8));
-      continue;
-    }
-    return path;
   }
-  return Buffer.from(bytes).toString("utf8");
+  return records;
+}
+
+function porcelainPaths(records: readonly PorcelainV1Record[]): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const record of records) {
+    for (const path of [record.path, record.sourcePath]) {
+      if (path !== undefined && !seen.has(path)) {
+        seen.add(path);
+        paths.push(path);
+      }
+    }
+  }
+  return paths;
+}
+
+async function readPorcelainStatus(runGit: GitRunner, cwd: string): Promise<PorcelainV1Record[]> {
+  const status = await runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
+    cwd,
+  });
+  if (status.stdoutTruncated === true) {
+    throw new Error("Malformed Git status output: output limit reached.");
+  }
+  return parsePorcelainV1Z(status.stdout);
+}
+
+async function stagePorcelainRecords(
+  runGit: GitRunner,
+  cwd: string,
+  records: readonly PorcelainV1Record[],
+): Promise<StagePorcelainResult> {
+  const paths = porcelainPaths(records);
+  if (paths.length === 0) return { staged: true };
+
+  const inspections = paths.map((path) => ({ path, inspection: inspectWindowsGitPath(cwd, path) }));
+  const invalid = inspections.find(({ inspection }) => !inspection.ok);
+  if (invalid !== undefined) {
+    return {
+      staged: false,
+      pathRefusal: pathRefusalEvidence(
+        invalid.path,
+        invalid.inspection.refusal?.code ?? "path-escape",
+        invalid.inspection.fullPathLength,
+        false,
+      ),
+    };
+  }
+
+  const longPath = inspections.find(({ inspection }) => inspection.requiresGitLongPaths);
+  if (longPath !== undefined) {
+    let capability: "enabled" | "disabled" | "indeterminate" = "indeterminate";
+    try {
+      const result = await runGit(["config", "--bool", "--get", "core.longpaths"], {
+        cwd,
+        allowFailure: true,
+        policy: GIT_READ_ONLY_POLICY,
+      });
+      const value = result.stdout.trim().toLowerCase();
+      if (result.code === 0 && value === "true" && result.stdoutTruncated !== true) {
+        capability = "enabled";
+      } else if (
+        result.code === 1 ||
+        (result.code === 0 && value === "false" && result.stdoutTruncated !== true)
+      ) {
+        capability = "disabled";
+      }
+    } catch {
+      capability = "indeterminate";
+    }
+    if (capability !== "enabled") {
+      return {
+        staged: false,
+        pathRefusal: pathRefusalEvidence(
+          longPath.path,
+          capability === "disabled" ? "git-longpaths-disabled" : "git-longpaths-indeterminate",
+          longPath.inspection.fullPathLength,
+          true,
+        ),
+      };
+    }
+  }
+  await runGit(
+    ["--literal-pathspecs", "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+    { cwd, stdin: Buffer.from(`${paths.join("\0")}\0`, "utf8") },
+  );
+  return { staged: true };
+}
+
+type StagePorcelainResult =
+  | { readonly staged: true }
+  | { readonly staged: false; readonly pathRefusal: SyncPathRefusalEvidence };
+
+const PATH_REFUSAL_EVIDENCE_MAX_LENGTH = 240;
+
+function pathRefusalEvidence(
+  path: string,
+  code: SyncPathRefusalEvidence["code"],
+  fullPathLength: number,
+  requiresGitLongPaths: boolean,
+): SyncPathRefusalEvidence {
+  const escaped = visibleEscapeControls(path);
+  return {
+    code,
+    path:
+      escaped.length <= PATH_REFUSAL_EVIDENCE_MAX_LENGTH
+        ? escaped
+        : `${escaped.slice(0, PATH_REFUSAL_EVIDENCE_MAX_LENGTH - 1)}…`,
+    pathLength: path.length,
+    fullPathLength,
+    requiresGitLongPaths,
+  };
+}
+
+function stagingRefusalReport(
+  base: VaultSyncReport,
+  dirtyCount: number,
+  pathRefusal: SyncPathRefusalEvidence,
+): VaultSyncReport {
+  const capability = pathRefusal.requiresGitLongPaths
+    ? "Git for Windows does not have a confirmed core.longpaths=true setting"
+    : "one of its paths cannot be represented safely on Windows";
+  const remedy = pathRefusal.requiresGitLongPaths
+    ? "Enable Git long-path support or shorten the affected path, then retry."
+    : "Rename the affected path, then retry.";
+  return {
+    ...base,
+    status: "error",
+    message: `Sync refused before staging because ${capability}. ${remedy}`,
+    dirtyCount,
+    staged: false,
+    pathRefusal,
+  };
 }
 
 // Brief C (F2) — assemble the deterministic metadata-driven commit message for
@@ -1321,24 +2142,30 @@ function decodeGitQuotedPath(path: string): string {
 // sync-helpers (unit-tested); this is the fs glue. No LLM is ever called.
 function buildSyncCommitMessage(
   vault: VaultRow,
-  statusLines: readonly string[],
+  statusRecords: readonly PorcelainV1Record[],
   now: Date,
 ): string {
   const figments: ChangedFigment[] = [];
   let configChanged = false;
-  for (const line of statusLines) {
-    const change = classifyPorcelainLine(line);
-    if (change === null) continue;
-    if (isConfigPath(change.path)) {
+  for (const record of statusRecords) {
+    if (isConfigPath(record.path)) {
       configChanged = true;
       continue;
     }
-    if (!isFigmentPath(change.path)) continue; // non-figment, non-config: not enumerated
+    if (!isFigmentPath(record.path)) continue; // non-figment, non-config: not enumerated
+    const changeType: ChangedFigment["changeType"] =
+      record.xy === "??"
+        ? "add"
+        : record.xy.includes("D")
+          ? "delete"
+          : record.xy.includes("A")
+            ? "add"
+            : "modify";
     const title =
-      change.changeType === "delete"
-        ? figmentBasename(change.path)
-        : (readVaultFigmentTitle(vault.path, change.path) ?? figmentBasename(change.path));
-    figments.push({ path: change.path, changeType: change.changeType, title });
+      changeType === "delete"
+        ? figmentBasename(record.path)
+        : (readVaultFigmentTitle(vault.path, record.path) ?? figmentBasename(record.path));
+    figments.push({ path: record.path, changeType, title });
   }
   let handle = "";
   try {
@@ -1370,7 +2197,20 @@ function readVaultFigmentTitle(vaultPath: string, relPath: string): string | nul
 function figmentBasename(relPath: string): string {
   const norm = relPath.replace(/\\/g, "/");
   const base = norm.slice(norm.lastIndexOf("/") + 1);
-  return base.replace(/\.md$/i, "");
+  return visibleEscapeControls(base.replace(/\.md$/i, ""));
+}
+
+function visibleEscapeControls(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, (char) => {
+    const named: Readonly<Record<string, string>> = {
+      "\b": "\\b",
+      "\t": "\\t",
+      "\n": "\\n",
+      "\f": "\\f",
+      "\r": "\\r",
+    };
+    return named[char] ?? `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`;
+  });
 }
 
 async function readConflictPaths(runGit: GitRunner, cwd: string): Promise<string[]> {
@@ -1408,5 +2248,10 @@ export function classifyCheckStatus(args: {
   return "clean";
 }
 
-// Re-export for `sync.ts:syncOneVault` tests that want to seed paths.
-export { parsePorcelainPath as _parsePorcelainPath };
+// Test-only surfaces for the structural Git boundary.
+export {
+  parsePorcelainV1Z as _parsePorcelainV1Z,
+  readPorcelainStatus as _readPorcelainStatus,
+  stagePorcelainRecords as _stagePorcelainRecords,
+  syncOneVault as _syncOneVault,
+};

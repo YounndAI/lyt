@@ -53,3 +53,35 @@ export type {
   IntegrityIssue,
   IntegrityStatus,
 } from "./flows/init-bootstrap.js";
+export {
+  applyExactUpdatePlanV1,
+  canonicalJson,
+  digestCanonical,
+  parseUpdatePlanV1,
+  prepareUpdatePlanV1,
+  UPDATE_PLAN_PACKAGES,
+  UPDATE_PLAN_SCHEMA_ID,
+} from "./install/update-plan.js";
+export type {
+  ExactUpdateApplyEffects,
+  ExactUpdateApplyResultV1,
+  ManagedDestinationV1,
+  PrepareUpdatePlanV1Input,
+  RegistryPackageFactV1,
+  UpdatePlanV1,
+} from "./install/update-plan.js";
+export { buildInstallProviderInventoryV1 } from "./install/provider-inventory.js";
+export type {
+  InstallableProviderObjectV1,
+  InstallProviderV1,
+} from "./install/provider-inventory.js";
+export {
+  defaultReconcileJournalRoot,
+  prepareInstallReconcilePlanV1,
+  reconcileInstallProvidersV1,
+} from "./install/reconcile-engine.js";
+export type {
+  InstallReconcileEnvelopeV1,
+  InstallReconcilePlanV1,
+  ReconcileEngineOptions,
+} from "./install/reconcile-engine.js";

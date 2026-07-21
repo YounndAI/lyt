@@ -23,7 +23,7 @@
 // `@STAMP` records are paired with the immediately-preceding non-stamp
 // record (per writer contract — every record is followed by its @STAMP).
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { sha256, unescapeQuoted } from "./_helpers.js";
@@ -128,7 +128,17 @@ export function walkLedger(
 // `  | ...` continuation line until the next `@` or EOF.
 export function parseLedgerFile(filePath: string): LedgerRecord[] {
   if (!existsSync(filePath)) return [];
+  const stat = lstatSync(filePath);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`Refusing ledger read through symlink or reparse point: ${filePath}`);
+  }
+  if (!stat.isFile()) return [];
   const content = readFileSync(filePath, "utf8");
+  return parseLedgerText(content, filePath);
+}
+
+/** Parse already-bounded ledger bytes without reopening or re-enumerating their source file. */
+export function parseLedgerText(content: string, sourceFile: string): LedgerRecord[] {
   const lines = content.split(/\r?\n/);
   // P5-D: char offset of the START of `lines[k]` within `content`. Built once so
   // the chain-hash recompute can slice `content` from offset 0 up to (not
@@ -221,7 +231,7 @@ export function parseLedgerFile(filePath: string): LedgerRecord[] {
         stampTs: stamp?.ts ?? null,
         stampHash,
         ...(tamper ? { tamper: true } : {}),
-        sourceFile: filePath,
+        sourceFile,
       });
       continue;
     }
@@ -343,8 +353,13 @@ function parseStampLine(line: string): { src: string; ts: string; hash: string }
 
 function safeIsDir(p: string): boolean {
   try {
-    return statSync(p).isDirectory();
-  } catch {
-    return false;
+    const stat = lstatSync(p);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Refusing ledger read through symlink or reparse point: ${p}`);
+    }
+    return stat.isDirectory();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
 }
