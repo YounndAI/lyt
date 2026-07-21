@@ -2004,6 +2004,9 @@ function porcelainPaths(records: readonly PorcelainV1Record[]): string[] {
   const seen = new Set<string>();
   const paths: string[] = [];
   for (const record of records) {
+    // The index column is already staged. Re-adding those paths can fail when a
+    // tracked deletion intentionally leaves an ignored local-only file behind.
+    if (record.xy[1] === " ") continue;
     for (const path of [record.path, record.sourcePath]) {
       if (path !== undefined && !seen.has(path)) {
         seen.add(path);
