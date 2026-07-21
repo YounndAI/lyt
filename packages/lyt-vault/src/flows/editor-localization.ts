@@ -1748,7 +1748,10 @@ function makeReceipt(
     timestamps: { started_at: now.toISOString(), finished_at: now.toISOString() },
     replay: {
       disposition: status === "replayed" ? "replayed" : status === "refused" ? "rejected" : "new",
-      key_digest: plan.plan_digest,
+      key_digest: digestStable({
+        operation: "editor-localization-apply",
+        plan_digest: plan.plan_digest,
+      }),
     },
     status,
     exit_code: success ? 0 : 2,
