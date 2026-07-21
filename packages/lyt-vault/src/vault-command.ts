@@ -21,6 +21,7 @@ import { buildAddEdgeCommand } from "./commands/add-edge.js";
 import { buildAdoptCommand } from "./commands/adopt.js";
 import { buildCloneCommand } from "./commands/clone.js";
 import { buildDeleteCommand } from "./commands/delete.js";
+import { buildDestinationCommand } from "./commands/destination.js";
 import { buildDisconnectCommand } from "./commands/disconnect.js";
 import { buildForgetCommand } from "./commands/forget.js";
 import { buildFreezeCommand } from "./commands/freeze.js";
@@ -61,6 +62,7 @@ export function buildVaultSubcommand(): Command {
   vault.addCommand(buildCloneCommand());
   vault.addCommand(buildListCommand());
   vault.addCommand(buildInfoCommand());
+  vault.addCommand(buildDestinationCommand());
   vault.addCommand(buildRefreshCommand());
   vault.addCommand(buildOpenCommand());
   vault.addCommand(buildForgetCommand());

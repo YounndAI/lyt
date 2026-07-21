@@ -35,7 +35,7 @@
 // natural composer; this flow file is the FIRST member of packages/lyt's
 // flows/ directory.
 //
-// Open-once `registryDb?` seam from line 1 per v1.A.5 CR-B1 (10th
+// Open-once `registryDb?` seam from line 1 per v1.A.5 (10th
 // application across v1.A.5 → v1.D.* → v1.B.* lineage).
 
 import { execFileSync } from "node:child_process";
@@ -259,7 +259,7 @@ export interface InitBootstrapArgs {
   ghExecutor?: GhExecutor;
   // Open-once `registryDb?` seam: when supplied, the flow uses the
   // caller's already-open libSQL client and DOES NOT close it. v1.A.5
-  // CR-B1 invariant.
+  // invariant.
   registryDb?: Client;
   nowIso?: string;
   // Injectable seam for DISCOVERY branch — the default impl (when not

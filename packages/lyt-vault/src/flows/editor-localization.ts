@@ -1131,6 +1131,8 @@ async function observeProductionContext(
     local.repository === "present" && local.refusal_reason === null
       ? await observePodRemoteState({ repository_path: vault.path, local })
       : null;
+  if (vault.destination.source === "legacy-derived")
+    return { target: resolvedTarget, local, remote, permission: null, policyEpoch: null };
   if (isExplicitLocalNoOrigin(vault))
     return { target: resolvedTarget, local, remote, permission: null, policyEpoch: null };
   const opened = openRegistryReadOnly(
