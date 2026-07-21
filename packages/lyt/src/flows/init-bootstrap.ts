@@ -35,7 +35,7 @@
 // natural composer; this flow file is the FIRST member of packages/lyt's
 // flows/ directory.
 //
-// Open-once `registryDb?` seam from line 1 per v1.A.5 (10th
+// Open-once `registryDb?` seam from line 1 per v1.A.5 CR-B1 (10th
 // application across v1.A.5 → v1.D.* → v1.B.* lineage).
 
 import { execFileSync } from "node:child_process";
@@ -71,7 +71,7 @@ import {
   parseVaultYon,
   readIdentityCache,
   realFederationGhClient,
-  regeneratePodManifestNonFatal,
+  regeneratePodManifestFlow,
   resolveCreationPlanV1,
   withCreationRepositoryEffectsV1,
   resolveVaultPath,
@@ -259,7 +259,7 @@ export interface InitBootstrapArgs {
   ghExecutor?: GhExecutor;
   // Open-once `registryDb?` seam: when supplied, the flow uses the
   // caller's already-open libSQL client and DOES NOT close it. v1.A.5
-  // invariant.
+  // CR-B1 invariant.
   registryDb?: Client;
   nowIso?: string;
   // Injectable seam for DISCOVERY branch — the default impl (when not
@@ -732,12 +732,17 @@ async function doFreshBranch(
   // (Brief A) — regenerate the derived pod manifest from the now-populated
   // registry so `lyt init` (fresh) leaves a POPULATED pod.yon listing
   // personal/main (acceptance #1). Runs AFTER the federation forge wrote the
-  // skeleton + federation_state row. Non-fatal; reuses the open db.
-  if (handle !== null) {
-    await regeneratePodManifestNonFatal(db, {
-      handle,
-      ...(args.nowIso !== undefined ? { nowIso: args.nowIso } : {}),
-    });
+  // skeleton + federation_state row. Fresh creation is not complete unless the
+  // derived manifest contains the one mesh + main vault created from the empty
+  // preflight topology, so regeneration and this postcondition are fatal here.
+  const manifestResult = await regeneratePodManifestFlow(db, {
+    handle,
+    ...(args.nowIso !== undefined ? { nowIso: args.nowIso } : {}),
+  });
+  if (manifestResult.skipped || manifestResult.meshCount !== 1 || manifestResult.vaultCount !== 1) {
+    throw new Error(
+      `Fresh bootstrap produced an incomplete pod manifest (${manifestResult.meshCount} meshes, ${manifestResult.vaultCount} vaults).`,
+    );
   }
 
   // The pod manifest changes only after the mesh/vault topology exists. Its
