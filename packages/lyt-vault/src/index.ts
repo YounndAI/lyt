@@ -1533,7 +1533,7 @@ export type { SpawnInvocation } from "./util/gh-federation.js";
 // federation flows use it internally; the meta CLI now needs it too.
 export { getHandleFromIdentity } from "./util/identity.js";
 export { validateMeshName, validateVaultName } from "./util/identity.js";
-export { getFederationRepoDir, getFederationYonPath } from "./util/federation-paths.js";
+export { getFederationRepoDir, getFederationRoot, getFederationYonPath } from "./util/federation-paths.js";
 // Brief B (§3-§6) — minimal config seam (publish/visibility/conflict
 // defaults). The full config.yon layer is deferred (flagged for oversight).
 export {
