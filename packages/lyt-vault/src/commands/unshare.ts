@@ -22,7 +22,7 @@ export function buildUnshareCommand(): Command {
   const cmd = new Command("unshare");
   cmd
     .description(
-      "Revoke a GitHub handle's access to a vault (remove the gh repo-collaborator). Requires --yes.",
+      "Remove a GitHub handle's direct repo-collaborator grant. Effective access through public, organization, or team membership is not checked. Requires --yes.",
     )
     .argument("<name>", "Registered vault name")
     .requiredOption("--with <handle>", "GitHub handle to unshare from")
@@ -41,7 +41,10 @@ export function buildUnshareCommand(): Command {
           return;
         }
         // eslint-disable-next-line no-console
-        console.log(`Unshared '${result.vault}' from '${result.grantee}'.`);
+        console.log(
+          `Removed the direct collaborator grant on '${result.vault}' for '${result.grantee}'. ` +
+            `Effective access was not checked and may remain through public, organization, or team access.`,
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // eslint-disable-next-line no-console

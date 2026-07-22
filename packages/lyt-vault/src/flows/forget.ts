@@ -17,10 +17,13 @@
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { removeKnownPath } from "../registry/known-paths.js";
 import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
+import { vaultOriginCoordinate } from "../registry/vault-addressing.js";
+import { entryModeForSource } from "../util/bucket-mesh.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { vaultRepoName } from "../util/federation-paths.js";
 import { appendFedVaultTombstone } from "../yon/federation-vault-ledger-write.js";
 import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
+import { appendSubscriptionTombstone } from "../yon/subscription-ledger-write.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
@@ -34,6 +37,7 @@ export interface ForgetFlowResult {
   vault: VaultRow;
   tombstoned: boolean;
   removedKnownPath: boolean;
+  subscriptionLedgerTombstoned: boolean;
   // Phase E item 1 (#9) — pod-local alias names that POINTED at this vault
   // and were dropped (tombstoned) because forget (the vault-unsubscribe path)
   // orphans them. Empty when the vault had no aliases. forget has no interactive
@@ -63,6 +67,25 @@ export async function forgetVaultFlow(
     // this forget would ORPHAN before mutating the registry; drop them after on
     // the confirmed path. (See flows/delete.ts for the symmetric wiring.)
     const orphanedAliases = liveAliasNamesForTargetRid(vault.ridHex);
+    let subscriptionLedgerTombstoned = false;
+    if (vault.source === "shared" || vault.source === "subscribed") {
+      const coordinate = vaultOriginCoordinate(vault);
+      if (coordinate === null) {
+        throw new Error(
+          `Cannot forget foreign vault '${vault.name}': its durable subscription identity ` +
+            `cannot be derived because the registered git origin is missing or invalid.`,
+        );
+      }
+      // The subscription ledger is the durable cross-machine authority. Write
+      // its tombstone before removing the local registry row so a failed append
+      // cannot leave an apparently-forgotten vault that later resurrects.
+      appendSubscriptionTombstone({
+        coordinate,
+        rid: vault.ridHex,
+        entryMode: entryModeForSource(vault.source),
+      });
+      subscriptionLedgerTombstoned = true;
+    }
     let result: ForgetFlowResult;
     if (tombstone) {
       await tombstoneVault(db, vault.rid);
@@ -70,6 +93,7 @@ export async function forgetVaultFlow(
         vault: { ...vault, status: "tombstoned" },
         tombstoned: true,
         removedKnownPath: false,
+        subscriptionLedgerTombstoned,
         orphanedAliases,
       };
     } else {
@@ -79,7 +103,13 @@ export async function forgetVaultFlow(
         removeKnownPath(vault.path);
         removedKnownPath = true;
       }
-      result = { vault, tombstoned: false, removedKnownPath, orphanedAliases };
+      result = {
+        vault,
+        tombstoned: false,
+        removedKnownPath,
+        subscriptionLedgerTombstoned,
+        orphanedAliases,
+      };
     }
     // Drop the orphaned aliases on the confirmed path — tombstone each via the
     // existing removeAliasFlow / appendAliasTombstone path. Reuses the open db.

@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.10] — 2026-07-22
+
+### Changed
+
+- Stabilized lifecycle operations, update/reconciliation, editor localization, and the exact seven-package release contract.
+
+---
+
 ## [0.20.9] — 2026-07-22
 
 ### Changed

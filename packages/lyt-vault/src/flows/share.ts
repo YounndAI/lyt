@@ -74,6 +74,8 @@ export interface UnshareVaultResult {
   vault: string;
   grantee: Caller;
   status: "unshared";
+  revoked: "direct-collaborator-grant";
+  effectiveAccess: "not-checked";
 }
 
 const VALID_LEVELS: readonly ShareLevel[] = ["read", "write"];
@@ -190,6 +192,8 @@ export async function unshareVaultFlow(
       vault: row.name,
       grantee,
       status: "unshared",
+      revoked: "direct-collaborator-grant",
+      effectiveAccess: "not-checked",
     };
   } finally {
     if (owns) await closeRegistry(db);
