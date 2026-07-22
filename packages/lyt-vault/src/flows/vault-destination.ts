@@ -10,6 +10,7 @@ import { getVaultByName } from "../registry/repo.js";
 import { setCanonicalDestinationPolicy } from "./federation/destination-policy-service.js";
 import { parseGithubPublicationTarget } from "../util/permission-observation.js";
 import { normalizeGithubPublicationCoordinate } from "../util/publication-coordinate.js";
+import { vaultRepoName } from "../util/federation-paths.js";
 
 export interface SetVaultDestinationArgs {
   name: string;
@@ -55,13 +56,10 @@ export async function setVaultDestinationFlow(
     let repositoryName: string | null = null;
     if (target !== null) {
       const origin = normalizeGithubPublicationCoordinate(vault.gitUrl);
-      if (origin === null) {
-        throw new Error("GitHub destination override requires one parseable existing GitHub origin.");
-      }
-      if (origin.owner.toLowerCase() !== target.owner) {
+      if (origin !== null && origin.owner.toLowerCase() !== target.owner) {
         throw new Error("Destination override cannot replace the existing origin owner.");
       }
-      repositoryName = origin.repositoryName;
+      repositoryName = origin?.repositoryName ?? vaultRepoName(vault.name);
     }
 
     const winner = await setCanonicalDestinationPolicy(db, {

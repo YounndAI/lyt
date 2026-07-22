@@ -18,6 +18,7 @@ export const POD_TRANSFORMATION_PROOF_SCHEMA_ID = "lyt.pod-transformation-proof"
 export const POD_TRANSFORMATION_PROOF_SCHEMA_VERSION = 1 as const;
 export const POD_GENERATED_LEDGER_NAMESPACES = [
   "aliases",
+  "destination-policy",
   "mesh-edges",
   "machines",
   "meshes",
