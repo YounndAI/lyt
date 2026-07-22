@@ -40,13 +40,12 @@
 // at enqueue and the ACTUAL value after apply — `markOpApplied` writes back
 // what really happened, so a half-landed op is never mislabelled in history.
 
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, normalize, resolve } from "node:path";
 
 import { createClient, type Client } from "@libsql/client";
-import type { InArgs, InStatement, ResultSet } from "@libsql/client";
-import BetterSqlite3 from "better-sqlite3";
 
+import { openSqliteReadOnly, type ReadOnlySqliteQueryClient } from "../sqlite/read-only-client.js";
 import { getLytHome } from "../util/paths.js";
 import { newUuidv7Bytes } from "../util/uuid7.js";
 import {
@@ -140,11 +139,7 @@ export function getOpLogPath(): string {
   return join(getLytHome(), "op-log.db");
 }
 
-type SqlValue = string | number | bigint | Uint8Array | null;
-
-export interface ReadOnlyOperationLogClient {
-  execute(statement: InStatement | string, args?: InArgs): Promise<ResultSet>;
-}
+export type ReadOnlyOperationLogClient = ReadOnlySqliteQueryClient;
 
 export type ReadOnlyOperationLogOpenResult =
   | Readonly<{ kind: "missing"; path: string }>
@@ -155,59 +150,23 @@ export type ReadOnlyOperationLogOpenResult =
       close(): void;
     }>;
 
-function assertReceiptReadStatement(sql: string): void {
-  const normalized = sql.trimStart().replace(/^(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/\s*)*/u, "");
-  if (!/^SELECT\b/iu.test(normalized)) {
-    throw new Error("read-only operation-log capability accepts SELECT statements only");
-  }
-}
-
-function operationLogReadOnlyClient(db: BetterSqlite3.Database): ReadOnlyOperationLogClient {
-  return {
-    async execute(statement: InStatement | string, args?: InArgs): Promise<ResultSet> {
-      const sql = typeof statement === "string" ? statement : statement.sql;
-      const values = (typeof statement === "string" ? args : statement.args) as
-        readonly SqlValue[] | Record<string, SqlValue> | undefined;
-      assertReceiptReadStatement(sql);
-      const prepared = db.prepare(sql);
-      const rows = (
-        values === undefined
-          ? prepared.all()
-          : Array.isArray(values)
-            ? prepared.all(...values)
-            : prepared.all(values)
-      ) as Record<string, SqlValue>[];
-      const columns = rows.length === 0 ? [] : Object.keys(rows[0]!);
-      return {
-        columns,
-        columnTypes: [],
-        rows,
-        rowsAffected: 0,
-        lastInsertRowid: undefined,
-        toJSON: () => ({ columns, rows }),
-      } as unknown as ResultSet;
-    },
-  };
-}
-
-/** Open the existing receipt store physically read-only and never migrate it. */
+/** Open the existing receipt store behind the shared read-only capability. */
 export async function openOpLogReadOnly(opts?: {
   path?: string;
 }): Promise<ReadOnlyOperationLogOpenResult> {
   const path = opts?.path ?? getOpLogPath();
-  if (!existsSync(path)) return Object.freeze({ kind: "missing" as const, path });
-  const db = new BetterSqlite3(path, { readonly: true, fileMustExist: true, timeout: 0 });
-  const client = operationLogReadOnlyClient(db);
+  const opened = openSqliteReadOnly(path);
+  if (opened.kind === "missing") return opened;
   try {
-    await assertReadableReceiptSchema(client as unknown as Client);
+    await assertReadableReceiptSchema(opened.database.client as unknown as Client);
     return Object.freeze({
       kind: "open" as const,
-      path,
-      client,
-      close: () => db.close(),
+      path: opened.path,
+      client: opened.database.client,
+      close: () => opened.database.close(),
     });
   } catch (error) {
-    db.close();
+    opened.database.close();
     throw error;
   }
 }

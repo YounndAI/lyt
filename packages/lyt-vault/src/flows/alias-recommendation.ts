@@ -113,7 +113,7 @@ export function deriveVaultAliasRecommendation(args: {
   return null;
 }
 
-/** Read-only observation. The production path opens SQLite physically read-only. */
+/** Read-only observation through the shared SELECT-only capability. */
 export async function observeVaultAliasRecommendation(
   args: { canonicalName: string; vaultRid: string },
   registryDb?: Client,

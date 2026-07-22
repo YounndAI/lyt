@@ -287,7 +287,7 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
   });
   assertVaultCreationBinding(creationPreflight, creationBinding);
   // Re-read and revalidate immediately before the first migration-capable
-  // registry open. The preflight itself is physically read-only.
+  // registry open. The preflight itself is capability-level read-only.
   creationPreflight = inspectVaultInitPreflight({
     name: opts.name,
     ...(opts.path === undefined ? {} : { path: opts.path }),

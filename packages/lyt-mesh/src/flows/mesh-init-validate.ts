@@ -160,15 +160,11 @@ async function getRegistryNames(opts: ValidateOptions): Promise<Set<string>> {
   if (!existsSync(registryPath)) return new Set();
   const db = openMeshInitRegistryReadOnly(registryPath);
   try {
-    const table = db
-      .prepare(
-        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'vaults' LIMIT 1",
-      )
-      .get();
+    const table = db.queryOne<{ present: number }>(
+      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'vaults' LIMIT 1",
+    );
     if (table === undefined) return new Set();
-    const rows = db
-      .prepare<[], { name: string }>("SELECT name FROM vaults ORDER BY name")
-      .all();
+    const rows: Array<{ name: string }> = db.queryAll("SELECT name FROM vaults ORDER BY name");
     return new Set(rows.map((row) => row.name));
   } finally {
     db.close();

@@ -8,13 +8,12 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import BetterSqlite3 from "better-sqlite3";
-
 import { getRegistryPath } from "../registry/client.js";
 import { validateMeshName } from "../util/identity.js";
 import { getDefaultVaultsRoot, resolveVaultPath } from "../util/paths.js";
 import { getFederationRepoDir } from "../util/federation-paths.js";
 import { assertNoSymlinkOnWritePath, assertSafeWritePath } from "../util/write-path-guard.js";
+import { openSqliteReadOnly, type ReadOnlySqliteDatabase } from "../sqlite/read-only-client.js";
 import type { CreationPlanV1 } from "./creation-plan.js";
 
 /** Facts acquired without creating, migrating, or pragmatizing the registry. */
@@ -47,31 +46,27 @@ export function inspectRegistryTopologyPreflight(args?: {
   registryPath?: string;
 }): RegistryTopologyPreflight {
   const registryPath = args?.registryPath ?? getRegistryPath();
-  if (!existsSync(registryPath)) {
+  const opened = openSqliteReadOnly(registryPath);
+  if (opened.kind === "missing") {
     return { registryPath, meshCount: 0, vaultCount: 0, podIdentities: [] };
   }
-  const db = openMeshInitRegistryReadOnly(registryPath);
   try {
     const tables = new Set(
-      (
-        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
-          name: string;
-        }>
-      ).map((row) => row.name),
+      opened.database
+        .queryAll<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map((row) => String(row.name)),
     );
     const scalar = (table: string): number => {
       if (!tables.has(table)) return 0;
-      const row = db.prepare(`SELECT count(*) AS count FROM ${table}`).get() as
-        | { count: number }
-        | undefined;
+      const row = opened.database.queryOne<{ count: number | bigint }>(
+        `SELECT count(*) AS count FROM ${table}`,
+      );
       return Number(row?.count ?? 0);
     };
     const podIdentities = tables.has("federation_state")
-      ? (db
-          .prepare(
-            "SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle",
-          )
-          .all() as Array<{ handle: string; rid: string }>)
+      ? opened.database.queryAll<{ handle: string; rid: string }>(
+          "SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle",
+        )
       : [];
     return {
       registryPath,
@@ -83,19 +78,22 @@ export function inspectRegistryTopologyPreflight(args?: {
       })),
     };
   } finally {
-    db.close();
+    opened.database.close();
   }
 }
 
 /** Open an existing registry without granting the connection write capability. */
-export function openMeshInitRegistryReadOnly(registryPath: string): BetterSqlite3.Database {
-  return new BetterSqlite3(registryPath, { readonly: true, fileMustExist: true });
+export function openMeshInitRegistryReadOnly(registryPath: string): ReadOnlySqliteDatabase {
+  const opened = openSqliteReadOnly(registryPath);
+  if (opened.kind === "missing") throw new Error(`registry does not exist: ${opened.path}`);
+  return opened.database;
 }
 
 /**
  * The creation plan's last read boundary.  A missing registry is deliberately
  * an empty registry; opening it must not create a directory, database, cache,
- * or migration row.  Existing SQLite files are opened with mode=ro only.
+ * or migration row. Existing files are accessed through the SELECT-only
+ * capability.
  */
 export async function inspectMeshInitPreflight(args: {
   name: string;
@@ -106,9 +104,9 @@ export async function inspectMeshInitPreflight(args: {
   const mainVaultPath = resolveVaultPath(`${args.name}/main`);
   const registryPath = args.registryPath ?? getRegistryPath();
   const meshYonPath = join(mainVaultPath, ".lyt", "mesh.yon");
-  const db = existsSync(registryPath) ? openMeshInitRegistryReadOnly(registryPath) : null;
+  const opened = openSqliteReadOnly(registryPath);
   try {
-    if (db === null)
+    if (opened.kind === "missing")
       return {
         mainVaultPath,
         meshYonPath,
@@ -119,29 +117,27 @@ export async function inspectMeshInitPreflight(args: {
         podIdentity: { state: "missing" },
       };
     const tables = new Set(
-      (
-        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
-          name: string;
-        }>
-      ).map((row) => row.name),
+      opened.database
+        .queryAll<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map((row) => String(row.name)),
     );
     const mesh = tables.has("meshes")
-      ? db.prepare("SELECT 1 AS present FROM meshes WHERE name = ? LIMIT 1").get(args.name)
+      ? opened.database.queryOne("SELECT 1 AS present FROM meshes WHERE name = ? LIMIT 1", [
+          args.name,
+        ])
       : undefined;
     const parent =
       args.parent === undefined || args.parent.length === 0
         ? null
         : tables.has("meshes") &&
-          db.prepare("SELECT 1 AS present FROM meshes WHERE name = ? LIMIT 1").get(args.parent) !==
-            undefined;
+          opened.database.queryOne("SELECT 1 AS present FROM meshes WHERE name = ? LIMIT 1", [
+            args.parent,
+          ]) !== undefined;
     const pods = !tables.has("federation_state")
       ? []
-      : db
-          .prepare<
-            [],
-            { handle: string; rid: string }
-          >("SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle LIMIT 2")
-          .all();
+      : opened.database.queryAll<{ handle: string; rid: string }>(
+          "SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle LIMIT 2",
+        );
     const podIdentity =
       pods.length === 0
         ? ({ state: "missing" } as const)
@@ -166,7 +162,7 @@ export async function inspectMeshInitPreflight(args: {
       podIdentity,
     };
   } finally {
-    db?.close();
+    if (opened.kind === "open") opened.database.close();
   }
 }
 

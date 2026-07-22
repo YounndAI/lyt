@@ -55,7 +55,7 @@ import {
 import type { ReceiptV1 } from "../op/receipt-v1.js";
 import { CreationMutationFailure } from "../op/creation-mutation-journal.js";
 import { plannedInitialScaffoldPaths, plannedObsidianScaffoldPaths } from "../scaffold/init.js";
-import BetterSqlite3 from "better-sqlite3";
+import { openSqliteReadOnly } from "../sqlite/read-only-client.js";
 import {
   observePublicationPermission,
   type PublicationPermissionObserver,
@@ -898,19 +898,23 @@ function hasExactRegistryMeshMainReplay(
 ): boolean {
   if (plan.intended_effects.mesh.kind === "none" || !existsSync(registryPath)) return true;
   const meshRid = plan.intended_effects.mesh.rid.replaceAll("-", "").toLowerCase();
-  const db = new BetterSqlite3(registryPath, { readonly: true, fileMustExist: true });
+  const opened = openSqliteReadOnly(registryPath);
+  if (opened.kind === "missing") return true;
   try {
-    const main = db
-      .prepare(
-        `SELECT lower(hex(v.rid)) AS rid,
+    const main = opened.database.queryOne<{
+      rid: string;
+      path: string;
+      home_mesh_rid: string;
+    }>(
+      `SELECT lower(hex(v.rid)) AS rid,
                 v.path AS path,
                 lower(hex(v.home_mesh_rid)) AS home_mesh_rid
            FROM meshes m
            JOIN vaults v ON v.rid = m.main_vault_rid
           WHERE lower(hex(m.rid)) = ?
           LIMIT 1`,
-      )
-      .get(meshRid) as { rid: string; path: string; home_mesh_rid: string } | undefined;
+      [meshRid],
+    );
     return (
       main !== undefined &&
       main.home_mesh_rid === meshRid &&
@@ -925,7 +929,7 @@ function hasExactRegistryMeshMainReplay(
   } catch {
     return false;
   } finally {
-    db.close();
+    opened.database.close();
   }
 }
 
@@ -988,21 +992,21 @@ function exactDestinationPolicy(
 
 function allPlannedRegistryStateExists(registryPath: string, plan: CreationPlanV1): boolean {
   if (!existsSync(registryPath)) return false;
-  const db = new BetterSqlite3(registryPath, { readonly: true, fileMustExist: true });
+  const opened = openSqliteReadOnly(registryPath);
+  if (opened.kind === "missing") return false;
   try {
     for (const plannedVault of plan.intended_effects.vaults) {
       const binding = plan.intended_effects.topology_bindings.find(
         (entry) => entry.vault_rid === plannedVault.rid,
       );
-      const row = db
-        .prepare(
-          `SELECT path,
+      const row = opened.database.queryOne<{ path: string; home_mesh_rid: string | null }>(
+        `SELECT path,
                   CASE WHEN home_mesh_rid IS NULL THEN NULL ELSE lower(hex(home_mesh_rid)) END AS home_mesh_rid
              FROM vaults
             WHERE lower(hex(rid)) = ?
             LIMIT 1`,
-        )
-        .get(plannedVault.rid) as { path: string; home_mesh_rid: string | null } | undefined;
+        [plannedVault.rid],
+      );
       if (
         row === undefined ||
         normalizeFilesystemPath(row.path) !== normalizeFilesystemPath(plannedVault.root) ||
@@ -1014,36 +1018,38 @@ function allPlannedRegistryStateExists(registryPath: string, plan: CreationPlanV
     for (const row of plan.intended_effects.registry_rows) {
       const present =
         row.table === "federation_state"
-          ? db
-              .prepare("SELECT 1 FROM federation_state WHERE lower(hex(fed_rid)) = ? LIMIT 1")
-              .get(row.key)
+          ? opened.database.queryOne(
+              "SELECT 1 FROM federation_state WHERE lower(hex(fed_rid)) = ? LIMIT 1",
+              [row.key],
+            )
           : row.table === "meshes"
-            ? db.prepare("SELECT 1 FROM meshes WHERE lower(hex(rid)) = ? LIMIT 1").get(row.key)
+            ? opened.database.queryOne("SELECT 1 FROM meshes WHERE lower(hex(rid)) = ? LIMIT 1", [
+                row.key,
+              ])
             : row.table === "vaults"
-              ? db.prepare("SELECT 1 FROM vaults WHERE lower(hex(rid)) = ? LIMIT 1").get(row.key)
+              ? opened.database.queryOne("SELECT 1 FROM vaults WHERE lower(hex(rid)) = ? LIMIT 1", [
+                  row.key,
+                ])
               : (() => {
                   const [meshRid, vaultRid] = row.key.split(":");
-                  return db
-                    .prepare(
-                      "SELECT 1 FROM mesh_vaults WHERE lower(hex(mesh_rid)) = ? AND lower(hex(vault_rid)) = ? LIMIT 1",
-                    )
-                    .get(meshRid, vaultRid);
+                  return opened.database.queryOne(
+                    "SELECT 1 FROM mesh_vaults WHERE lower(hex(mesh_rid)) = ? AND lower(hex(vault_rid)) = ? LIMIT 1",
+                    [meshRid!, vaultRid!],
+                  );
                 })();
       if (present === undefined) return false;
     }
     for (const binding of plan.intended_effects.topology_bindings) {
-      const present = db
-        .prepare(
-          "SELECT 1 FROM mesh_vaults WHERE lower(hex(mesh_rid)) = ? AND lower(hex(vault_rid)) = ? AND role = 'home' LIMIT 1",
-        )
-        .get(binding.mesh_rid, binding.vault_rid);
+      const present = opened.database.queryOne(
+        "SELECT 1 FROM mesh_vaults WHERE lower(hex(mesh_rid)) = ? AND lower(hex(vault_rid)) = ? AND role = 'home' LIMIT 1",
+        [binding.mesh_rid, binding.vault_rid],
+      );
       if (present === undefined) return false;
       if (binding.role === "main") {
-        const main = db
-          .prepare(
-            "SELECT 1 FROM meshes WHERE lower(hex(rid)) = ? AND lower(hex(main_vault_rid)) = ? LIMIT 1",
-          )
-          .get(binding.mesh_rid, binding.vault_rid);
+        const main = opened.database.queryOne(
+          "SELECT 1 FROM meshes WHERE lower(hex(rid)) = ? AND lower(hex(main_vault_rid)) = ? LIMIT 1",
+          [binding.mesh_rid, binding.vault_rid],
+        );
         if (main === undefined) return false;
       }
     }
@@ -1051,7 +1057,7 @@ function allPlannedRegistryStateExists(registryPath: string, plan: CreationPlanV
   } catch {
     return false;
   } finally {
-    db.close();
+    opened.database.close();
   }
 }
 

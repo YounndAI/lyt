@@ -18,8 +18,6 @@ import { Command } from "commander";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import BetterSqlite3 from "better-sqlite3";
-
 import { generateMeshCanvasFlow } from "../flows/canvas-mesh.js";
 import { meshInitFlow } from "../flows/mesh-init.js";
 import {
@@ -34,6 +32,7 @@ import {
 } from "../flows/creation-plan.js";
 import { inspectMeshInitPreflight } from "../flows/mesh-init-preflight.js";
 import { inspectVaultInitPreflight } from "../flows/vault-init-preflight.js";
+import { openSqliteReadOnly } from "../sqlite/read-only-client.js";
 import { deriveProvisionalHandle } from "../util/identity.js";
 import { normalizeCommanderCreationDestination } from "../op/cli-destination-normalization.js";
 import { observeActiveActor, type ActiveActorObservation } from "../op/active-actor-observation.js";
@@ -656,23 +655,23 @@ function exactMeshParent(
       readFileSync(`${mainVaultPath}/.lyt/vault.yon`, "utf8"),
     ).parentVault;
     if (parentName === undefined || parentName.length === 0) return parsed === null;
-    const db = new BetterSqlite3(registryPath, { readonly: true, fileMustExist: true });
+    const opened = openSqliteReadOnly(registryPath);
+    if (opened.kind === "missing") return false;
     try {
-      const parent = db
-        .prepare(
-          `SELECT lower(hex(main_vault_rid)) AS rid
+      const parent = opened.database.queryOne<{ rid: string }>(
+        `SELECT lower(hex(main_vault_rid)) AS rid
              FROM meshes
             WHERE name = ? AND main_vault_rid IS NOT NULL
             LIMIT 1`,
-        )
-        .get(parentName) as { rid: string } | undefined;
+        [parentName],
+      );
       return (
         parent !== undefined &&
         parsed !== null &&
         parsed.replaceAll("-", "").toLowerCase() === parent.rid
       );
     } finally {
-      db.close();
+      opened.database.close();
     }
   } catch {
     return false;

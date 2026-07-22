@@ -169,7 +169,7 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
     throw new Error(`--parent <mesh>: no mesh registered with name '${opts.parent}'.`);
   }
 
-  // This is the final physically read-only revalidation immediately before
+  // This is the final capability-level read-only revalidation immediately before
   // opening the migration-capable apply registry.
   const applyPreflight = await inspectMeshInitPreflight({
     name: opts.name,

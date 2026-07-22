@@ -8,8 +8,6 @@
 import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
-import BetterSqlite3 from "better-sqlite3";
-
 import { getRegistryPath } from "../registry/client.js";
 import {
   destinationPolicyKey,
@@ -24,6 +22,7 @@ import {
 import { resolveVaultPath } from "../util/paths.js";
 import { parseCanonicalDestinationTarget } from "../registry/destination-policy.js";
 import { assertSafeWritePath } from "../util/write-path-guard.js";
+import { openSqliteReadOnly } from "../sqlite/read-only-client.js";
 import {
   resolveCreationPlanV1,
   type CreationPlanV1,
@@ -82,9 +81,9 @@ export function resolveVaultInitTarget(args: {
 }
 
 /**
- * Physically read-only creation preflight. A missing registry is an empty
- * registry. Existing files are opened with SQLite's read-only flag and never
- * receive migrations, PRAGMAs, caches, or identity writes.
+ * Capability-level read-only creation preflight. A missing registry is an
+ * empty registry. Existing files never receive migrations, PRAGMAs, caches,
+ * or identity writes through this boundary.
  */
 export function inspectVaultInitPreflight(args: {
   name: string;
@@ -95,7 +94,8 @@ export function inspectVaultInitPreflight(args: {
 }): VaultInitPreflight {
   const target = resolveVaultInitTarget(args);
   const registryPath = args.registryPath ?? getRegistryPath();
-  if (!existsSync(registryPath)) {
+  const opened = openSqliteReadOnly(registryPath);
+  if (opened.kind === "missing") {
     return {
       effectiveName: target.effectiveName,
       meshEnabled: args.meshEnabled,
@@ -109,38 +109,33 @@ export function inspectVaultInitPreflight(args: {
     };
   }
 
-  const db = new BetterSqlite3(registryPath, { readonly: true, fileMustExist: true });
   try {
     const tables = new Set(
-      (
-        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
-          name: string;
-        }>
-      ).map((row) => row.name),
+      opened.database
+        .queryAll<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map((row) => String(row.name)),
     );
     const existingVault = tables.has("vaults")
-      ? (db
-          .prepare("SELECT lower(hex(rid)) AS rid, path FROM vaults WHERE name = ? LIMIT 1")
-          .get(target.effectiveName) as { rid: string; path: string } | undefined)
+      ? opened.database.queryOne<{ rid: string; path: string }>(
+          "SELECT lower(hex(rid)) AS rid, path FROM vaults WHERE name = ? LIMIT 1",
+          [target.effectiveName],
+        )
       : undefined;
     const podRows = tables.has("federation_state")
-      ? (db
-          .prepare(
-            "SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle LIMIT 2",
-          )
-          .all() as Array<{ handle: string; rid: string }>)
+      ? opened.database.queryAll<{ handle: string; rid: string }>(
+          "SELECT handle, lower(hex(fed_rid)) AS rid FROM federation_state ORDER BY handle LIMIT 2",
+        )
       : [];
     const meshRow =
       target.meshName !== null && tables.has("meshes")
-        ? (db
-            .prepare(
-              `SELECT lower(hex(m.rid)) AS rid, m.name, m.own_created, m.destination_kind,
+        ? opened.database.queryOne<Record<string, unknown>>(
+            `SELECT lower(hex(m.rid)) AS rid, m.name, m.own_created, m.destination_kind,
                       m.destination_source, m.push_target, m.push_kind, v.path AS main_vault_path
                  FROM meshes m
                  LEFT JOIN vaults v ON v.rid = m.main_vault_rid
                 WHERE m.name = ? LIMIT 1`,
-            )
-            .get(target.meshName) as Record<string, unknown> | undefined)
+            [target.meshName],
+          )
         : undefined;
     const podRid = podRows.length === 1 ? String(podRows[0]!.rid) : null;
     const podIdentity =
@@ -192,7 +187,7 @@ export function inspectVaultInitPreflight(args: {
             },
     };
   } finally {
-    db.close();
+    opened.database.close();
   }
 }
 

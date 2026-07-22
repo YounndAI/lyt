@@ -14,10 +14,7 @@
  * limitations under the License.
  */
 
-import { existsSync } from "node:fs";
-
-import type { Client, InArgs, InStatement, ResultSet } from "@libsql/client";
-import BetterSqlite3 from "better-sqlite3";
+import type { Client } from "@libsql/client";
 
 import type {
   DestinationKind,
@@ -29,8 +26,11 @@ import type { VaultSource, VaultStatus } from "./repo.js";
 import { computeDisplayName, resolveVault } from "./vault-addressing.js";
 import { getMeshByRid } from "./meshes-repo.js";
 import { getRegistryPath } from "./client.js";
-
-type SqlValue = string | number | bigint | Uint8Array | null;
+import {
+  openSqliteReadOnly,
+  type ReadOnlySqliteDatabase,
+  type ReadOnlySqliteQueryClient,
+} from "../sqlite/read-only-client.js";
 
 export class RegistryUpgradeRequiredError extends Error {
   readonly errorCode = "registry-upgrade-required";
@@ -64,21 +64,17 @@ export interface ReadOnlyRegistryMissing {
 }
 
 /**
- * A deliberately narrow adapter. The database handle is opened by SQLite with
- * both `readonly` and `fileMustExist`; the SQL guard is defense-in-depth so a
- * future resolver edit cannot even attempt a write through this capability.
+ * A deliberately narrow adapter. The underlying handle is never exposed and
+ * every statement must pass the shared single-SELECT guard.
  */
 export interface ReadOnlyRegistryClient {
   readonly kind: "open";
   readonly path: string;
-  readonly client: ReadonlyRegistryQueryClient;
+  readonly client: ReadOnlySqliteQueryClient;
   close(): void;
 }
 
-export interface ReadonlyRegistryQueryClient {
-  execute(statement: InStatement | string, args?: InArgs): Promise<ResultSet>;
-  close(): void;
-}
+export type ReadonlyRegistryQueryClient = ReadOnlySqliteQueryClient;
 
 export type ReadOnlyRegistryOpenResult = ReadOnlyRegistryMissing | ReadOnlyRegistryClient;
 
@@ -108,62 +104,20 @@ export type ResolveVaultSnapshotResult =
   | Readonly<{ kind: "not-found"; path: string; handle: string }>
   | Readonly<{ kind: "resolved"; path: string; vault: VaultSnapshot }>;
 
-function assertReadStatement(sql: string): void {
-  const normalized = sql.trimStart().replace(/^(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/\s*)*/u, "");
-  if (!/^SELECT\b/iu.test(normalized)) {
-    throw new Error("read-only registry capability accepts SELECT statements only");
-  }
-}
-
-function valuesFromArgs(args: InArgs | undefined): readonly SqlValue[] | Record<string, SqlValue> {
-  if (args === undefined) return [];
-  return args as readonly SqlValue[] | Record<string, SqlValue>;
-}
-
-function makeClient(db: BetterSqlite3.Database): ReadonlyRegistryQueryClient {
-  const execute = async (statement: InStatement | string, args?: InArgs): Promise<ResultSet> => {
-    const sql = typeof statement === "string" ? statement : statement.sql;
-    const values =
-      typeof statement === "string" ? valuesFromArgs(args) : valuesFromArgs(statement.args);
-    assertReadStatement(sql);
-    const stmt = db.prepare(sql);
-    const rows = (Array.isArray(values) ? stmt.all(...values) : stmt.all(values)) as Record<
-      string,
-      SqlValue
-    >[];
-    const columns = rows.length === 0 ? [] : Object.keys(rows[0]!);
-    return {
-      columns,
-      columnTypes: [],
-      rows,
-      rowsAffected: 0,
-      lastInsertRowid: undefined,
-      toJSON() {
-        return { columns, rows };
-      },
-    } as unknown as ResultSet;
-  };
-
-  return {
-    execute,
-    close: () => db.close(),
-  };
-}
-
-function readAppliedVersions(db: BetterSqlite3.Database): readonly number[] {
+function readAppliedVersions(database: ReadOnlySqliteDatabase): readonly number[] {
   try {
-    const rows = db
-      .prepare("SELECT version FROM schema_migrations ORDER BY version ASC")
-      .all() as Array<{ version: number | bigint }>;
+    const rows = database.queryAll<{ version: number | bigint }>(
+      "SELECT version FROM schema_migrations ORDER BY version ASC",
+    );
     return rows.map((row) => Number(row.version));
   } catch {
     return [];
   }
 }
 
-function assertCompatibleSchema(db: BetterSqlite3.Database, path: string): void {
+function assertCompatibleSchema(database: ReadOnlySqliteDatabase, path: string): void {
   const expected = MIGRATIONS.map((migration) => migration.version).sort((a, b) => a - b);
-  const observed = readAppliedVersions(db);
+  const observed = readAppliedVersions(database);
   if (
     observed.length !== expected.length ||
     observed.some((version, index) => version !== expected[index])
@@ -191,21 +145,21 @@ function assertCompatibleSchema(db: BetterSqlite3.Database, path: string): void 
     vault_aliases: ["alias", "vault_rid"],
   };
   for (const [table, columns] of Object.entries(requiredColumns)) {
-    const tableExists = db
-      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
-      .get(table);
-    const observedColumns = tableExists
-      ? new Set(
-          // `table` is from the closed literal map above, never caller input.
-          // Some SQLite/libSQL builds do not bind pragma_table_xinfo's table
-          // argument, so use the vetted literal here.
-          (
-            db.prepare(`SELECT name FROM pragma_table_xinfo('${table}')`).all() as Array<{
-              name: string;
-            }>
-          ).map((row) => row.name),
-        )
-      : new Set<string>();
+    const tableExists = database.queryOne(
+      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+      [table],
+    );
+    const observedColumns =
+      tableExists !== undefined
+        ? new Set(
+            // `table` is from the closed literal map above, never caller input.
+            // Some SQLite/libSQL builds do not bind pragma_table_xinfo's table
+            // argument, so use the vetted literal here.
+            database
+              .queryAll<{ name: string }>(`SELECT name FROM pragma_table_xinfo('${table}')`)
+              .map((row) => String(row.name)),
+          )
+        : new Set<string>();
     const missing = columns.filter((column) => !observedColumns.has(column));
     if (missing.length > 0) {
       throw new RegistryUpgradeRequiredError(
@@ -220,31 +174,18 @@ function assertCompatibleSchema(db: BetterSqlite3.Database, path: string): void 
 
 export function openRegistryReadOnly(opts?: { path?: string }): ReadOnlyRegistryOpenResult {
   const path = opts?.path ?? getRegistryPath();
-  if (!existsSync(path)) return Object.freeze({ kind: "missing" as const, path });
-
-  // Do not use SQLite's immutable URI mode here: immutable databases ignore a
-  // live WAL, which would make a scoped check observe an inconsistent snapshot.
-  // These flags instead require SQLite to open the existing database read-only;
-  // this adapter never executes a pragma, migration, journal-mode change, or
-  // write probe. The focused fixture plants write-denied journal/WAL/SHM
-  // sentinels and watches for sidecar events as observable evidence, without
-  // claiming a portable proof about OS-level byte-range locks.
-  const db = new BetterSqlite3(path, {
-    readonly: true,
-    fileMustExist: true,
-    timeout: 0,
-  });
+  const opened = openSqliteReadOnly(path);
+  if (opened.kind === "missing") return opened;
   try {
-    assertCompatibleSchema(db, path);
-    const client = makeClient(db);
+    assertCompatibleSchema(opened.database, opened.path);
     return Object.freeze({
       kind: "open" as const,
-      path,
-      client,
-      close: () => client.close(),
+      path: opened.path,
+      client: opened.database.client,
+      close: () => opened.database.close(),
     });
   } catch (error) {
-    db.close();
+    opened.database.close();
     throw error;
   }
 }
