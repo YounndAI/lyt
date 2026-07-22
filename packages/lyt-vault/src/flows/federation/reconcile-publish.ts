@@ -21,7 +21,7 @@ import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
-import { listVaults, setVaultGitUrl, type VaultRow } from "../../registry/repo.js";
+import { listVaults, type VaultRow } from "../../registry/repo.js";
 import { hasSubscriptionSignal } from "../writability.js";
 import type { AccessProvider } from "../../access/access-provider.js";
 import { GhAccessProvider } from "../../access/gh-access-provider.js";
@@ -54,7 +54,12 @@ import {
   parseVaultOutboxTarget,
   vaultOutboxTarget,
 } from "./outbox.js";
-import { commitPodRepo, materializeVaultPublishable, type GitRunner } from "./vault-publish.js";
+import {
+  commitPodRepo,
+  establishPublishedVaultTracking,
+  materializeVaultPublishable,
+  type GitRunner,
+} from "./vault-publish.js";
 import {
   loadDestinationPolicyContext,
   resolveCanonicalOwnedVaultPublicationAuthority,
@@ -729,29 +734,21 @@ async function publishOneVault(
       }),
     );
     if (pushed.code === 0) {
-      const upstream = await opts.git(
-        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        { cwd, allowFailure: true },
-      );
-      if (upstream.code !== 0) {
-        const remoteTracking = await opts.git(["config", "branch.main.remote", "origin"], {
-          cwd,
-          allowFailure: true,
+      try {
+        await establishPublishedVaultTracking({
+          vault,
+          canonicalUrl,
+          git: opts.git,
+          registryDb: opts.registryDb,
         });
-        const mergeTracking = await opts.git(
-          ["config", "branch.main.merge", "refs/heads/main"],
-          { cwd, allowFailure: true },
-        );
-        if (remoteTracking.code !== 0 || mergeTracking.code !== 0) {
-          return {
-            ...base,
-            status: "failed",
-            pushed: true,
-            message: "pushed, but could not establish local tracking for future syncs",
-          };
-        }
+      } catch (error) {
+        return {
+          ...base,
+          status: "failed",
+          pushed: true,
+          message: error instanceof Error ? error.message : String(error),
+        };
       }
-      await setVaultGitUrl(opts.registryDb, vault.rid, canonicalUrl);
       return {
         ...base,
         status: pulled ? "pulled-then-published" : "published",

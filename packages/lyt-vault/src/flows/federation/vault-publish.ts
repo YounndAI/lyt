@@ -34,7 +34,7 @@ import {
 import { BRAND_TOPICS, formatRepoDescription } from "../../scaffold/github-defaults.js";
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import { getMeshByRid } from "../../registry/meshes-repo.js";
-import { getVaultByRid, type VaultRow } from "../../registry/repo.js";
+import { getVaultByRid, setVaultGitUrl, type VaultRow } from "../../registry/repo.js";
 import {
   observePublicationPermission,
   type PublicationPermissionObserver,
@@ -128,6 +128,45 @@ export interface MaterializeVaultResult {
   warnings: string[];
   skipped: boolean;
   skippedReason?: string;
+}
+
+export async function establishPublishedVaultTracking(args: {
+  vault: VaultRow;
+  canonicalUrl: string;
+  git: GitRunner;
+  registryDb: Client;
+}): Promise<void> {
+  const { vault, canonicalUrl, git, registryDb } = args;
+  const cwd = vault.path;
+  const upstream = await git(
+    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    { cwd, allowFailure: true },
+  );
+  if (upstream.code !== 0) {
+    const remoteTracking = await git(["config", "branch.main.remote", "origin"], {
+      cwd,
+      allowFailure: true,
+    });
+    const mergeTracking = await git(
+      ["config", "branch.main.merge", "refs/heads/main"],
+      { cwd, allowFailure: true },
+    );
+    const remoteRef = await git(["update-ref", "refs/remotes/origin/main", "HEAD"], {
+      cwd,
+      allowFailure: true,
+    });
+    if (remoteTracking.code !== 0 || mergeTracking.code !== 0 || remoteRef.code !== 0) {
+      throw new Error("push completed, but local tracking could not be established");
+    }
+    const verified = await git(
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+      { cwd, allowFailure: true },
+    );
+    if (verified.code !== 0) {
+      throw new Error("push completed, but local tracking could not be verified");
+    }
+  }
+  await setVaultGitUrl(registryDb, vault.rid, canonicalUrl);
 }
 
 function errMsg(e: unknown): string {
@@ -417,25 +456,15 @@ export async function materializeVaultPublishable(
       );
       if (pushed.code === 0) {
         result.pushed = true;
-        // `-u` would reintroduce a mutable remote-name dependency into the
-        // outward command. Establish ordinary-sync tracking metadata only
-        // after the immutable-URL push succeeds and only when no upstream is
-        // already configured. Ordinary sync revalidates this binding before
-        // every fetch/pull.
-        const upstream = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
-          cwd: vault.path,
-          allowFailure: true,
-        });
-        if (upstream.code !== 0) {
-          await git(["config", "branch.main.remote", "origin"], {
-            cwd: vault.path,
-            allowFailure: true,
-          });
-          await git(["config", "branch.main.merge", "refs/heads/main"], {
-            cwd: vault.path,
-            allowFailure: true,
-          });
+        if (opts.registryDb === undefined) {
+          throw new Error("push completed, but registry persistence is unavailable");
         }
+        await establishPublishedVaultTracking({
+          vault,
+          canonicalUrl: canonicalPushUrl,
+          git,
+          registryDb: opts.registryDb,
+        });
       } else {
         warnings.push(`push failed for ${vault.name}: ${pushed.stderr.trim().slice(0, 200)}`);
       }
