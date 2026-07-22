@@ -17,13 +17,14 @@
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { removeKnownPath } from "../registry/known-paths.js";
 import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
-import { vaultOriginCoordinate } from "../registry/vault-addressing.js";
+import { canonicalizeCoordinate, vaultOriginCoordinate } from "../registry/vault-addressing.js";
 import { entryModeForSource } from "../util/bucket-mesh.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { vaultRepoName } from "../util/federation-paths.js";
 import { appendFedVaultTombstone } from "../yon/federation-vault-ledger-write.js";
 import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
 import { appendSubscriptionTombstone } from "../yon/subscription-ledger-write.js";
+import { liveSubscriptions } from "../yon/subscription-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
@@ -68,8 +69,13 @@ export async function forgetVaultFlow(
     // the confirmed path. (See flows/delete.ts for the symmetric wiring.)
     const orphanedAliases = liveAliasNamesForTargetRid(vault.ridHex);
     let subscriptionLedgerTombstoned = false;
-    if (vault.source === "shared" || vault.source === "subscribed") {
-      const coordinate = vaultOriginCoordinate(vault);
+    const coordinate = vaultOriginCoordinate(vault);
+    const liveSubscription = coordinate === null
+      ? undefined
+      : liveSubscriptions().find(
+          (subscription) => subscription.coordinate === canonicalizeCoordinate(coordinate),
+        );
+    if (vault.source === "shared" || vault.source === "subscribed" || liveSubscription !== undefined) {
       if (coordinate === null) {
         throw new Error(
           `Cannot forget foreign vault '${vault.name}': its durable subscription identity ` +
@@ -82,7 +88,12 @@ export async function forgetVaultFlow(
       appendSubscriptionTombstone({
         coordinate,
         rid: vault.ridHex,
-        entryMode: entryModeForSource(vault.source),
+        entryMode:
+          vault.source === "shared" || vault.source === "subscribed"
+            ? entryModeForSource(vault.source)
+            : liveSubscription?.entryMode === "shared"
+              ? "shared"
+              : "subscribe",
       });
       subscriptionLedgerTombstoned = true;
     }
