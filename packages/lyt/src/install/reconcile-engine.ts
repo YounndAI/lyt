@@ -13,7 +13,9 @@ import {
   readlinkSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, platform } from "node:os";
@@ -549,9 +551,26 @@ function applyOneObject(object: InstallableProviderObjectV1, staged: string): vo
   assertPathChainHasNoLinks(dirname(object.target_path), true);
   mkdirSync(dirname(object.target_path), { recursive: true });
   if (object.kind === "directory-link") {
-    if (existsSync(object.target_path)) {
-      if (digestPathTree(object.target_path) === object.expected_digest) return;
-      throw new Error("install-reconcile-refuses-existing-skill-leaf");
+    let leaf: ReturnType<typeof lstatSync> | null = null;
+    try {
+      leaf = lstatSync(object.target_path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (leaf !== null) {
+      if (!leaf.isSymbolicLink()) {
+        throw new Error("install-reconcile-refuses-existing-skill-leaf");
+      }
+      const linked = resolve(dirname(object.target_path), readlinkSync(object.target_path));
+      try {
+        lstatSync(linked);
+        throw new Error("install-reconcile-destination-drift");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      // Detach only the dead link leaf. Never recurse into a reparse point.
+      if (platform() === "win32") rmdirSync(object.target_path);
+      else unlinkSync(object.target_path);
     }
     symlinkSync(staged, object.target_path, platform() === "win32" ? "junction" : "dir");
     return;
