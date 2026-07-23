@@ -30,10 +30,10 @@
 // blend ranks the gathered union and truncates to `limit`. This replaces the
 // old per-tier early-return (stop once `results.length >= limit`), which let a
 // tier-0/1 flood starve the tier-2 body hits the blend must promote — the V-F5
-// relevance inversion at scale. The global cap is enforced at the VAULT-loop
-// boundary (bounding federation breadth / latency), not between tiers within a
-// vault — a single global running budget consumed in tier order would re-open
-// the very starvation it claims to fix (release review C1).
+// relevance inversion at scale. The cap is local to each tier in each vault;
+// every in-scope vault contributes candidates before the global rank. A global
+// running budget would make whole-pod recall depend on vault order and would
+// also re-open the starvation it claims to fix (release review C1).
 //
 // Scope semantics:
 // vault — single vault from registry (skip Tier 3 entirely —
@@ -141,10 +141,10 @@ const SNIPPET_LEN = 96;
 // overtaking a tag hit. Keep α and the tier-confidence gap in sync.
 const SOFT_TIER_ALPHA = 0.25;
 
-// Gather-all-then-rank cap (K): collect up to K·limit candidates across tiers
-// and in-scope vaults before blending → ranking → truncating to `limit`. Bounds
-// latency while preventing tier-0/1 volume from starving the tier-2 body hits
-// the blend must promote (the per-tier early-return that caused V-F5 at scale).
+// Gather-all-then-rank cap (K): collect up to K·limit candidates per tier and
+// per in-scope vault before blending → global ranking → truncating to `limit`.
+// Bounds each database query while preventing tier-0/1 volume from starving
+// tier-2 body hits or an early vault from starving a later vault.
 // K=8 is the measured-start value (Lane V fix-pass decision); step down if p95
 // over the ≥5k synthetic corpus exceeds budget.
 const GATHER_CAP_FACTOR = 8;
@@ -204,9 +204,8 @@ export const FUSION_ADAPTIVE = true;
 // Determinism note: concurrency only changes the ORDER vaults FINISH, never the
 // final result set. Each vault gathers into its OWN buffer + OWN local `seen`
 // (dedup key is `${vaultName}::${path}`, so cross-vault collision is
-// impossible); buffers are then merged in deterministic `targetVaults` order
-// and `gatherCap` is applied AFTER the merge — so the capped result set and its
-// order are identical to the old sequential path (V-F5 + Lock 0.3 preserved).
+// impossible); every buffer is then merged in deterministic `targetVaults`
+// order before global ranking (whole-pod recall + Lock 0.3 preserved).
 const VAULT_FANOUT_CONCURRENCY = 8;
 
 export type SearchCascadeScope = "vault" | "mesh" | "federation";
@@ -388,12 +387,10 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
   const ftsQuery = expansionTerms.length > 0 ? `${query} ${expansionTerms.join(" ")}` : query;
   const limit = Math.max(1, Math.floor(args.limit ?? 20));
   const scope: SearchCascadeScope = args.scope ?? "federation";
-  // Lane V fix-pass — gather-all-then-rank. Collect candidates across ALL tiers
-  // (and in-scope vaults) up to `gatherCap`, THEN blend → sort → truncate to
-  // `limit`. The cap removes the per-tier early-return that let a tier-0/1 flood
-  // starve the tier-2 body hits the soft-tier blend must promote (V-F5 at
-  // scale). On small corpora (matches << gatherCap) every tier runs, so the
-  // blend sees the full candidate set.
+  // Lane V fix-pass — gather-all-then-rank. Collect up to `gatherCap` candidates
+  // from every tier in every in-scope vault, THEN blend → global sort → truncate
+  // to `limit`. The per-tier/per-vault cap bounds local reads without letting a
+  // noisy tier or early vault starve another candidate source.
   const gatherCap = limit * GATHER_CAP_FACTOR;
   const softTierAlpha = args.softTierAlpha ?? SOFT_TIER_ALPHA;
   // feat/keyphrase-boost — tokenize the query ONCE with the SAME tokenizer the
@@ -495,13 +492,10 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     // CONCURRENTLY (its own lyt.db handle, its own LOCAL `seen` set + LOCAL hit
     // buffer — the dedup key `${vaultName}::${path}` makes cross-vault collision
     // impossible, so per-vault `seen` is safe). We gather every in-scope vault's
-    // buffer, THEN merge in deterministic `targetVaults` order and apply
-    // `gatherCap` AFTER the merge. This keeps the capped result set + order
-    // byte-identical to the old sequential path (the early-break was a latency
-    // optimization, not a semantic boundary; gather-then-cap is a superset
-    // truncated identically) while overlapping the per-vault open cost. V-F5
-    // (per-tier independent budget within a vault) is preserved — each tier below
-    // still gets `gatherCap` independently, tier-2 never gated on tier-0/1.
+    // bounded buffer, THEN merge in deterministic `targetVaults` order before
+    // global ranking. V-F5 (per-tier independent budget within a vault) is
+    // preserved — each tier below gets `gatherCap` independently, and no vault
+    // is gated by an earlier vault's candidate volume.
     interface VaultGather {
       name: string;
       hits: SearchResult[];
@@ -527,9 +521,8 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
         // collected. A single shared running budget consumed in tier order would
         // let a tier-0/1 flood (a popular arc/lane) fill the cap before tier-2
         // runs, starving the body hits the soft-tier blend exists to promote and
-        // re-opening V-F5 at scale (release review C1). The blend ranks the gathered
-        // union afterward; the global cap is enforced at the merge boundary
-        // (and the final slice), not between tiers within a vault.
+        // re-opening V-F5 at scale (release review C1). The blend ranks the
+        // bounded candidates from every vault globally before the final slice.
         // --- Tier 0: arc-membership -----------------------------
         const arcHits = await runTier0Arcs({
           lytDb,
@@ -630,7 +623,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
       gatherOneVault,
     );
 
-    // --- Deterministic merge in targetVaults order, then apply gatherCap ------
+    // --- Deterministic merge in targetVaults order ---------------------------
     // Tiers 0/1/2 always RAN for every vault (gather), so mark them once any
     // vault was searched — matching the old loop's tier-run trace.
     if (targetVaults.length > 0) {
@@ -639,22 +632,14 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
       tiersRunSet.add(TIER_2);
     }
     for (const g of gathered) {
-      // The old sequential loop applied `gatherCap` ONLY at the vault boundary
-      // (`if (results.length >= gatherCap) break` before opening the next
-      // vault) — never mid-vault. A single vault therefore pushed its FULL
-      // tier-0+1+2 buffer (which can exceed gatherCap; each tier is
-      // independently capped at gatherCap, so a flooded lane + a body hit both
-      // land) and the blend ranked the union afterward. Replicate exactly:
-      // stop CONSUMING further vaults once the cap is met, but never truncate a
-      // vault's buffer mid-stream (that would drop the tier-2 body hit a flooded
-      // tier-1 lane pushed past the cap — re-opening V-F5 / the C1 starvation).
-      if (results.length >= gatherCap) {
-        // Already at cap from prior vaults — this and later vaults' Tier 0/1/2
-        // still RAN (gather is unconditional for the trace + V-F5), but their
-        // hits are not merged. Tier-3 neighbors are likewise not queued (the old
-        // loop gated neighbor collection on `results.length < gatherCap`).
-        continue;
-      }
+      // Every in-scope vault must contribute its bounded local candidates before
+      // global ranking. Applying gatherCap to the merged prefix made federation
+      // recall depend on vault name/order: a noisy early vault could fill the cap
+      // and silently discard an exact hit from a later vault even though that
+      // later vault had already been queried. Each tier in each vault is already
+      // bounded by gatherCap, and fan-out concurrency is bounded separately, so
+      // merging all gathered buffers remains finite while preserving whole-pod
+      // search semantics.
       vaultsSearched.push(g.name);
       perTierHits[TIER_0]! += g.perTier[TIER_0];
       perTierHits[TIER_1]! += g.perTier[TIER_1];
@@ -680,12 +665,11 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     for (const r of results) seen.add(`${r.vault_name}::${r.figment_path}`);
 
     // --- Tier 3 flush (after every primary vault searched) ------
-    if (scope !== "vault" && tier3Candidates.length > 0 && results.length < gatherCap) {
+    if (scope !== "vault" && tier3Candidates.length > 0) {
       tiersRunSet.add(TIER_3);
       // Deterministic order across neighbor vaults.
       tier3Candidates.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       for (const neighbor of tier3Candidates) {
-        if (results.length >= gatherCap) break;
         vaultsSearched.push(neighbor.name);
         const meshName = meshNameByVaultHex.get(neighbor.ridHex) ?? null;
         const lytDb = await openLytDbActionable(neighbor.path, neighbor.name);
@@ -698,7 +682,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
             vault: neighbor,
             meshName,
             seen,
-            remaining: gatherCap - results.length,
+            remaining: gatherCap,
           });
           // feat/keyphrase-boost — same per-doc keyphrase attachment for tier-3
           // neighbor hits (their keyphrase cache lives in the neighbor's lyt.db,
