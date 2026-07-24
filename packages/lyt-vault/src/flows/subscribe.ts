@@ -28,6 +28,7 @@ import {
 } from "../registry/repo.js";
 import {
   canonicalizeCoordinate,
+  gitUrlToCoordinate,
   vaultLeaf,
   vaultOriginCoordinate,
 } from "../registry/vault-addressing.js";
@@ -115,6 +116,18 @@ export type RepoVisibilityProbe = (
   repoName: string,
 ) => Promise<"public" | "private" | "unknown">;
 
+export interface SubscribeRemoteRepo {
+  owner: string;
+  repoName: string;
+  cloneUrl: string;
+  visibility?: "public" | "private" | "unknown" | undefined;
+}
+
+export type RepoCoordinateProbe = (
+  repoName: string,
+  vaultName: string,
+) => Promise<SubscribeRemoteRepo | null>;
+
 // map a probed visibility to the stored foreign provenance. When no probe
 // is supplied the receive DEFAULTS to `subscribed` (a self-subscribe), the
 // behavior — only an explicit `private` verdict promotes to `shared`.
@@ -182,6 +195,13 @@ export interface SubscribeArgs {
   // (self-subscribe; network-free for library/test callers). The CLI wires the
   // real gh probe.
   visibilityProbe?: RepoVisibilityProbe | undefined;
+  // Authoritative remote supplied by a discovery/invitation caller that has
+  // already resolved the repository coordinate.
+  remoteRepo?: SubscribeRemoteRepo | undefined;
+  // Direct qualified-name callers use this to resolve the convention repo
+  // across repositories visible to the authenticated actor. No match or an
+  // ambiguous match refuses clone-on-subscribe rather than guessing an owner.
+  coordinateProbe?: RepoCoordinateProbe | undefined;
 }
 
 export interface SubscribeResult {
@@ -263,10 +283,21 @@ export class SubscribeNoCoordinateError extends Error {
 export function defaultGhUrlForVaultName(vaultName: string): string {
   const ref = resolveVaultRef(vaultName);
   if (ref === null) return resolveRemoteUrlFromSlug(vaultName);
+  if (ref.inputForm === "name") {
+    throw new Error(
+      `Cannot derive a GitHub owner from qualified vault name '${vaultName}'. ` +
+        `Resolve its authoritative repository coordinate first.`,
+    );
+  }
   return ghUrlForVaultRef(ref);
 }
 
 function ghUrlForVaultRef(ref: ResolvedVaultRef): string {
+  if (ref.owner === null) {
+    throw new Error(
+      `Cannot build a GitHub URL for '${ref.vaultName}' without an authoritative repository owner.`,
+    );
+  }
   return resolveRemoteUrl(ref.owner, ref.repoName);
 }
 
@@ -371,9 +402,61 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
     // canonical name first, then the raw input (back-compat with rows
     // registered under a repo name before this fix-pass).
     const ref = resolveVaultRef(args.subscribedVaultName);
+    const authoritativeRemote =
+      args.remoteRepo ??
+      (ref?.inputForm === "repo-name"
+        ? {
+            owner: ref.owner,
+            repoName: ref.repoName,
+            cloneUrl: ghUrlForVaultRef(ref),
+          }
+        : ref !== null && args.coordinateProbe !== undefined
+          ? await args.coordinateProbe(ref.repoName, ref.vaultName)
+          : undefined);
+    if (
+      authoritativeRemote !== undefined &&
+      authoritativeRemote !== null &&
+      ref !== null &&
+      authoritativeRemote.repoName.toLowerCase() !== ref.repoName.toLowerCase()
+    ) {
+      throw new SubscribeVaultNotFoundError(
+        args.subscribedVaultName,
+        `authoritative repository '${authoritativeRemote.owner}/${authoritativeRemote.repoName}' does not ` +
+          `match expected convention repository '${ref.repoName}'.`,
+      );
+    }
     let subscribedVault = ref !== null ? await getVaultByName(db, ref.vaultName) : null;
     if (subscribedVault === null && (ref === null || ref.vaultName !== args.subscribedVaultName)) {
       subscribedVault = await getVaultByName(db, args.subscribedVaultName);
+    }
+    if (subscribedVault !== null && authoritativeRemote === null) {
+      throw new SubscribeVaultNotFoundError(
+        args.subscribedVaultName,
+        `cannot resolve an authoritative GitHub owner for '${ref?.vaultName ?? args.subscribedVaultName}'. ` +
+          `Use the explicit {owner}/${ref?.repoName ?? "repository"} form or an origin coordinate.`,
+      );
+    }
+    if (
+      subscribedVault !== null &&
+      authoritativeRemote !== undefined &&
+      authoritativeRemote !== null
+    ) {
+      const supplied = authoritativeRemote;
+      const suppliedCoordinate = gitUrlToCoordinate(supplied.cloneUrl);
+      const expectedSuppliedCoordinate =
+        `github.com/${supplied.owner}/${supplied.repoName}`.toLowerCase();
+      const registeredCoordinate =
+        subscribedVault.gitUrl === null ? null : gitUrlToCoordinate(subscribedVault.gitUrl);
+      if (
+        suppliedCoordinate !== expectedSuppliedCoordinate ||
+        registeredCoordinate === null ||
+        registeredCoordinate !== expectedSuppliedCoordinate
+      ) {
+        throw new SubscribeVaultNotFoundError(
+          args.subscribedVaultName,
+          `authoritative repository '${supplied.owner}/${supplied.repoName}' does not match the already-registered vault origin; refusing to reuse a same-name vault with a different or missing coordinate.`,
+        );
+      }
     }
     let cloneAction: SubscribeCloneOutcome = "already-present";
     if (subscribedVault === null) {
@@ -410,6 +493,23 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
           );
         }
       }
+      const remote = authoritativeRemote ?? null;
+      if (remote === null) {
+        throw new SubscribeVaultNotFoundError(
+          args.subscribedVaultName,
+          `cannot resolve an authoritative GitHub owner for '${ref.vaultName}'. ` +
+            `Use the explicit {owner}/${ref.repoName} form or verify the repository is visible to gh.`,
+        );
+      }
+      const remoteCoordinate = gitUrlToCoordinate(remote.cloneUrl);
+      const expectedRemoteCoordinate = `github.com/${remote.owner}/${remote.repoName}`.toLowerCase();
+      if (remoteCoordinate !== expectedRemoteCoordinate) {
+        throw new SubscribeVaultNotFoundError(
+          args.subscribedVaultName,
+          `authoritative clone URL does not match repository '${remote.owner}/${remote.repoName}'. ` +
+            `Refusing to derive bucket ownership or provenance from inconsistent inputs.`,
+        );
+      }
       // Inc-2 Phase B / ALWAYS-SEPARATE, owner-keyed bucket homing
       // (supersedes the collides-only rule). EVERY foreign inbound vault
       // homes into its reserved OWNER-BUCKET mesh + a separated on-disk subtree,
@@ -427,11 +527,13 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       // visibility (private ⇒ shared, public ⇒ subscribed). Injectable — omitted
       // → default `subscribed` (self-subscribe; network-free). The CLI wires the
       // real `gh repo view --json visibility` probe.
-      const visibility = args.visibilityProbe
-        ? await args.visibilityProbe(ref.owner, ref.repoName)
-        : "public";
+      const visibility =
+        remote.visibility ??
+        (args.visibilityProbe
+          ? await args.visibilityProbe(remote.owner, remote.repoName)
+          : "public");
       const foreignSource = foreignSourceForVisibility(visibility);
-      const bucketOwner = slugifyHandle(ref.owner);
+      const bucketOwner = slugifyHandle(remote.owner);
       const cloneHomeMesh = bucketMeshName(entryModeForSource(foreignSource), bucketOwner);
       const cloneSubdir = bucketVaultRelDir(foreignSource, bucketOwner, vaultLeaf(ref.vaultName));
       try {
@@ -440,7 +542,7 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
           homeMeshName: cloneHomeMesh,
           targetSubdir: cloneSubdir,
           foreignSource,
-          cloneUrl: ghUrlForVaultRef(ref),
+          cloneUrl: remote.cloneUrl,
           registryDb: db,
         });
       } catch (err) {

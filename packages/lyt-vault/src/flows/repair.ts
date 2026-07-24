@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
+import { listFederationStates } from "../registry/federation-state.js";
 import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getMeshByName, listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { detectMeshLinkDrift, reconcileOneMesh } from "./mesh-link-reconcile.js";
@@ -39,6 +40,10 @@ import { findLegacyAgentFiles } from "../util/agent-file-paths.js";
 import { migrateAgentFiles } from "./migrate-agent-files.js";
 import { snapshotVaultFlow } from "./snapshot.js";
 import { isGitRepo } from "../util/git-run.js";
+import { readGitRemoteOriginUrl } from "../util/git.js";
+import { getFederationRoot } from "../util/federation-paths.js";
+import { isProvisionalIdentity, readCurrentPodIdentity } from "../util/identity-cache.js";
+import { normalizeGitHubRepoCoordinate } from "./federation/vault-publish.js";
 import { getVaultByName, getVaultByRid, listVaults, setVaultHomeMesh } from "../registry/repo.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
 import {
@@ -101,6 +106,8 @@ export type RepairActionKind =
   | "rebuild-vault-index"
   // Phase D (SC6) — relocate legacy-root agents.md / lyt-overview.md into `.lyt/`.
   | "migrate-agent-files"
+  | "reconnect-pod"
+  | "inspect-pod-origin"
   // B2a (Inc-2 Phase B slice 2) — re-point a vault `origin` mis-derived from the
   // personal handle to its home mesh's org push_target (git remote set-url).
   | "repoint-origin-owner";
@@ -113,6 +120,8 @@ export type RepairFindingClass =
   | "corrupt-vault-index"
   // Phase D (SC6) — a vault still carrying agent-priming files at the legacy root.
   | "legacy-agent-files"
+  | "missing-pod-origin"
+  | "noncanonical-pod-origin"
   // B2a — a vault whose `origin` owner was mis-derived from the personal handle
   // instead of its home mesh's org push_target.
   | "mis-owned-origin";
@@ -462,6 +471,47 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
       }
     }
 
+    // A gh-backed identity without the canonical pod origin is not healthy
+    // online state. Diagnose it here, but keep the outward create/reconnect
+    // operation on the explicit `lyt sync` path rather than repair --apply.
+    {
+      const states = await listFederationStates(db);
+      if (states.length === 1) {
+        const podRoot = getFederationRoot();
+        const identity = readCurrentPodIdentity(podRoot);
+        if (identity !== null && !isProvisionalIdentity(identity)) {
+          const origin = readGitRemoteOriginUrl(podRoot);
+          const observed = origin === null ? null : normalizeGitHubRepoCoordinate(origin);
+          const expected = `${states[0]!.handle}/lyt-pod`;
+          if (origin === null) {
+            findings.push({
+              class: "missing-pod-origin",
+              meshName: "(pod)",
+              targetId: "pod-origin",
+              reason: "connected-identity-missing-canonical-pod-origin",
+              remediation: "Run: lyt sync (creates or reconnects the missing private pod repository)",
+              details: { expected_origin: expected, observed_origin: observed },
+            });
+          } else if (observed === null || observed.toLowerCase() !== expected.toLowerCase()) {
+            findings.push({
+              class: "noncanonical-pod-origin",
+              meshName: "(pod)",
+              targetId: "pod-origin",
+              reason: "pod-origin-points-elsewhere",
+              remediation:
+                `Lyt will not rewrite an origin you set. If this is deliberate, no action is needed. ` +
+                `Otherwise repoint the pod origin to https://github.com/${expected}.git, then run: lyt sync`,
+              details: {
+                expected_origin: expected,
+                observed_origin: observed,
+                observed_url: origin,
+              },
+            });
+          }
+        }
+      }
+    }
+
     // 2. Filter by --target if given. Try rid-first then name.
     const filtered =
       args.target === undefined ? findings : filterFindingsByTarget(findings, args.target);
@@ -499,6 +549,11 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
     const applied = actions.filter((a) => a.status === "applied").length;
     const skipped = actions.filter((a) => a.status === "skipped").length;
     const errored = actions.filter((a) => a.status === "error").length;
+    const unresolvedSkipped = actions.filter(
+      (a) =>
+        a.status === "skipped" &&
+        (a.kind === "reconnect-pod" || a.kind === "inspect-pod-origin"),
+    ).length;
 
     return {
       mode,
@@ -510,7 +565,10 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
         actionsSkipped: skipped,
         actionsErrored: errored,
       },
-      exitCode: errored > 0 ? 2 : 0,
+      // Exit 2 deliberately mirrors doctor warnings: findings remain unresolved
+      // even though no repair action crashed. Idempotent/concurrent no-op skips
+      // for other repair classes remain successful.
+      exitCode: errored > 0 || unresolvedSkipped > 0 ? 2 : 0,
       durationMs: Date.now() - startedAt,
     };
   } finally {
@@ -559,6 +617,25 @@ async function applyOne(db: Client, f: RepairFinding, args: RepairArgs): Promise
         return await applyMigrateAgentFiles(f);
       case "mis-owned-origin":
         return await applyRepointOriginOwner(db, f, args);
+      case "missing-pod-origin":
+        return {
+          kind: "reconnect-pod",
+          meshName: f.meshName,
+          targetId: f.targetId,
+          status: "skipped",
+          message:
+            "outward pod reconnection is handled by `lyt sync`; if an existing online pod is detected, Lyt stops for explicit resolution rather than overwriting either side",
+          details: { ...f.details },
+        };
+      case "noncanonical-pod-origin":
+        return {
+          kind: "inspect-pod-origin",
+          meshName: f.meshName,
+          targetId: f.targetId,
+          status: "skipped",
+          message: "the existing pod origin is noncanonical and will not be rewritten automatically",
+          details: { ...f.details },
+        };
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -589,6 +666,10 @@ function kindForClass(c: RepairFindingClass): RepairActionKind {
       return "migrate-agent-files";
     case "mis-owned-origin":
       return "repoint-origin-owner";
+    case "missing-pod-origin":
+      return "reconnect-pod";
+    case "noncanonical-pod-origin":
+      return "inspect-pod-origin";
   }
 }
 

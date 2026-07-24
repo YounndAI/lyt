@@ -633,9 +633,13 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
     throw asCreationMutationFailure(error, mutationJournal, {
       code: "vault-init-apply-failed",
       summary: "Vault creation stopped after its local apply phase began.",
+      retryable: false,
       nextAction: {
         code: "inspect-local-creation",
-        summary: "Run lyt repair --dry-run, inspect the local creation state, then retry.",
+        summary:
+          `Run lyt repair --dry-run. If '${opts.name}' exists with the wrong destination, ` +
+          `use lyt vault destination '${opts.name}' --target github:user|org/<owner>, then ` +
+          `lyt sync --vault '${opts.name}'. Do not delete or recreate the vault.`,
       },
     });
   } finally {

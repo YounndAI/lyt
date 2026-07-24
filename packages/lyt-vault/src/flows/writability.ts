@@ -63,7 +63,7 @@ export type WritabilityVerdict =
   | { writable: false; reason: "subscriber-default-false" | "gh-viewerCanPush-false" }
   | {
       writable: "unknown";
-      reason: "gh-unavailable" | "no-remote" | "orphan-vault";
+      reason: "gh-unavailable" | "no-remote" | "orphan-vault" | "provenance-unavailable";
     };
 
 const cache = new Map<string, { verdict: WritabilityVerdict; expiresAt: number }>();
@@ -169,7 +169,21 @@ export async function isPureSubscriberVault(db: Client, vaultRid: Uint8Array): P
 // only the live gh verdict separates them, so subscriptions fall through to
 // deriveVaultWritable in deriveWriteGate. A vault with NEITHER signal is the
 // user's own (home/orphan) vault and is allowed with NO gh probe.
-export async function hasSubscriptionSignal(db: Client, vaultRid: Uint8Array): Promise<boolean> {
+type WriteGateSource = "own" | "foreign" | "unknown";
+
+async function loadWriteGateSource(db: Client, vaultRid: Uint8Array): Promise<WriteGateSource> {
+  const result = await db.execute({
+    sql: "SELECT source FROM vaults WHERE rid = ? LIMIT 2",
+    args: [vaultRid],
+  });
+  if (result.rows.length !== 1) return "unknown";
+  const source = String((result.rows[0] as unknown as Record<string, unknown>)["source"]);
+  if (source === "own") return "own";
+  if (source === "shared" || source === "subscribed") return "foreign";
+  return "unknown";
+}
+
+async function hasDerivedSubscriptionSignal(db: Client, vaultRid: Uint8Array): Promise<boolean> {
   const sub = await db.execute({
     sql: "SELECT 1 FROM mesh_subscriptions WHERE external_vault_rid = ? LIMIT 1",
     args: [vaultRid],
@@ -177,6 +191,12 @@ export async function hasSubscriptionSignal(db: Client, vaultRid: Uint8Array): P
   if (sub.rows.length > 0) return true;
   const roles = await loadRoleSummary(db, vaultRid);
   return roles.hasSubscribed;
+}
+
+export async function hasSubscriptionSignal(db: Client, vaultRid: Uint8Array): Promise<boolean> {
+  const source = await loadWriteGateSource(db, vaultRid);
+  if (source !== "own") return true;
+  return hasDerivedSubscriptionSignal(db, vaultRid);
 }
 
 export type WriteGate =
@@ -208,7 +228,14 @@ export async function deriveWriteGate(
   db: Client,
   opts: DeriveVaultWritableOpts = {},
 ): Promise<WriteGate> {
-  if (!(await hasSubscriptionSignal(db, vault.rid))) {
+  const source = await loadWriteGateSource(db, vault.rid);
+  if (source === "unknown") {
+    return {
+      blocked: true,
+      verdict: { writable: "unknown", reason: "provenance-unavailable" },
+    };
+  }
+  if (source === "own" && !(await hasDerivedSubscriptionSignal(db, vault.rid))) {
     return { blocked: false, verdict: null };
   }
   const verdict = await deriveVaultWritable(vault, db, opts);
@@ -253,7 +280,8 @@ export type LocalWritability = {
     | "own-vault"
     | "subscribed-writable"
     | "subscribed-readonly"
-    | "subscribed-unverifiable";
+    | "subscribed-unverifiable"
+    | "provenance-unavailable";
 };
 
 export async function deriveLocalWritable(
@@ -267,6 +295,9 @@ export async function deriveLocalWritable(
     // verdict !== null → a subscription we DO have write access to (gh-verified).
     const reason = gate.verdict === null ? "own-vault" : "subscribed-writable";
     return { localWritable: true, reason };
+  }
+  if (gate.verdict.reason === "provenance-unavailable") {
+    return { localWritable: false, reason: "provenance-unavailable" };
   }
   // blocked: a subscription we cannot usefully write to. Distinguish a definite
   // read-only verdict from an unverifiable one (gh offline) so the flow can phrase

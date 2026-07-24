@@ -55,6 +55,12 @@ function safeText(value: string, ctx: z.RefinementCtx): void {
 }
 
 const safeTextSchema = z.string().min(1).max(MAX_TEXT_LENGTH).superRefine(safeText);
+
+export function receiptSafeTextOrFallback(value: string, fallback: string): string {
+  if (safeTextSchema.safeParse(value).success) return value;
+  if (safeTextSchema.safeParse(fallback).success) return fallback;
+  return "Operation did not complete.";
+}
 const recommendationTarget = z
   .string()
   .min(1)

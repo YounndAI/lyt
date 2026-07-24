@@ -112,6 +112,50 @@ export function getDefaultGhExecutor(): GhExecutor {
   return defaultGh;
 }
 
+// Resolve a convention repository name across every repository visible to the
+// authenticated GitHub actor. A qualified Lyt vault name contains a mesh, not
+// a GitHub owner, so clone-on-subscribe must discover the authoritative owner
+// instead of fabricating one from the mesh segment. Duplicate repo names are
+// deliberately ambiguous: the caller must use the explicit owner/repo-name
+// form rather than guess.
+export async function findAccessibleRepoByName(opts: {
+  repoName: string;
+  gh?: GhExecutor;
+}): Promise<DiscoveredRepo | null> {
+  const gh = opts.gh ?? defaultGh;
+  const raw = await gh([
+    "api",
+    "/user/repos",
+    "--paginate",
+    "-q",
+    '.[] | {host: "github.com", owner: .owner.login, name: .name, cloneUrl: .clone_url, sshUrl: .ssh_url, isPrivate: .private, topics: (.topics // [])}',
+  ]);
+  const matches: DiscoveredRepo[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let parsed: DiscoveredRepo;
+    try {
+      parsed = JSON.parse(trimmed) as DiscoveredRepo;
+    } catch (err) {
+      throw new Error(
+        `Failed to parse gh /user/repos output line as JSON: ${(err as Error).message}\nLine: ${trimmed}`,
+      );
+    }
+    if (parsed.name.toLowerCase() === opts.repoName.toLowerCase()) matches.push(parsed);
+  }
+  matches.sort((a, b) => a.owner.localeCompare(b.owner) || a.name.localeCompare(b.name));
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    const candidates = matches.map((repo) => `${repo.owner}/${repo.name}`).join(", ");
+    throw new Error(
+      `Repository name '${opts.repoName}' is visible under multiple owners: ${candidates}. ` +
+        `Use the explicit {owner}/${opts.repoName} form.`,
+    );
+  }
+  return matches[0]!;
+}
+
 // Walk all repos accessible to the authenticated user; filter to those
 // owned by `ownerLower` (case-insensitive). Mirrors lyt-mesh walkGithub's
 // `gh api /user/repos --paginate` + jq projection. Throws GhUnavailableError

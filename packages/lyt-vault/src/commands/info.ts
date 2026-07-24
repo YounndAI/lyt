@@ -37,6 +37,9 @@ export function formatLocalWritable(localWritable: boolean, reason: string): str
   if (localWritable) {
     return reason === "own-vault" ? "yes" : "yes (subscribed — you have write access)";
   }
+  if (reason === "provenance-unavailable") {
+    return "no (registry provenance unavailable — run lyt doctor)";
+  }
   return reason === "subscribed-unverifiable"
     ? "no (subscribed — can't verify; edits may not sync, capture to a home vault)"
     : "no (subscribed — edits won't sync; capture to a home vault)";

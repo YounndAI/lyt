@@ -163,6 +163,11 @@ export function readPodIdentity(podRepoDir: string): PodIdentity | null {
   return readIdentityCache(path);
 }
 
+/** Read-only connected-state precedence shared by sync, doctor, and repair. */
+export function readCurrentPodIdentity(podRepoDir: string): CachedIdentity | null {
+  return readPodIdentity(podRepoDir) ?? readIdentityCache();
+}
+
 // Brief F — the pod SoT renders the `lyt-pod-identity` doc-id (NOT the machine
 // id). It does NOT route through writeIdentityCache (that one stamps the machine
 // doc-id) — it writes the pod-flavoured render directly to the pod path.

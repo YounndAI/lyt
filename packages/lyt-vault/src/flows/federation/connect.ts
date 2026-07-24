@@ -41,8 +41,7 @@ import { isValidGhHandle, realIdentityRunner, type IdentityRunner } from "../../
 import {
   IDENTITY_SOURCE_GH,
   isProvisionalIdentity,
-  readIdentityCache,
-  readPodIdentity,
+  readCurrentPodIdentity,
   writeIdentityCache,
   writePodIdentity,
   type CachedIdentity,
@@ -52,10 +51,12 @@ import {
   withFreshPublicationPermission,
   type CanonicalVaultPublicationAttemptContext,
 } from "./publication-authority.js";
+import { normalizeGitHubRepoCoordinate } from "./vault-publish.js";
 import {
   observePublicationPermission,
   type PublicationPermissionObserver,
 } from "./publication-permission.js";
+import { parseFederationYon } from "../../yon/federation-read.js";
 
 // (2026-06-04) — the CONNECT self-heal.
 //
@@ -85,10 +86,14 @@ export type ConnectStatus =
   | "no-pod" // no single federation_state — nothing to connect
   | "gh-unauthed" // gh not installed/authed — guidance surfaced, no change
   | "invalid-real-handle" // gh returned a handle that fails isValidGhHandle (defensive)
+  | "identity-mismatch" // cached/pod identity disagrees with the authenticated actor
+  | "guard-noncanonical-origin" // existing origin points somewhere other than the canonical pod
+  | "guard-missing-origin-existing-remote" // connected pod + no local origin + populated remote needs explicit resolution
   | "guard-existing-remote" // existing remote pod collides with local content — HIL, no push
   // a review finding fix-pass: the pod gh-repo create failed (offline/transient) — identity
   // stays PROVISIONAL (re-connectable), nothing reconciled. `lyt sync` retries.
   | "pod-create-deferred"
+  | "origin-wire-blocked" // local git config refused or failed to retain the canonical origin
   | "reconciled"; // provisional → real reconciled; ready for the publish pass
 
 export interface ConnectPodResult {
@@ -127,13 +132,6 @@ export interface ConnectPodArgs {
     | undefined;
 }
 
-// Resolve the pod's CURRENT identity (pod identity.yon > local cache). Used to
-// decide whether connect is needed (provisional) and to carry verified_at
-// forward into the reconciled record.
-function readCurrentIdentity(podDir: string): CachedIdentity | null {
-  return readPodIdentity(podDir) ?? readIdentityCache();
-}
-
 export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<ConnectPodResult> {
   const gh = args.ghClient ?? realFederationGhClient;
   const runner = args.identityRunner ?? realIdentityRunner;
@@ -161,13 +159,11 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
     const provisionalHandle = states[0]!.handle;
     const podDir = getFederationRepoDir(provisionalHandle);
 
-    // 2. Connect is needed only when the current identity is PROVISIONAL. An
-    // already-gh identity → the pod is connected; this is a no-op (and we
-    // avoid any gh call so a normal `lyt sync` on a connected pod is cheap).
-    const current = readCurrentIdentity(podDir);
-    if (current !== null && !isProvisionalIdentity(current)) {
-      return { ...base, status: "not-needed", message: "Pod already connected to GitHub." };
-    }
+    // 2. Identity alone is not proof of a connected pod. A historical connected
+    // init could persist a gh identity while leaving the pod repo absent and the
+    // local git repo without a canonical origin. Keep that state repairable.
+    const current = readCurrentPodIdentity(podDir);
+    const identityConnected = current !== null && !isProvisionalIdentity(current);
 
     // 3. Guide gh auth if needed (graceful — never an error). Mirrors the wizard
     // P4 posture: tell the handler to auth in their own terminal, then re-run.
@@ -209,6 +205,43 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
         message: `GitHub returned an unexpected handle (${JSON.stringify(realHandle)}); refusing to connect.`,
       };
     }
+    if (
+      identityConnected &&
+      (current!.handle.toLowerCase() !== realHandle.toLowerCase() ||
+        provisionalHandle.toLowerCase() !== realHandle.toLowerCase())
+    ) {
+      return {
+        ...base,
+        status: "identity-mismatch",
+        provisionalHandle,
+        realHandle,
+        message:
+          "The pod identity does not match the signed-in GitHub account. Nothing was changed; sign in as the pod owner or inspect `lyt doctor`.",
+      };
+    }
+
+    // A pre-existing noncanonical origin is never rewritten. Missing origin is
+    // repairable only after the canonical remote is proved absent or empty.
+    const expectedRepository = federationRepoFullName(realHandle);
+    const origin = await git(["remote", "get-url", "origin"], {
+      cwd: podDir,
+      allowFailure: true,
+    });
+    const originCoordinate =
+      origin.code === 0 ? normalizeGitHubRepoCoordinate(origin.stdout) : null;
+    if (
+      origin.code === 0 &&
+      (originCoordinate === null ||
+        originCoordinate.toLowerCase() !== expectedRepository.toLowerCase())
+    ) {
+      return {
+        ...base,
+        status: "guard-noncanonical-origin",
+        provisionalHandle,
+        realHandle,
+        message: `The pod's existing online destination is not ${expectedRepository}. Nothing was changed; inspect \`lyt doctor\` before reconnecting.`,
+      };
+    }
 
     // 5. D.3-GUARD — probe for an existing remote pod. A local-first pod was
     // forged locally (never cloned), so an existing `<realHandle>/lyt-pod` is
@@ -228,7 +261,40 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
         `Lyt couldn't check whether you already have a pod online — you may be offline or signed out.`,
       );
     }
-    if (remoteExists) {
+    let remoteMatchesLocalPod = false;
+    if (identityConnected && remoteExists && originCoordinate !== null) {
+      return { ...base, status: "not-needed", message: "Pod already connected to GitHub." };
+    }
+    if (identityConnected && remoteExists && origin.code !== 0) {
+      const existingRemote = federationRepoFullName(realHandle);
+      const remoteIdentity = await compareRemotePodIdentity({
+        gh,
+        realHandle,
+        localFedRidHex: states[0]!.fedRidHex,
+        warnings,
+      });
+      if (remoteIdentity === "same") {
+        // The stable federation RID proves this is the same pod whose local
+        // origin was lost. It is safe to restore only the canonical origin;
+        // the normal publish pass will then reconcile Git history.
+        remoteMatchesLocalPod = true;
+      } else {
+        return {
+          ...base,
+          status: "guard-missing-origin-existing-remote",
+          provisionalHandle,
+          realHandle,
+          existingRemote,
+          message:
+            remoteIdentity === "different"
+              ? `This pod's local online destination is missing, and ${existingRemote} belongs to a different pod. ` +
+                "Nothing was changed or uploaded; use the existing-pod adoption flow or inspect `lyt doctor`."
+              : `This pod's local online destination is missing while ${existingRemote} already exists, but Lyt could not verify that they are the same pod. ` +
+                "Nothing was changed or uploaded; inspect `lyt doctor` and resolve the destination explicitly.",
+        };
+      }
+    }
+    if (remoteExists && !remoteMatchesLocalPod) {
       // Phase C amendment-5 — the remote repo EXISTS, but is it a GENUINE
       // populated pod (→ the two-pods rename-aside dance, surfaced as the guard)
       // or an empty / partial pre-created `lyt-pod` (→ NOT a collision; just
@@ -341,9 +407,47 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
       }
     }
 
-    // 7. The pod repo exists now → reconcile (auto-adopt the real handle).
-    // Identity flips to gh-cli ONLY at this point, so a deferred create above
-    // keeps the pod re-connectable.
+    // 7. Wire and verify `origin` BEFORE changing federation or identity state.
+    // A failed local git-config write must never leave a partial state that is
+    // reported as reconciled. Existing noncanonical origins were refused above.
+    const originUrl = resolveRemoteUrl(realHandle, federationRepoName());
+    const hasOrigin = await git(["remote", "get-url", "origin"], {
+      cwd: podDir,
+      allowFailure: true,
+    });
+    let originWrite: GitRunResult;
+    if (hasOrigin.code === 0) {
+      originWrite = await authorized("repository-push", () =>
+        git(["remote", "set-url", "origin", originUrl], { cwd: podDir, allowFailure: true }),
+      );
+    } else {
+      originWrite = await authorized("repository-push", () =>
+        git(["remote", "add", "origin", originUrl], { cwd: podDir, allowFailure: true }),
+      );
+    }
+    const observedOrigin =
+      originWrite.code === 0
+        ? await git(["remote", "get-url", "origin"], { cwd: podDir, allowFailure: true })
+        : originWrite;
+    const observedCoordinate =
+      observedOrigin.code === 0 ? normalizeGitHubRepoCoordinate(observedOrigin.stdout) : null;
+    if (
+      observedOrigin.code !== 0 ||
+      observedCoordinate === null ||
+      observedCoordinate.toLowerCase() !== expectedRepository.toLowerCase()
+    ) {
+      return {
+        ...base,
+        status: "origin-wire-blocked",
+        provisionalHandle,
+        realHandle,
+        podRepoCreated,
+        message:
+          "Lyt could not save the canonical pod destination in this local repository. Nothing was uploaded and the pod was not marked reconciled; check local repository configuration permissions, then run `lyt sync` again.",
+      };
+    }
+
+    // 8. The pod repo and canonical local origin now exist → reconcile.
     // (a) Remap federation_state PRESERVING the fed_rid (no rid churn). Atomic.
     await remapFederationHandle(db, provisionalHandle, realHandle, nowIso);
 
@@ -366,24 +470,6 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
     // correct before the pod is committed + pushed by the publish pass).
     await regeneratePodManifestNonFatal(db, { handle: realHandle, nowIso });
 
-    // (d) Wire `origin` on the local pod (LOCAL git config write). Never
-    // clobber an existing origin — set-url if present (a re-run after a
-    // prior provisional remote), else add.
-    const originUrl = resolveRemoteUrl(realHandle, federationRepoName());
-    const hasOrigin = await git(["remote", "get-url", "origin"], {
-      cwd: podDir,
-      allowFailure: true,
-    });
-    if (hasOrigin.code === 0) {
-      await authorized("repository-push", () =>
-        git(["remote", "set-url", "origin", originUrl], { cwd: podDir, allowFailure: true }),
-      );
-    } else {
-      await authorized("repository-push", () =>
-        git(["remote", "add", "origin", originUrl], { cwd: podDir, allowFailure: true }),
-      );
-    }
-
     const note =
       provisionalHandle === realHandle
         ? `Connected your pod to GitHub as ${realHandle}.`
@@ -398,6 +484,39 @@ export async function connectPodFlow(args: ConnectPodArgs = {}): Promise<Connect
     };
   } finally {
     if (ownDb) await closeRegistry(db);
+  }
+}
+
+type RemotePodIdentityComparison = "same" | "different" | "unavailable";
+
+async function compareRemotePodIdentity(args: {
+  gh: FederationGhClient;
+  realHandle: string;
+  localFedRidHex: string;
+  warnings: string[];
+}): Promise<RemotePodIdentityComparison> {
+  if (args.gh.fetchRemotePodManifest === undefined) return "unavailable";
+  let raw: string | null;
+  try {
+    raw = await args.gh.fetchRemotePodManifest(args.realHandle, federationRepoName());
+  } catch {
+    args.warnings.push(
+      "Lyt couldn't verify the identity of the existing online pod, so it left the local destination unchanged.",
+    );
+    return "unavailable";
+  }
+  if (raw === null) return "unavailable";
+  try {
+    const remote = parseFederationYon(raw).federation;
+    return remote.fedRidHex.toLowerCase() === args.localFedRidHex.toLowerCase() &&
+      remote.handle.toLowerCase() === args.realHandle.toLowerCase()
+      ? "same"
+      : "different";
+  } catch {
+    args.warnings.push(
+      "Lyt couldn't read the identity of the existing online pod, so it left the local destination unchanged.",
+    );
+    return "unavailable";
   }
 }
 
@@ -462,23 +581,46 @@ async function probeRemoteHasUnrelatedHistory(
   }
 }
 
-// Helper for the sync command: does the local pod need connecting? Cheap
-// (identity-cache read; no gh call) so `lyt sync` can decide whether to run the
-// connect self-heal before the publish pass. True when a single pod exists AND
-// its identity is provisional.
-export async function podNeedsConnect(registryDb?: Client): Promise<boolean> {
+export interface PodNeedsConnectOptions {
+  // Retained for source compatibility with injected test/caller options. The
+  // hot-path predicate deliberately performs no remote probe.
+  ghClient?: FederationGhClient | undefined;
+  runGit?: ConnectGitRunner | undefined;
+}
+
+// Helper for the sync command: does the local pod need connecting or repairing?
+// Keep this hot-path decision local and cheap. Remote existence is probed only
+// inside connectPodFlow after local identity/origin state says repair is needed.
+export async function podNeedsConnect(
+  registryDb?: Client,
+  options: PodNeedsConnectOptions = {},
+): Promise<boolean> {
   const ownDb = registryDb === undefined;
   const db = registryDb ?? (await openRegistry());
   try {
     const states = await listFederationStates(db);
     if (states.length !== 1) return false;
-    const podDir = getFederationRepoDir(states[0]!.handle);
-    const current = readCurrentIdentity(podDir);
+    const handle = states[0]!.handle;
+    const podDir = getFederationRepoDir(handle);
+    const current = readCurrentPodIdentity(podDir);
     // No identity at all on a forged pod is treated as needs-connect (a fresh
     // local pod that somehow lost its identity.yon); an explicit gh identity is
     // connected.
-    if (current === null) return (await readFederationState(db, states[0]!.handle)) !== null;
-    return isProvisionalIdentity(current);
+    if (current === null) return (await readFederationState(db, handle)) !== null;
+    if (isProvisionalIdentity(current)) return true;
+    if (current.handle.toLowerCase() !== handle.toLowerCase()) return true;
+
+    const git = options.runGit ?? defaultRunGit;
+    const origin = await git(["remote", "get-url", "origin"], {
+      cwd: podDir,
+      allowFailure: true,
+    });
+    if (origin.code !== 0) return true;
+    const coordinate = normalizeGitHubRepoCoordinate(origin.stdout);
+    const expected = federationRepoFullName(handle);
+    if (coordinate === null || coordinate.toLowerCase() !== expected.toLowerCase()) return true;
+
+    return false;
   } finally {
     if (ownDb) await closeRegistry(db);
   }

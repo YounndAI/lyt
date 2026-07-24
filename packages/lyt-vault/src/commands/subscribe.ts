@@ -20,10 +20,11 @@ import {
   SubscribeMainVaultMissingError,
   SubscribeVaultNotFoundError,
   subscribeFlow,
+  type RepoCoordinateProbe,
   type RepoVisibilityProbe,
   type SubscribeResult,
 } from "../flows/subscribe.js";
-import { checkRepoVisibility } from "../util/gh-discover.js";
+import { checkRepoVisibility, findAccessibleRepoByName } from "../util/gh-discover.js";
 
 // Inc-2 Phase B / the CLI wires the REAL gh visibility probe so a
 // privately-granted vault subscribed via `lyt mesh subscribe` lands as `shared`
@@ -32,6 +33,25 @@ import { checkRepoVisibility } from "../util/gh-discover.js";
 // / test callers omit it and stay network-free (default `subscribed`).
 const ghVisibilityProbe: RepoVisibilityProbe = (owner, repoName) =>
   checkRepoVisibility({ owner, repo: repoName });
+
+const ghCoordinateProbe: RepoCoordinateProbe = async (repoName) => {
+  let repo: Awaited<ReturnType<typeof findAccessibleRepoByName>>;
+  try {
+    repo = await findAccessibleRepoByName({ repoName });
+  } catch (err) {
+    throw new SubscribeVaultNotFoundError(
+      repoName,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  if (repo === null) return null;
+  return {
+    owner: repo.owner,
+    repoName: repo.name,
+    cloneUrl: repo.cloneUrl,
+    visibility: repo.isPrivate ? "private" : "public",
+  };
+};
 
 // v1.C.2 — `lyt mesh subscribe --vault <name> --from-mesh <name> [--json]`.
 //
@@ -76,6 +96,7 @@ export function buildMeshSubscribeSubcommand(): Command {
           subscribedVaultName: opts.vault!,
           fromMeshName: opts.fromMesh!,
           visibilityProbe: ghVisibilityProbe,
+          coordinateProbe: ghCoordinateProbe,
         });
         if (json) {
           // eslint-disable-next-line no-console

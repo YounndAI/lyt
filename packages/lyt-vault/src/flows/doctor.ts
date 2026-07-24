@@ -61,11 +61,14 @@ import {
   getPodIdentityPath,
   migrateIdentityCache,
   readIdentityCache,
+  readCurrentPodIdentity,
   readPodIdentity,
   reconcileIdentity,
+  isProvisionalIdentity,
 } from "../util/identity-cache.js";
 import { isValidGhHandle } from "../util/identity.js";
 import { getLytHome } from "../util/paths.js";
+import { normalizeGitHubRepoCoordinate } from "./federation/vault-publish.js";
 import {
   getBundledPatternsDir,
   getUserPatternsDir,
@@ -1179,6 +1182,55 @@ export async function checkFederationRepoState(db: Client): Promise<CheckResult>
       remediation: "Run: lyt federation rebuild (re-syncs the orphan directory)",
       detail: { orphanRows: [], orphanDirs: [fedRoot] },
     };
+  }
+
+  // A gh identity without the canonical pod origin is the connected-init
+  // half-state that strands publication. Local/provisional pods are healthy
+  // here: they intentionally have no online destination until `lyt sync`.
+  if (rows.length === 1) {
+    const identity = readCurrentPodIdentity(fedRoot);
+    if (identity !== null && !isProvisionalIdentity(identity)) {
+      if (identity.handle.toLowerCase() !== rows[0]!.handle.toLowerCase()) {
+        return {
+          id: "federation.repo-state",
+          group: "federation",
+          label: "federation_state ↔ disk symmetry",
+          status: "warn",
+          message: `pod identity handle ${identity.handle} disagrees with registered handle ${rows[0]!.handle}`,
+          remediation:
+            "Run: lyt sync after signing in as the pod owner; Lyt will refuse to publish while the identity disagreement remains",
+          detail: { identityHandle: identity.handle, registeredHandle: rows[0]!.handle },
+        };
+      }
+      const origin = readGitRemoteOriginUrl(fedRoot);
+      const coordinate = origin === null ? null : normalizeGitHubRepoCoordinate(origin);
+      const expected = `${rows[0]!.handle}/lyt-pod`;
+      if (origin === null) {
+        return {
+          id: "federation.repo-state",
+          group: "federation",
+          label: "federation_state ↔ disk symmetry",
+          status: "warn",
+          message: `pod identity is connected but its canonical origin ${expected} is missing`,
+          remediation:
+            "Run: lyt sync. If no online pod exists, Lyt creates it; if one already exists, Lyt stops for explicit resolution rather than overwriting either side",
+          detail: { expectedOrigin: expected, observedOrigin: coordinate },
+        };
+      }
+      if (coordinate === null || coordinate.toLowerCase() !== expected.toLowerCase()) {
+        return {
+          id: "federation.repo-state",
+          group: "federation",
+          label: "federation_state ↔ disk symmetry",
+          status: "warn",
+          message: `pod origin points elsewhere (${coordinate ?? "unrecognized"}), not ${expected}`,
+          remediation:
+            `Lyt will not rewrite an origin you set. If this is deliberate, no action is needed. ` +
+            `Otherwise repoint the pod origin to https://github.com/${expected}.git, then run: lyt sync`,
+          detail: { expectedOrigin: expected, observedOrigin: coordinate, observedUrl: origin },
+        };
+      }
+    }
   }
 
   // Both present → symmetric.

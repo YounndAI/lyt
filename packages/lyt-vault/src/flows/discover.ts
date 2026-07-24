@@ -558,6 +558,12 @@ async function dispatchDecision(args: DispatchArgs): Promise<ClusterOutcome> {
         subscribedVaultName: member.vaultName,
         fromMeshName: args.primaryMeshName,
         registryDb: args.db,
+        remoteRepo: {
+          owner: member.repo.owner,
+          repoName: member.repo.name,
+          cloneUrl: member.repo.cloneUrl,
+          visibility: member.repo.isPrivate ? "private" : "public",
+        },
         ...(args.subscribeCloneFn !== undefined ? { cloneFn: args.subscribeCloneFn } : {}),
       });
       processed += 1;

@@ -23,6 +23,8 @@ import { meshInitFlow } from "./mesh-init.js";
 import { inspectMeshInitPreflight } from "./mesh-init-preflight.js";
 import { captureIndexFlow } from "./capture-index.js";
 import { federationInitFlow } from "./federation/init.js";
+import { connectPodFlow } from "./federation/connect.js";
+import { reconcilePublishFlow } from "./federation/reconcile-publish.js";
 import { adoptAndPrimeFlow } from "./adopt-and-prime.js";
 import { reconstructionExitCode } from "./federation/recover-pod.js";
 import { embeddingsOfferGate } from "./embeddings-offer.js";
@@ -36,6 +38,7 @@ import {
   isValidGhHandle,
   validateMeshName,
 } from "../util/identity.js";
+import { writeProvisionalIdentity } from "../util/identity-cache.js";
 import {
   federationRepoName,
   federationRepoFullName,
@@ -149,9 +152,10 @@ export interface WizardRunOptions {
   // (P7 → P8-adopt) can be exercised without live gh. Defaults to the real
   // adoptAndPrimeFlow.
   adoptFlowOverride?: typeof adoptAndPrimeFlow;
-  // Retained for option compatibility. Creation never publishes; scoped sync
-  // is the sole remote mutation owner.
-  publishFlowOverride?: unknown;
+  // Connected-mode seams. The Handler's explicit Connected choice authorizes
+  // the same connect + publish engines used by `lyt sync`.
+  connectFlowOverride?: typeof connectPodFlow;
+  publishFlowOverride?: typeof reconcilePublishFlow;
   // Phase C test seam — override the interactive embeddings offer so the
   // no-flag wizard route's neutral+recommend gate can be exercised without a
   // real model download. Defaults to the real embeddingsOfferGate.
@@ -342,6 +346,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   let mode: "local" | "connected" | "adopt" = "local";
   let handleForProbe = "";
   let freshHandle = "";
+  let initialMeshName = "personal";
 
   if (ghReady) {
     try {
@@ -378,6 +383,9 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   } else if (mode === "connected") {
     freshHandle = handleForProbe;
   }
+  if (mode !== "adopt") {
+    initialMeshName = await chooseInitialMeshName(ph, opts.dryRun, isTty);
+  }
 
   // firstVaultPath feeds the shared completion tail, sourced from the adopt
   // branch OR the fresh-scaffold branch (local or connected).
@@ -412,29 +420,34 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
       message: "Skipped — existing pod adoption already restored the pod repository.",
     });
   } else {
-    // FRESH — scaffold personal mesh + first vault + pod repo. `localMode` (no
+    // FRESH — scaffold the chosen starter mesh + first vault + pod repo. `localMode` (no
     // gh / chose local) forges the pod LOCAL-ONLY (no gh repo, no remote);
     // connected mode creates the pod container repo per two-tier consent.
     const localMode = mode === "local";
     emit(
-      "\nPhase 8 — Create your `personal` mesh\nA mesh is a named group of vaults; `personal` is the default starter mesh.",
+      `\nPhase 8 — Create your \`${initialMeshName}\` mesh\nA mesh is a named group of vaults; \`personal\` is the default starter mesh.`,
     );
     const p6 = await phase6_createPersonalMesh(opts.dryRun, {
       handle: freshHandle || deriveProvisionalHandle(),
       connected: mode === "connected",
+      meshName: initialMeshName,
     });
     phases.push(p6);
     if (!p6.ok && !p6.skipped) return { status: "halted", phases };
     creation = p6.data?.creation;
 
-    // P9 — first vault. the first vault is `personal/main`, already
+    // P9 — first vault. the first vault is `<initial-mesh>/main`, already
     // scaffolded by P8's mesh-init. P9 resolves that path (no name prompt, no
     // duplicate scaffold) so P12's first-use demo can run against it.
     emit(
-      "\nPhase 9 — Your first vault\nYour pod's first vault is `personal/main` — the main vault of the `personal` mesh created above.",
+      `\nPhase 9 — Your first vault\nYour pod's first vault is \`${initialMeshName}/main\` — the main vault of the \`${initialMeshName}\` mesh created above.`,
     );
     const mainVaultPath = p6.data?.vaultPath ?? "";
-    const p7 = await phase7_createFirstVault(mainVaultPath, opts.dryRun);
+    const p7 = await phase7_createFirstVault(
+      mainVaultPath,
+      opts.dryRun,
+      `${initialMeshName}/main`,
+    );
     phases.push(p7);
     if (!p7.ok && !p7.skipped) return { status: "halted", phases };
 
@@ -451,15 +464,21 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
             "together. Under the hood it's a *federation* — 'pod' is what you'll see in " +
             "docs + chat, 'federation' is the plumbing underneath."),
     );
-    const p8: WizardPhaseResult = {
-      phase: 10,
-      name: "federation-init",
-      ok: true,
-      skipped: true,
-      message:
-        "The immutable personal-mesh creation plan already initialized the local pod; no second pod mutation ran.",
-    };
+    const p8 = localMode
+      ? {
+          phase: 10,
+          name: "federation-init",
+          ok: true,
+          skipped: true,
+          message:
+            "The immutable mesh creation plan initialized the local pod; connect it later with `lyt sync`.",
+        }
+      : await phase8_connectAndPublishPod(opts.dryRun, {
+          connectFlow: opts.connectFlowOverride,
+          publishFlow: opts.publishFlowOverride,
+        });
     phases.push(p8);
+    if (!p8.ok && !p8.skipped) return { status: "halted", phases };
 
     firstVaultPath = p7.data?.vaultPath ?? "";
   }
@@ -482,7 +501,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
   // the terminal supports them (graceful plain-text fallback otherwise).
   if (!opts.dryRun) {
     const localMode = mode === "local";
-    emitPodCard(firstVaultPath, localMode, mode === "adopt");
+    emitPodCard(firstVaultPath, localMode, mode === "adopt" || mode === "connected");
 
     // Phase C (C4) — interactive-only embeddings offer. The no-flag init
     // routes here (the wizard is the primary non-tech entry), so this is where
@@ -555,10 +574,7 @@ export async function runWizard(opts: WizardRunOptions): Promise<WizardRunResult
         "\nYour pod is local-only (not connected to GitHub). Run `lyt sync` to connect + back it up.\n",
       );
     } else if (mode !== "adopt") {
-      // Creation ends locally. A scoped sync is the sole remote mutation owner.
-      await maybePromptAndPublishWizard(ph, {
-        isTty: process.stdin.isTTY === true,
-      });
+      emit("\nYour pod and starter vault are connected and backed up on GitHub.\n");
     } else {
       emit("\nExisting pod adopted. No publication is needed.\n");
     }
@@ -611,12 +627,11 @@ function emitPodCard(firstVaultPath: string, localOnly: boolean, adopted = false
     return;
   }
 
-  // Fresh pods start at personal/main. Adopted pods may resolve any existing
-  // vault first, so derive the mesh from its actual path instead of mislabelling
-  // it as personal.
+  // Derive the mesh from the actual first-vault path so a custom starter mesh
+  // is never mislabeled as personal.
   const vaultLeaf = firstVaultPath.length > 0 ? basenameOf(firstVaultPath) : "main";
   const meshName =
-    adopted && firstVaultPath.length > 0 ? basenameOf(dirname(firstVaultPath)) : "personal";
+    firstVaultPath.length > 0 ? basenameOf(dirname(firstVaultPath)) : "personal";
   const vaultName = `${meshName}/${vaultLeaf}`;
 
   // no `obsidian://open` deep-link — the card emits the honest
@@ -678,7 +693,7 @@ async function askLocalVsConnect(
 // handle is validated with isValidGhHandle (re-prompt on miss). Non-TTY / dry-run
 // → the OS-username default, silently. Connect (`lyt sync`) reconciles it to the
 // real gh handle later.
-async function chooseProvisionalIdentity(
+export async function chooseProvisionalIdentity(
   ph: IPromptHandler,
   dryRun: boolean,
   isTty: boolean,
@@ -705,7 +720,26 @@ async function chooseProvisionalIdentity(
       );
     }
   }
+  writeProvisionalIdentity(handle);
   return handle;
+}
+
+export async function chooseInitialMeshName(
+  ph: IPromptHandler,
+  dryRun: boolean,
+  isTty: boolean,
+): Promise<string> {
+  if (!isTty || dryRun) return "personal";
+  for (;;) {
+    const answer = (await ph.ask("Initial mesh name?", "personal")).trim();
+    const candidate = answer.length === 0 ? "personal" : answer;
+    try {
+      validateMeshName(candidate);
+      return candidate;
+    } catch (err) {
+      emit(`  ! ${(err as Error).message}`);
+    }
+  }
 }
 
 function basenameOf(p: string): string {
@@ -1367,14 +1401,16 @@ export async function phase_adoptPod(opts: WizardRunOptions): Promise<WizardPhas
 
 export async function phase6_createPersonalMesh(
   dryRun: boolean,
-  options: { handle: string; connected: boolean } = {
+  options: { handle: string; connected: boolean; meshName?: string } = {
     handle: deriveProvisionalHandle(),
     connected: false,
   },
 ): Promise<WizardPhaseResult> {
+  const meshName = options.meshName ?? "personal";
+  const mainVaultName = `${meshName}/main`;
   // Existing helper for slug-safety; rejects '/' + Windows reserved names.
   try {
-    validateMeshName("personal");
+    validateMeshName(meshName);
   } catch (err) {
     return {
       phase: 8,
@@ -1389,7 +1425,7 @@ export async function phase6_createPersonalMesh(
       name: "mesh-init",
       ok: true,
       skipped: true,
-      message: "[dry-run] would create `personal` mesh + `personal/main` vault.",
+      message: `[dry-run] would create \`${meshName}\` mesh + \`${mainVaultName}\` vault.`,
     };
   }
   try {
@@ -1397,12 +1433,12 @@ export async function phase6_createPersonalMesh(
     const destinationRequest = options.connected
       ? ({ kind: "auto" } as const)
       : ({ kind: "local" } as const);
-    const subject = { kind: "mesh" as const, repositoryName: vaultRepoName("personal/main") };
-    const preflight = await inspectMeshInitPreflight({ name: "personal" });
+    const subject = { kind: "mesh" as const, repositoryName: vaultRepoName(mainVaultName) };
+    const preflight = await inspectMeshInitPreflight({ name: meshName });
     const operationId = deriveCreationOperationIdV1({
       request: destinationRequest,
       subject,
-      scope: `personal/main\0${join(getDefaultVaultsRoot(), "personal", "main")}`,
+      scope: `${mainVaultName}\0${join(getDefaultVaultsRoot(), meshName, "main")}`,
     });
     const planned = resolveCreationPlanV1({
       request: destinationRequest,
@@ -1421,9 +1457,9 @@ export async function phase6_createPersonalMesh(
             preflight.podIdentity.state === "present"
               ? { kind: "existing", rid: preflight.podIdentity.rid }
               : { kind: "create", handle: options.handle },
-          mesh: { kind: "create", name: "personal" },
-          vaultName: "personal/main",
-          vaultRoot: join(getDefaultVaultsRoot(), "personal", "main"),
+          mesh: { kind: "create", name: meshName },
+          vaultName: mainVaultName,
+          vaultRoot: join(getDefaultVaultsRoot(), meshName, "main"),
         }),
         preflight.podIdentity.state === "present"
           ? [
@@ -1436,9 +1472,9 @@ export async function phase6_createPersonalMesh(
       ),
     });
     if (planned.kind === "refusal") throw new Error(planned.message);
-    const result = await withPhaseWork("git-init", "your `personal` mesh + main vault", () =>
+    const result = await withPhaseWork("git-init", `your \`${meshName}\` mesh + main vault`, () =>
       meshInitFlow({
-        name: "personal",
+        name: meshName,
         noPush: true,
         creation: {
           destinationRequest,
@@ -1465,8 +1501,8 @@ export async function phase6_createPersonalMesh(
     recordInitFailure({
       site: "first-vault-create",
       step: "wizard:phase6_createPersonalMesh",
-      summary: `meshInitFlow failed (personal mesh + personal/main vault): ${(err as Error).message}`,
-      context: { mesh: "personal" },
+      summary: `meshInitFlow failed (${meshName} mesh + ${mainVaultName} vault): ${(err as Error).message}`,
+      context: { mesh: meshName },
     });
     return {
       phase: 8,
@@ -1477,13 +1513,65 @@ export async function phase6_createPersonalMesh(
   }
 }
 
-// first vault on init is `personal/main` ONLY.
+export async function phase8_connectAndPublishPod(
+  dryRun: boolean,
+  deps: {
+    connectFlow?: typeof connectPodFlow | undefined;
+    publishFlow?: typeof reconcilePublishFlow | undefined;
+  } = {},
+): Promise<WizardPhaseResult> {
+  if (dryRun) {
+    return {
+      phase: 10,
+      name: "federation-init",
+      ok: true,
+      skipped: true,
+      message: "[dry-run] would connect and publish the pod plus starter vault to GitHub.",
+    };
+  }
+  try {
+    const connect = await (deps.connectFlow ?? connectPodFlow)({});
+    if (connect.status !== "reconciled" && connect.status !== "not-needed") {
+      return {
+        phase: 10,
+        name: "federation-init",
+        ok: false,
+        message: `Connected setup stopped safely: ${connect.message}`,
+      };
+    }
+    const publish = await (deps.publishFlow ?? reconcilePublishFlow)({ push: true });
+    if (!publish.ok || publish.skipped || publish.outboxRemaining > 0) {
+      return {
+        phase: 10,
+        name: "federation-init",
+        ok: false,
+        message:
+          "The pod was connected, but its first online backup did not complete. Run `lyt sync` to resume.",
+      };
+    }
+    return {
+      phase: 10,
+      name: "federation-init",
+      ok: true,
+      message: "Connected and published the pod plus starter vault to GitHub.",
+    };
+  } catch (err) {
+    return {
+      phase: 10,
+      name: "federation-init",
+      ok: false,
+      message: `Connected setup stopped safely: ${(err as Error).message}`,
+    };
+  }
+}
+
+// first vault on init is `<initial-mesh>/main`.
 //
 // The naming convention locks the pod's main vault to the literal `main`
-// under the `personal` mesh. That vault is scaffolded by P8's mesh-init
-// (meshInitFlow → `personal/main`), so P9 no longer prompts for a vault
+// under the Handler-selected starter mesh. That vault is scaffolded by P8's mesh-init,
+// so P9 no longer prompts for a vault
 // NAME (the prior `notes` default created a second, redundant vault) and
-// no longer scaffolds anything. It resolves the `personal/main` path
+// no longer scaffolds anything. It resolves the mesh-main path
 // produced by P8 so P12's first-use demo can run against it.
 //
 // Divergence from the oversight-handler lean ("keep the placement-override
@@ -1498,6 +1586,7 @@ export async function phase6_createPersonalMesh(
 export async function phase7_createFirstVault(
   mainVaultPath: string,
   dryRun: boolean,
+  mainVaultName = "personal/main",
 ): Promise<WizardPhaseResult> {
   if (dryRun) {
     return {
@@ -1505,7 +1594,7 @@ export async function phase7_createFirstVault(
       name: "vault-init",
       ok: true,
       skipped: true,
-      message: "[dry-run] first vault is `personal/main` (created by the personal mesh in P8).",
+      message: `[dry-run] first vault is \`${mainVaultName}\` (created by the starter mesh in P8).`,
       data: { vaultPath: mainVaultPath },
     };
   }
@@ -1513,21 +1602,21 @@ export async function phase7_createFirstVault(
     recordInitFailure({
       site: "first-vault-create",
       step: "wizard:phase7_createFirstVault",
-      summary: `first vault path not resolvable from the personal mesh: ${mainVaultPath || "<empty>"}`,
+      summary: `first vault path not resolvable from the starter mesh: ${mainVaultPath || "<empty>"}`,
       context: { mainVaultPath: mainVaultPath || "<empty>" },
     });
     return {
       phase: 9,
       name: "vault-init",
       ok: false,
-      message: `First vault path not resolvable from the personal mesh (${mainVaultPath || "<empty>"}); halting.`,
+      message: `First vault path not resolvable from the starter mesh (${mainVaultPath || "<empty>"}); halting.`,
     };
   }
   return {
     phase: 9,
     name: "vault-init",
     ok: true,
-    message: `First vault is \`personal/main\` at ${mainVaultPath}.`,
+    message: `First vault is \`${mainVaultName}\` at ${mainVaultPath}.`,
     data: { vaultPath: mainVaultPath },
   };
 }

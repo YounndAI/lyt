@@ -52,7 +52,7 @@ import {
   type ReceiptAttemptSession,
   type ReceiptAttemptWarningCode,
 } from "../op/receipt-attempt.js";
-import type { ReceiptV1 } from "../op/receipt-v1.js";
+import { receiptSafeTextOrFallback, type ReceiptV1 } from "../op/receipt-v1.js";
 import { CreationMutationFailure } from "../op/creation-mutation-journal.js";
 import { plannedInitialScaffoldPaths, plannedObsidianScaffoldPaths } from "../scaffold/init.js";
 import { openSqliteReadOnly } from "../sqlite/read-only-client.js";
@@ -396,6 +396,13 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
           typeof err.errorCode === "string"
             ? err.errorCode
             : "vault-init-failed");
+        const retryable = mutationFailure?.retryable ?? false;
+        const rawSummary =
+          mutationFailure?.message ??
+          (err instanceof Error && code !== "vault-init-failed"
+            ? err.message
+            : "Vault creation did not complete.");
+        const summary = receiptSafeTextOrFallback(rawSummary, safeInitFailureDiagnostic(code));
         emitInitDiagnostic(safeInitFailureDiagnostic(code));
         const receipt = makeCreationCommandReceipt({
           operation: "vault-init",
@@ -406,17 +413,19 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
           status: hasMutation ? "partial" : "failed",
           ...(receiptScope === undefined ? {} : { scope: receiptScope }),
           evidence,
-          error: { code, summary: "Vault creation did not complete.", retryable: true },
-          next: hasMutation
+          error: { code, summary, retryable },
+          next: mutationFailure?.nextAction ?? (hasMutation
             ? {
                 code: "inspect-local-creation",
-                summary: "Inspect local state, then run scoped sync or retry.",
+                summary:
+                  `Run lyt repair --dry-run. If '${effectiveName}' exists with the wrong destination, ` +
+                  `use lyt vault destination '${effectiveName}' --target github:user|org/<owner>, then ` +
+                  `lyt sync --vault '${effectiveName}'. Do not delete or recreate the vault.`,
               }
             : {
-                code: "correct-or-retry-vault-init",
-                summary:
-                  "Correct the reported creation input or retry the unchanged local operation.",
-              },
+                code: "correct-vault-init",
+                summary: "Correct the reported creation input before running vault init again.",
+              }),
           exitCode: 1,
         });
         if (receiptAttempt === undefined) emitInitReceipt(receipt);

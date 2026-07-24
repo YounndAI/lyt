@@ -36,7 +36,11 @@ import { openSqliteReadOnly } from "../sqlite/read-only-client.js";
 import { deriveProvisionalHandle } from "../util/identity.js";
 import { normalizeCommanderCreationDestination } from "../op/cli-destination-normalization.js";
 import { observeActiveActor, type ActiveActorObservation } from "../op/active-actor-observation.js";
-import { parseReceiptV1ForEmission, type ReceiptV1 } from "../op/receipt-v1.js";
+import {
+  parseReceiptV1ForEmission,
+  receiptSafeTextOrFallback,
+  type ReceiptV1,
+} from "../op/receipt-v1.js";
 import { creationPlanReplayKeyDigest } from "../op/creation-command-receipt.js";
 import {
   openReceiptAttempt,
@@ -455,7 +459,10 @@ function buildMeshInitSubcommand(dependencies: MeshCommandDependencies): Command
         const mutationFailure = err instanceof CreationMutationFailure ? err : null;
         const mutations = mutationFailure?.mutations;
         const local = mutations === undefined ? 0 : creationLocalMutationCount(mutations);
-        const summary = mutationFailure?.message ?? "Mesh creation failed.";
+        const summary = receiptSafeTextOrFallback(
+          mutationFailure?.message ?? "Mesh creation failed.",
+          "Mesh creation failed.",
+        );
         receipt = meshReceipt({
           operationId,
           attemptId,
@@ -470,7 +477,9 @@ function buildMeshInitSubcommand(dependencies: MeshCommandDependencies): Command
             mutationFailure?.nextAction.summary ??
             "Inspect the local mesh state before retrying creation.",
           nextCode: mutationFailure?.nextAction.code ?? "inspect-local-creation",
-          retryable: mutationFailure?.retryable ?? true,
+          // Unknown failures are not declared retryable. Only a classified
+          // CreationMutationFailure may promise that retrying is safe/useful.
+          retryable: mutationFailure?.retryable ?? false,
           ...(mutations === undefined ? {} : { mutations }),
         });
       }

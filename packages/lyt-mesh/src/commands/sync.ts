@@ -307,9 +307,12 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       });
 
       let connectDeferredPublish = false;
+      let connect: ConnectPodResult | undefined;
+      let hardConnectFailure = false;
       let connectReconstructionExitCode = 0;
       if (federationPassAllowed && (await podNeedsConnectFn())) {
-        const connect = await connectPodFlowFn({});
+        connect = await connectPodFlowFn({});
+        hardConnectFailure = isHardConnectFailure(connect);
         if (opts.json !== true && opts.quiet !== true) {
           // C-4(b) — suppress the passive guard message when the interactive
           // 3-option menu (TTY) is about to explain the same thing.
@@ -474,15 +477,23 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       const scopedPublishOk = scopedPublish === undefined || scopedPublish.ok;
       const terminalOk =
         connectReconstructionExitCode === 0 &&
+        !hardConnectFailure &&
         syncOk &&
         publishOk &&
         podLedgerOk &&
         scopedPublishOk;
-      if (opts.json === true && scopedVaultIdentity !== undefined) {
+      if (opts.json === true) {
         // eslint-disable-next-line no-console
         console.log(
           JSON.stringify(
-            { ok: terminalOk, reports: result.reports, scopedPublish: scopedPublish ?? null },
+            {
+              ok: terminalOk,
+              reports: result.reports,
+              connect: connect ?? null,
+              podLedger: podLedger ?? null,
+              publish: publish ?? null,
+              scopedPublish: scopedPublish ?? null,
+            },
             null,
             2,
           ),
@@ -493,6 +504,17 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       );
     });
   return cmd;
+}
+
+export function isHardConnectFailure(result: ConnectPodResult): boolean {
+  const hardStatuses = new Set<string>([
+    "invalid-real-handle",
+    "identity-mismatch",
+    "guard-noncanonical-origin",
+    "guard-missing-origin-existing-remote",
+    "origin-wire-blocked",
+  ]);
+  return hardStatuses.has(result.status);
 }
 
 export function podLedgerAllowsOuterPublish(podLedger: SyncPodLedgerResult | undefined): boolean {

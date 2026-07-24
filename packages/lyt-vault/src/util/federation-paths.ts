@@ -293,15 +293,22 @@ export function parseVaultRepoName(repoName: string): string | null {
 // canonical `{mesh}/{vault}` identity. For the name form they share the first
 // segment; for the repo-name form the mesh comes from inside the repo name
 // (an owner can host another mesh's vault — owner is WHERE, mesh is WHAT).
-export interface ResolvedVaultRef {
+export type ResolvedVaultRef = {
   // Canonical `{mesh}/{vault}` — the name the vault registers/looks-up under.
   vaultName: string;
-  // GitHub owner segment, as typed.
+  // GitHub owner segment, authoritative only for literal repo-name input.
   owner: string;
   // Convention repo name `lyt-vault-<mesh>--<leaf>`.
   repoName: string;
-  inputForm: "name" | "repo-name";
-}
+  inputForm: "repo-name";
+} | {
+  vaultName: string;
+  // A qualified vault name carries a mesh, not a repository owner. Keeping
+  // this absent prevents URL builders from silently treating WHERE as WHAT.
+  owner: null;
+  repoName: string;
+  inputForm: "name";
+};
 
 export function resolveVaultRef(input: string): ResolvedVaultRef | null {
   const segments = input.split("/");
@@ -316,9 +323,9 @@ export function resolveVaultRef(input: string): ResolvedVaultRef | null {
   if (parsedName !== null) {
     return { vaultName: parsedName, owner, repoName: rest, inputForm: "repo-name" };
   }
-  // Name form: both segments are vault-name slugs (`{mesh}/{vault}`) — the
-  // mesh segment doubles as the GH owner on URL derivation (GH lookup is
-  // case-insensitive, so the lowercase slug resolves).
+  // Name form: both segments are vault-name slugs (`{mesh}/{vault}`). The
+  // first segment is a MESH, never an authoritative GitHub owner. Remote
+  // resolution must happen separately from an origin coordinate or gh.
   if (!isSlugSegment(owner) || !isSlugSegment(rest)) return null;
-  return { vaultName: input, owner, repoName: vaultRepoName(input), inputForm: "name" };
+  return { vaultName: input, owner: null, repoName: vaultRepoName(input), inputForm: "name" };
 }

@@ -285,9 +285,9 @@ function packagePayloadChecks(
         id: "install.package-payloads",
         group: "install",
         label: "sealed installed package payloads",
-        status: "warn",
-        message: "no sealed installed-state anchor is available; package payload health is unknown",
-        remediation: "Run a successful exact Lyt update to create installed-state evidence",
+        status: "info",
+        message: "no sealed installed-state anchor; package payload health is unverified",
+        remediation: "A future exact Lyt update will create installed-state evidence",
       },
     ];
   }
@@ -353,8 +353,8 @@ function channelCheck(lytHome: string): CheckResult {
       id: "install.update-channel",
       group: "install",
       label: "configured update channel",
-      status: "warn",
-      message: "no update channel configured",
+      status: "info",
+      message: "no update channel configured yet",
       remediation: "Run: lyt update --channel <alpha|latest> --configure --json",
       detail: { configured: null, observed: null, path },
     };
