@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, platform } from "node:os";
-import { basename, dirname, join, parse, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 
 import {
@@ -60,7 +60,7 @@ export interface InstallReconcilePlanV1 {
   readonly objects: readonly ReconcileObjectPlanV1[];
 }
 
-interface ReconcileJournalV1 {
+export interface ReconcileJournalV1 {
   readonly schema_id: "lyt.install-reconcile-journal";
   readonly schema_version: Readonly<{ major: 1; minor: 0 }>;
   readonly plan: InstallReconcilePlanV1;
@@ -713,6 +713,11 @@ function readJournal(root: string, operationId: string): ReconcileJournalV1 {
     parsed.plan?.schema_version?.minor !== 0 ||
     parsed.plan.operation_id !== operationId ||
     !Array.isArray(parsed.plan.objects) ||
+    parsed.plan.objects.length === 0 ||
+    planIds.size !== parsed.plan.objects.length ||
+    parsed.plan.objects.some((object) => !isReconcileObjectPlanV1(object)) ||
+    typeof parsed.plan.journal_root !== "string" ||
+    !isAbsolute(parsed.plan.journal_root) ||
     !Array.isArray(parsed.completed) ||
     !Array.isArray(parsed.pending) ||
     !Array.isArray(parsed.refused) ||
@@ -744,11 +749,43 @@ function readJournal(root: string, operationId: string): ReconcileJournalV1 {
         schema_version: parsed.plan.schema_version,
         journal_root: parsed.plan.journal_root,
         objects: parsed.plan.objects,
-      })
+      }) ||
+    parsed.plan.operation_id !== digestToUuidV7(parsed.plan.plan_digest)
   ) {
     throw new Error("install-reconcile-journal-tampered");
   }
   return parsed;
+}
+
+function isReconcileObjectPlanV1(value: unknown): value is ReconcileObjectPlanV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const object = value as Partial<ReconcileObjectPlanV1>;
+  const sha256 = (candidate: unknown): candidate is string =>
+    typeof candidate === "string" && /^[a-f0-9]{64}$/.test(candidate);
+  const refusalConsistent =
+    object.disposition === "refused"
+      ? typeof object.refusal_code === "string" && object.refusal_code.length > 0
+      : object.refusal_code === null;
+  return (
+    typeof object.object_id === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9:._-]*$/.test(object.object_id) &&
+    typeof object.provider_package === "string" &&
+    UPDATE_PLAN_PACKAGES.includes(object.provider_package as (typeof UPDATE_PLAN_PACKAGES)[number]) &&
+    typeof object.provider_version === "string" &&
+    object.provider_version.length > 0 &&
+    (object.kind === "directory-link" || object.kind === "marker-file") &&
+    typeof object.target_path === "string" &&
+    isAbsolute(object.target_path) &&
+    sha256(object.expected_digest) &&
+    (object.observed_digest === null || sha256(object.observed_digest)) &&
+    sha256(object.expected_applied_digest) &&
+    Array.isArray(object.trusted_legacy_digests) &&
+    object.trusted_legacy_digests.every(sha256) &&
+    (object.disposition === "already-current" ||
+      object.disposition === "planned" ||
+      object.disposition === "refused") &&
+    refusalConsistent
+  );
 }
 
 export function inspectReconcileJournalV1(

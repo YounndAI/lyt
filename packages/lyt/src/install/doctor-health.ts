@@ -16,13 +16,20 @@ import {
 } from "@younndai/lyt-vault";
 
 import { buildInstallProviderInventoryV1, type InstallProviderV1 } from "./provider-inventory.js";
-import { inspectReconcileJournalV1, prepareInstallReconcilePlanV1 } from "./reconcile-engine.js";
+import {
+  inspectReconcileJournalV1,
+  prepareInstallReconcilePlanV1,
+  type ReconcileJournalV1,
+} from "./reconcile-engine.js";
 import {
   inspectInstalledPackagePayloadsV1,
   readInstalledStateAnchorV1,
   verifyInstalledStateAnchorV1,
 } from "./target-artifacts.js";
-import { inspectUpdateOperationJournalV1 } from "./update-operation.js";
+import {
+  inspectUpdateOperationJournalV1,
+  type UpdateOperationJournalV1,
+} from "./update-operation.js";
 import { UPDATE_PLAN_PACKAGES, type UpdatePackageName } from "./update-plan.js";
 
 export interface DoctorInstallHealthOptions {
@@ -87,11 +94,12 @@ export async function checkInstallHealthV1(
   );
   checks.push(...optionalRuntimeChecks(profileHome));
   checks.push(channelCheck(lytHome));
-  checks.push(...journalChecks(lytHome));
+  checks.push(...journalChecks(lytHome, options.topLevelVersion));
   checks.push(
     ...updateOperationChecks(
       join(lytHome, ".update-operations"),
       options.updateOperationInspector ?? inspectUpdateOperationJournalV1,
+      options.topLevelVersion,
     ),
   );
   checks.push(...residueChecks(options.scopedPackageRoot ?? defaultScopedPackageRoot()));
@@ -393,7 +401,7 @@ function channelCheck(lytHome: string): CheckResult {
   };
 }
 
-function journalChecks(lytHome: string): readonly CheckResult[] {
+function journalChecks(lytHome: string, topLevelVersion: string): readonly CheckResult[] {
   const journalRoot = join(lytHome, ".install-reconcile");
   const operationsRoot = join(journalRoot, "operations");
   if (!existsSync(operationsRoot)) {
@@ -431,7 +439,11 @@ function journalChecks(lytHome: string): readonly CheckResult[] {
         ),
       );
     }
-    let completed = 0;
+    const journals: {
+      operationId: string;
+      modifiedMs: number;
+      journal: ReconcileJournalV1;
+    }[] = [];
     for (const entry of entries.slice(0, 128)) {
       const operationPath = join(operationsRoot, entry.name);
       if (
@@ -460,28 +472,92 @@ function journalChecks(lytHome: string): readonly CheckResult[] {
         );
         continue;
       }
-      const journal = inspection.journal;
-      const incomplete =
-        journal.pending.length > 0 ||
-        journal.refused.length > 0 ||
-        journal.active_attempt_id !== null;
-      if (!incomplete) {
+      journals.push({
+        operationId: entry.name,
+        modifiedMs: lstatSync(join(operationPath, "journal.json")).mtimeMs,
+        journal: inspection.journal,
+      });
+    }
+    const currentCompleted = new Map<string, (typeof journals)[number]>();
+    for (const record of journals) {
+      if (
+        !isConsistentReconcileComplete(record.journal) ||
+        !reconcilePlanTargetsVersion(record.journal, topLevelVersion)
+      )
+        continue;
+      const key = reconcileCoverageKey(record.journal);
+      const prior = currentCompleted.get(key);
+      if (prior === undefined || prior.modifiedMs < record.modifiedMs) currentCompleted.set(key, record);
+    }
+    let completed = 0;
+    for (const record of journals) {
+      const { journal, operationId } = record;
+      if (isConsistentReconcileComplete(journal)) {
         completed += 1;
         continue;
       }
+      if (journal.status === "complete") {
+        checks.push(
+          failure(
+            `install.reconcile-journal.${checkId(operationId)}`,
+            "install reconciliation journal",
+            `operation ${operationId} is internally inconsistent: complete status disagrees with its journal state`,
+            {
+              operation_id: operationId,
+              status: journal.status,
+              pending: journal.pending,
+              refused: journal.refused,
+              active_attempt_id: journal.active_attempt_id,
+            },
+          ),
+        );
+        continue;
+      }
+      const superseding = currentCompleted.get(reconcileCoverageKey(journal));
+      if (
+        superseding !== undefined &&
+        superseding.modifiedMs > record.modifiedMs &&
+        journal.status !== "interrupted" &&
+        journal.active_attempt_id === null
+      ) {
+        checks.push(
+          warning(
+            `install.reconcile-journal.${checkId(operationId)}`,
+            "install reconciliation journal",
+            `operation ${operationId} is retained historical residue superseded by completed current operation ${superseding.operationId}`,
+            {
+              operation_id: operationId,
+              status: journal.status,
+              superseded_by: superseding.operationId,
+              pending: journal.pending,
+              active_attempt_id: journal.active_attempt_id,
+            },
+          ),
+        );
+        continue;
+      }
+      const targetsCurrentVersion = reconcilePlanTargetsVersion(journal, topLevelVersion);
+      const resumable = targetsCurrentVersion && journal.status !== "refused";
       checks.push(
         failure(
-          `install.reconcile-journal.${checkId(entry.name)}`,
+          `install.reconcile-journal.${checkId(operationId)}`,
           "install reconciliation journal",
-          `operation ${entry.name} is incomplete`,
+          targetsCurrentVersion
+            ? `operation ${operationId} is incomplete`
+            : `operation ${operationId} is incomplete and targets a different Lyt version; stale replay is refused`,
           {
-            operation_id: entry.name,
+            operation_id: operationId,
+            status: journal.status,
             pending: journal.pending,
             refused: journal.refused,
             active_attempt_id: journal.active_attempt_id,
-            resume_command: `lyt install reconcile --resume ${entry.name} --apply --json`,
+            ...(resumable
+              ? { resume_command: `lyt install reconcile --resume ${operationId} --apply --json` }
+              : {}),
           },
-          `Run: lyt install reconcile --resume ${entry.name} --apply --json`,
+          resumable
+            ? `Run: lyt install reconcile --resume ${operationId} --apply --json`
+            : "Run: lyt install reconcile --apply --json to inspect a current operation instead",
         ),
       );
     }
@@ -511,6 +587,7 @@ function journalChecks(lytHome: string): readonly CheckResult[] {
 function updateOperationChecks(
   root: string,
   inspect: typeof inspectUpdateOperationJournalV1,
+  topLevelVersion: string,
 ): readonly CheckResult[] {
   const operationsRoot = join(root, "operations");
   const pass = (count: number): CheckResult => ({
@@ -545,7 +622,7 @@ function updateOperationChecks(
         ),
       );
     }
-    let completed = 0;
+    const journals: { operationId: string; journal: UpdateOperationJournalV1 }[] = [];
     for (const entry of entries.slice(0, 128)) {
       const operationPath = join(operationsRoot, entry.name);
       if (
@@ -570,28 +647,76 @@ function updateOperationChecks(
             "durable update operations",
             `operation ${entry.name} is missing, failed, or tampered (${inspection.error_code})`,
             { operation_id: entry.name, error_code: inspection.error_code },
-            `Run: lyt update --resume ${entry.name} --yes --json`,
+            "Run: lyt doctor --json after inspecting or restoring the sealed journal",
           ),
         );
         continue;
       }
-      if (inspection.status === "completed") {
+      journals.push({ operationId: entry.name, journal: inspection.journal });
+    }
+    const anchorRead = readInstalledStateAnchorV1(root);
+    const anchoredMatches =
+      anchorRead.status === "present" &&
+      anchorRead.anchor !== null &&
+      anchorRead.anchor.target_version === topLevelVersion
+        ? journals.filter(
+            (record) =>
+              record.journal.status === "completed" &&
+              record.journal.plan.plan_digest === anchorRead.anchor?.plan_digest &&
+              record.journal.plan.target_version === anchorRead.anchor?.target_version,
+          )
+        : [];
+    const anchoredCompleted = anchoredMatches.length === 1 ? anchoredMatches[0] : undefined;
+    let completed = 0;
+    for (const record of journals) {
+      const { journal, operationId } = record;
+      if (journal.status === "completed") {
         completed += 1;
         continue;
       }
+      if (
+        anchoredCompleted !== undefined &&
+        journal.plan.plan_digest !== anchoredCompleted.journal.plan.plan_digest &&
+        Date.parse(anchoredCompleted.journal.started_at) > Date.parse(journal.started_at)
+      ) {
+        checks.push(
+          warning(
+            `install.update-operation.${checkId(operationId)}`,
+            "durable update operations",
+            `operation ${operationId} is retained historical residue superseded by anchored current operation ${anchoredCompleted.operationId}`,
+            {
+              operation_id: operationId,
+              target_version: journal.plan.target_version,
+              superseded_by: anchoredCompleted.operationId,
+              installed_anchor_plan_digest: anchoredCompleted.journal.plan.plan_digest,
+              completed_boundaries: journal.completed_boundaries,
+              active_attempt_id: journal.active_attempt_id,
+            },
+          ),
+        );
+        continue;
+      }
+      const targetsCurrentVersion = journal.plan.target_version === topLevelVersion;
       checks.push(
         failure(
-          `install.update-operation.${checkId(entry.name)}`,
+          `install.update-operation.${checkId(operationId)}`,
           "durable update operations",
-          `operation ${entry.name} is pending or interrupted`,
+          targetsCurrentVersion
+            ? `operation ${operationId} is pending or interrupted`
+            : `operation ${operationId} targets Lyt ${journal.plan.target_version}, not installed Lyt ${topLevelVersion}; stale replay is refused`,
           {
-            operation_id: entry.name,
-            status: inspection.status,
-            completed_boundaries: inspection.journal.completed_boundaries,
-            active_attempt_id: inspection.journal.active_attempt_id,
-            resume_command: `lyt update --resume ${entry.name} --yes --json`,
+            operation_id: operationId,
+            status: journal.status,
+            target_version: journal.plan.target_version,
+            completed_boundaries: journal.completed_boundaries,
+            active_attempt_id: journal.active_attempt_id,
+            ...(targetsCurrentVersion
+              ? { resume_command: `lyt update --resume ${operationId} --yes --json` }
+              : {}),
           },
-          `Run: lyt update --resume ${entry.name} --yes --json`,
+          targetsCurrentVersion
+            ? `Run: lyt update --resume ${operationId} --yes --json`
+            : "Run: lyt update --check --json and start a current-version update instead",
         ),
       );
     }
@@ -605,6 +730,34 @@ function updateOperationChecks(
       ),
     ];
   }
+}
+
+function reconcilePlanTargetsVersion(journal: ReconcileJournalV1, version: string): boolean {
+  return (
+    journal.plan.objects.length > 0 &&
+    journal.plan.objects.every((object) => object.provider_version === version)
+  );
+}
+
+function isConsistentReconcileComplete(journal: ReconcileJournalV1): boolean {
+  return (
+    journal.status === "complete" &&
+    journal.pending.length === 0 &&
+    journal.refused.length === 0 &&
+    journal.active_attempt_id === null
+  );
+}
+
+function reconcileCoverageKey(journal: ReconcileJournalV1): string {
+  return JSON.stringify(
+    journal.plan.objects
+      .map((object) => [object.object_id, object.provider_package, object.kind, object.target_path])
+      .sort((left, right) => {
+        const leftKey = JSON.stringify(left);
+        const rightKey = JSON.stringify(right);
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      }),
+  );
 }
 
 function residueChecks(scopedRoot: string | null): readonly CheckResult[] {
@@ -786,6 +939,22 @@ function failure(
     status: "fail",
     message,
     ...(remediation === undefined ? {} : { remediation }),
+    ...(detail === undefined ? {} : { detail }),
+  };
+}
+
+function warning(
+  id: string,
+  label: string,
+  message: string,
+  detail?: Record<string, unknown>,
+): CheckResult {
+  return {
+    id,
+    group: "install",
+    label,
+    status: "warn",
+    message,
     ...(detail === undefined ? {} : { detail }),
   };
 }

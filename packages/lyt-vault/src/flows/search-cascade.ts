@@ -139,7 +139,7 @@ const SNIPPET_LEN = 96;
 // i.e. a max body hit must out-blend a tag-only hit. If the confidence
 // constants change, α MUST move with them or a strong body hit silently stops
 // overtaking a tag hit. Keep α and the tier-confidence gap in sync.
-const SOFT_TIER_ALPHA = 0.25;
+export const SOFT_TIER_ALPHA = 0.25;
 
 // Gather-all-then-rank cap (K): collect up to K·limit candidates per tier and
 // per in-scope vault before blending → global ranking → truncating to `limit`.
@@ -550,14 +550,17 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
         // expansion: it MATCHes against `ftsQuery` (original + expansion terms),
         // not the bare `query`. Tiers 0/1 above keep `query` (their arc/lane
         // substring match would break on a multi-term blob).
-        const ftsHits = await runTier2Fts({
-          lytDb,
-          query: ftsQuery,
-          vault,
-          meshName,
-          seen: localSeen,
-          remaining: gatherCap,
-        });
+        const ftsHits = await runTier2Fts(
+          {
+            lytDb,
+            query: ftsQuery,
+            vault,
+            meshName,
+            seen: localSeen,
+            remaining: gatherCap,
+          },
+          new Map(laneHits.map((hit) => [`${vault.name}::${hit.figment_path}`, hit])),
+        );
         for (const hit of ftsHits) hits.push(hit);
         perTier[TIER_2] += ftsHits.length;
 
@@ -738,8 +741,9 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
   // the lexical ranking via the proven confidence-gated rank-preserve rule. ANY
   // miss (model unavailable, zero vectors gathered, embed throws) leaves the
   // lexical order UNTOUCHED → byte-identical to semantic:false. The
-  // fusion is pure reordering over the already-gathered candidates (no new DB
-  // reads), so it cannot starve or change the candidate SET — only its order.
+  // Fusion performs no new DB reads. It may reorder the lexical top-limit
+  // candidate set and may fill otherwise-empty result slots with dense-only
+  // candidates, but it must never evict a lexical-window candidate.
   let semanticFused = false;
   // Phase B (C3, F-B.1) — defense-in-depth read-never-fetches guard. The
   // foundation already prevents a fetch on a read (loadEmbedder with no opts has
@@ -777,7 +781,13 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
           fusionBlendHi,
           fusionBlendMid,
           SNIPPET_LEN,
+          limit,
         );
+        const denseOnlyHitCount = fusedOrder.filter((result) => result.tier === DENSE_TIER).length;
+        if (denseOnlyHitCount > 0) {
+          perTierHits[DENSE_TIER] = denseOnlyHitCount;
+          tiersRunSet.add(DENSE_TIER);
+        }
         // Replace the results array contents in fused order (preserves lexical
         // object identities; dense-only docs are freshly materialized).
         results.length = 0;
@@ -977,9 +987,11 @@ const DENSE_TIER = 4;
 //  1. keepN from the lexical TOP hit's blendedScore: >=hi→3, >=mid→2, else→0.
 //  2. Cosine-rank the FULL dense corpus against qVec (deterministic key
 //     tiebreak) → the dense ranked list.
-//  3. Emit lexical[0..keepN) FIXED, then fill from the dense order (docs not
-//     already emitted — materializing a SearchResult for dense-only docs), then
-//     any remaining lexical. Deterministic.
+//  3. Restrict lexical membership to the caller's requested result window.
+//     Emit lexical[0..keepN) FIXED, then walk the dense order. Dense overlap may
+//     reorder members of that lexical window; dense-only docs may consume only
+//     slots the lexical window did not fill. Emit any remaining window members.
+//     Deterministic, with no lexical-window eviction.
 //
 // Exported for direct unit testing of the proven rule (deterministic, no model).
 export function fuseDense(
@@ -989,6 +1001,7 @@ export function fuseDense(
   blendHi: number,
   blendMid: number,
   snippetLen: number = SNIPPET_LEN,
+  resultLimit?: number,
 ): SearchResult[] {
   void snippetLen; // snippet enrichment for dense-only hits is deferred (see below)
   const keyOf = (r: SearchResult): string => `${r.vault_name}::${r.figment_path}`;
@@ -997,7 +1010,21 @@ export function fuseDense(
   // holds sit ~1.0-1.35, misses ~0.85-0.95 — see the prototype's confidence
   // diagnostic). FUSION_ADAPTIVE selects the adaptive band vs the threshold-free
   // plain keep-3 fallback (both proven clean; adaptive is the ~0.60 winner).
-  const topBlend = lexical[0]?.blendedScore ?? lexical[0]?.confidence ?? 0;
+  // `resultLimit` is an additive final argument because fuseDense is exported.
+  // Omission preserves the pre-B0 full-union helper contract for existing
+  // callers; searchCascadeFlow passes its finite result window explicitly.
+  const boundedResultLimit =
+    resultLimit === undefined ? undefined : Math.max(0, Math.floor(resultLimit));
+  const lexicalWindow =
+    boundedResultLimit === undefined ? lexical : lexical.slice(0, boundedResultLimit);
+  // A positive dense-only budget implies lexical.length < boundedResultLimit,
+  // therefore lexicalWindow is the whole lexical list. This prevents a genuine
+  // below-window lexical hit from being degraded into a dense-only result.
+  const denseOnlyBudget =
+    boundedResultLimit === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, boundedResultLimit - lexicalWindow.length);
+  const topBlend = lexicalWindow[0]?.blendedScore ?? lexicalWindow[0]?.confidence ?? 0;
   const keepN = FUSION_ADAPTIVE
     ? topBlend >= blendHi
       ? 3
@@ -1017,7 +1044,7 @@ export function fuseDense(
   // Lexical-result lookup by key so a dense doc the lexical cascade also
   // returned reuses its (richer, snippet-bearing) SearchResult identity.
   const lexByKey = new Map<string, SearchResult>();
-  for (const r of lexical) lexByKey.set(keyOf(r), r);
+  for (const r of lexicalWindow) lexByKey.set(keyOf(r), r);
 
   // Materialize a dense-only doc into a minimal SearchResult. Snippet is empty
   // (the doc body isn't in hand here — the vault DBs are closed; the human
@@ -1034,26 +1061,32 @@ export function fuseDense(
 
   const out: SearchResult[] = [];
   const seen = new Set<string>();
-  const emit = (r: SearchResult): void => {
+  const emit = (r: SearchResult): boolean => {
     const k = keyOf(r);
     if (!seen.has(k)) {
       out.push(r);
       seen.add(k);
+      return true;
     }
+    return false;
   };
 
   // 1. Keep lexical top-keepN fixed at their ranks.
-  for (const r of lexical.slice(0, keepN)) emit(r);
-  // 2. Fill from the dense order — reuse the lexical result if the doc was also
-  //    a lexical hit, else materialize the dense-only doc (the recall recovery).
+  for (const r of lexicalWindow.slice(0, keepN)) emit(r);
+  // 2. Walk dense order. Reuse lexical-window results freely; admit a dense-only
+  //    result only while the lexical search left an actual slot available.
+  let denseOnlyEmitted = 0;
   for (const d of denseRanked) {
     const lex = lexByKey.get(d.key);
-    emit(lex ?? materialize(d));
+    if (lex !== undefined) {
+      emit(lex);
+    } else if (denseOnlyEmitted < denseOnlyBudget && emit(materialize(d))) {
+      denseOnlyEmitted += 1;
+    }
   }
-  // 3. Any remaining lexical (docs with no vector — e.g. a vault that never
-  //    built embeddings — so they were absent from denseRanked). Guarantees no
-  //    lexical hit is dropped.
-  for (const r of lexical) emit(r);
+  // 3. Emit every remaining lexical-window result. Lexical results below the
+  //    requested window cannot enter by semantic side effect.
+  for (const r of lexicalWindow) emit(r);
   return out;
 }
 
@@ -1353,14 +1386,29 @@ async function runTier1Lanes(args: TierArgs): Promise<SearchResult[]> {
 // Tier 2 — FTS5 raw-count (confidence 0.7)
 // ---------------------------------------------------------------------------
 
-async function runTier2Fts(args: TierArgs): Promise<SearchResult[]> {
+async function runTier2Fts(
+  args: TierArgs,
+  enrichableLaneHits: ReadonlyMap<string, SearchResult> = new Map(),
+): Promise<SearchResult[]> {
   if (args.remaining <= 0) return [];
   const hits = await searchFts(args.lytDb, args.query, args.remaining);
   const out: SearchResult[] = [];
   for (const h of hits) {
     if (out.length >= args.remaining) break;
     const key = `${args.vault.name}::${h.figmentPath}`;
-    if (args.seen.has(key)) continue;
+    if (args.seen.has(key)) {
+      // A lane match owns the result's Tier-1 provenance, but it must not erase
+      // the same document's body-strength evidence. Without this merge, every
+      // member of a broad matched lane inherited one of a few identical scores
+      // even when FTS5 could distinguish their relevance. Arc hits deliberately
+      // remain untouched so their stronger Tier-0 contract does not change.
+      const laneHit = enrichableLaneHits.get(key);
+      if (laneHit !== undefined) {
+        laneHit.rawScore = Math.max(laneHit.rawScore ?? 0, h.rawHits);
+        laneHit.snippet = h.snippet;
+      }
+      continue;
+    }
     args.seen.add(key);
     out.push({
       figment_path: h.figmentPath,

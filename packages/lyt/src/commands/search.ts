@@ -256,6 +256,7 @@ export function emitJsonResult(res: SearchCascadeResult): void {
     results: res.results.map((r) => ({
       confidence: r.confidence,
       tier: r.tier,
+      ...(r.blendedScore !== undefined ? { blendedScore: r.blendedScore } : {}),
       vault_name: r.vault_name,
       mesh_name: r.mesh_name,
       figment_path: r.figment_path,
@@ -265,6 +266,7 @@ export function emitJsonResult(res: SearchCascadeResult): void {
       tiersRun: res.trace.tiersRun,
       perTierHitCount: res.trace.perTierHitCount,
       vaultsSearched: res.trace.vaultsSearched,
+      ...(res.trace.semanticFused === true ? { semanticFused: true } : {}),
       // Phase D Slice 2b — surface the nudge decision-trace under --json so
       // the agent knows model state + WHY it should/shouldn't voice the nudge.
       // Additive: present ONLY when the flow ran the nudge (CLI runs always do),
