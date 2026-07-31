@@ -21,6 +21,7 @@ import {
   generatePrimerFlow,
   infoVaultFlow,
   listVaultsFlow,
+  MEANING_CANDIDATE_CAVEAT,
   patternRunFlow,
   reconnectVaultFlow,
   searchCascadeFlow,
@@ -89,7 +90,9 @@ interface LeanSearchHit {
   snippet: string;
   tier: number;
   confidence: number;
+  foundBy: Array<"keyword" | "meaning">;
   blendedScore?: number;
+  metadata?: Record<string, unknown>;
 }
 
 interface LeanSearchResult {
@@ -97,7 +100,16 @@ interface LeanSearchResult {
   scope: string;
   scopeTarget: string | null;
   limit: number;
+  lexicalLimit: number;
+  meaningLimit: number;
+  maxResults: number;
+  semanticSearched: boolean;
   count: number;
+  groups: {
+    directTextMatches: LeanSearchHit[];
+    meaningCandidates: LeanSearchHit[];
+    meaningCaveat: string;
+  };
   results: LeanSearchHit[];
 }
 
@@ -109,14 +121,27 @@ function projectSearchResult(result: SearchCascadeResult): LeanSearchResult {
     snippet: r.snippet,
     tier: r.tier,
     confidence: r.confidence,
+    foundBy: r.foundBy,
     ...(r.blendedScore !== undefined ? { blendedScore: r.blendedScore } : {}),
+    ...(r.metadata !== undefined ? { metadata: r.metadata } : {}),
   }));
   return {
     query: result.query,
     scope: result.scope,
     scopeTarget: result.scopeTarget,
     limit: result.limit,
+    lexicalLimit: result.lexicalLimit,
+    meaningLimit: result.meaningLimit,
+    maxResults: result.maxResults,
+    semanticSearched: result.trace.semanticFused === true,
     count: results.length,
+    groups: {
+      directTextMatches: results.filter((hit) => hit.foundBy.includes("keyword")),
+      meaningCandidates: results.filter(
+        (hit) => !hit.foundBy.includes("keyword") && hit.foundBy.includes("meaning"),
+      ),
+      meaningCaveat: MEANING_CANDIDATE_CAVEAT,
+    },
     results,
   };
 }
@@ -299,7 +324,9 @@ export function buildOpRegistry(): OpRow[] {
         content: z
           .string()
           .min(1, "content must be non-empty")
-          .describe("Figment body — plain Obsidian-flavored markdown (mandatory, non-empty, at the MCP layer)"),
+          .describe(
+            "Figment body — plain Obsidian-flavored markdown (mandatory, non-empty, at the MCP layer)",
+          ),
         tags: z.array(z.string()).optional().describe("Optional tags, e.g. ['alpha','beta']"),
         weight: z.number().optional().describe("Figment weight 1-5 (default 3)"),
         title: z.string().optional().describe("Optional explicit title (else derived from slug)"),
@@ -339,8 +366,10 @@ export function buildOpRegistry(): OpRow[] {
         "BEFORE searching, EXPAND the query: emit 6–10 domain/synonym terms a relevant note would likely use but the " +
         "literal query omits (related concepts, alternate phrasings, technical terms, near-synonyms), and pass them as " +
         "`expansionTerms`. The tool folds those terms into the keyword/BM25 channel to build the lexical handle that " +
-        "surfaces buried, vocabulary-mismatched targets the bare query would miss. Returns a compact top-N projection: " +
-        "per hit { path, vault, mesh, snippet, tier, confidence, blendedScore? }, plus { query, scope, scopeTarget, limit, count }.",
+        "surfaces buried, vocabulary-mismatched targets the bare query would miss. The default result budget is 20 " +
+        "lexical/structural hits plus up to 10 meaning hits. Returns direct text matches and meaning candidates as " +
+        "separate groups; meaning candidates are similarity suggestions, not confirmed matches. Also returns additive " +
+        "foundBy membership and bounded frontmatter metadata, plus lexicalLimit, meaningLimit, maxResults, semanticSearched, and count.",
       inputSchema: {
         query: z.string().describe("Search query (the literal user intent)"),
         expansionTerms: z
@@ -360,21 +389,44 @@ export function buildOpRegistry(): OpRow[] {
           .string()
           .optional()
           .describe("Vault or mesh name when scope is 'vault' or 'mesh'"),
-        limit: z.number().optional().describe("Max results (default 20)"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .max(1000)
+          .optional()
+          .describe("Lexical/structural result allowance (default 20, max 1000)"),
+        meaningLimit: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(1000)
+          .optional()
+          .describe(
+            "Additional dense-only result allowance (default 10, max 1000; 0 keeps reranking but adds no meaning-only hits)",
+          ),
+        fields: z
+          .array(z.string().regex(/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/))
+          .max(20)
+          .optional()
+          .describe(
+            "Additional allow-listed frontmatter keys to project, using optional dotted paths such as meta.lifecycle",
+          ),
       },
       access: "read",
       handlerGated: false,
       defaultProfile: true,
-      handler: ({ query, expansionTerms, scope, scopeTarget, limit }) =>
+      handler: ({ query, expansionTerms, scope, scopeTarget, limit, meaningLimit, fields }) =>
         guarded(async () => {
           const result = await searchCascadeFlow({
             query: query as string,
-            ...(expansionTerms !== undefined
-              ? { expansionTerms: expansionTerms as string[] }
-              : {}),
+            ...(expansionTerms !== undefined ? { expansionTerms: expansionTerms as string[] } : {}),
             ...(scope !== undefined ? { scope: scope as SearchCascadeScope } : {}),
             ...(scopeTarget !== undefined ? { scopeTarget: scopeTarget as string } : {}),
             ...(limit !== undefined ? { limit: limit as number } : {}),
+            ...(limit !== undefined ? { totalLimit: limit as number } : {}),
+            ...(meaningLimit !== undefined ? { meaningLimit: meaningLimit as number } : {}),
+            ...(fields !== undefined ? { fields: fields as string[] } : {}),
           });
           return asText(projectSearchResult(result));
         }),
@@ -386,10 +438,7 @@ export function buildOpRegistry(): OpRow[] {
         "Sync GitHub repo metadata (description + topics) from a vault's .lyt/vault.yon, and regenerate mesh-context/agents.md. Scope is mandatory (vault / vaults / mesh).",
       inputSchema: {
         vault: z.string().optional().describe("Single vault name to sync"),
-        vaults: z
-          .array(z.string())
-          .optional()
-          .describe("Vault name patterns (glob) to sync"),
+        vaults: z.array(z.string()).optional().describe("Vault name patterns (glob) to sync"),
         mesh: z.string().optional().describe("Root vault name to traverse a mesh from"),
         mode: z
           .enum(["dry-run", "apply"])
@@ -431,16 +480,17 @@ export function buildOpRegistry(): OpRow[] {
       description:
         "Generate a deterministic agent-priming markdown digest for a vault, mesh, or the federation (top keywords, active arcs, recent activity, top lanes).",
       inputSchema: {
-        scope: z
-          .enum(["vault", "mesh", "federation"])
-          .describe("Primer scope"),
+        scope: z.enum(["vault", "mesh", "federation"]).describe("Primer scope"),
         scopeTarget: z
           .string()
           .optional()
           .describe("Vault or mesh name when scope is 'vault' or 'mesh'"),
         topKeywords: z.number().optional().describe("Top-N keywords (default 20)"),
         topArcs: z.number().optional().describe("Top-N arcs/lanes (default 10)"),
-        provenanceDays: z.number().optional().describe("Recent-activity window in days (default 7)"),
+        provenanceDays: z
+          .number()
+          .optional()
+          .describe("Recent-activity window in days (default 7)"),
         dryRun: z.boolean().optional().describe("Render + return markdown without writing to disk"),
       },
       access: "read",

@@ -310,6 +310,19 @@ CREATE TABLE IF NOT EXISTS embeddings (
 `,
 };
 
+// 0.20.16 Phase D — normalized figment titles are an independent lexical
+// field. Keep this as a derived FTS cache rather than changing the existing
+// figment_fts table in place: upgraded pods retain their body index until the
+// normal bounded rebuild fills this additive table. One row per figment path;
+// the markdown file remains the source of truth.
+const lytMigration008FigmentTitleFts: VaultDbMigration = {
+  version: 8,
+  name: "init-figment-title-fts",
+  sql: `
+CREATE VIRTUAL TABLE IF NOT EXISTS figment_title_fts USING fts5(figment_rid UNINDEXED, title, tokenize='porter unicode61');
+`,
+};
+
 export const LYT_DB_MIGRATIONS: readonly VaultDbMigration[] = [
   lytMigration001Init,
   lytMigration002Rollup,
@@ -318,6 +331,7 @@ export const LYT_DB_MIGRATIONS: readonly VaultDbMigration[] = [
   lytMigration005FigmentMetaTopicTags,
   lytMigration006Keyphrases,
   lytMigration007Embeddings,
+  lytMigration008FigmentTitleFts,
 ];
 
 export const LYT_DB_TABLES = Object.freeze([
@@ -335,6 +349,12 @@ export const LYT_DB_TABLES = Object.freeze([
   "figment_fts_data",
   "figment_fts_docsize",
   "figment_fts_idx",
+  "figment_title_fts",
+  "figment_title_fts_config",
+  "figment_title_fts_content",
+  "figment_title_fts_data",
+  "figment_title_fts_docsize",
+  "figment_title_fts_idx",
   "rollup",
   "figment_edges",
   "figment_meta",

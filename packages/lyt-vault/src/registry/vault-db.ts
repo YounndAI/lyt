@@ -83,6 +83,9 @@ async function openSplitDb(
 }
 
 export async function openLytDb(vaultPath: string): Promise<Client> {
+  // Title FTS is rebuilt by the indexing/write paths (`upsertFtsCache` and
+  // per-figment reconciliation). A universal opener must never scan markdown
+  // or mutate derived indexes during read-only verbs such as search/recall.
   return openSplitDb(getLytDbPath(vaultPath), migrateLytDb);
 }
 

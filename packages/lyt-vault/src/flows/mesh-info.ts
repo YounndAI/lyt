@@ -23,6 +23,7 @@ import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getMeshByName } from "../registry/meshes-repo.js";
 import { getVaultByRid } from "../registry/repo.js";
 import { presentMeshDestination, presentVaultDestination, type DestinationPresentation } from "./destination-presentation.js";
+import { loadDestinationPolicyContext } from "./federation/destination-policy-service.js";
 import { vaultRepoNameFromParts } from "../util/federation-paths.js";
 import { uuid7BytesToDashedString, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseMeshYon } from "../yon/mesh-read.js";
@@ -192,6 +193,7 @@ export async function meshInfoFlow(args: MeshInfoArgs): Promise<MeshInfoResult> 
     }
 
     const parsed = parseMeshYon(content);
+    const destinationPolicy = source === "local" ? await loadDestinationPolicyContext(db) : null;
 
     const homeVaults: MeshInfoHomeVault[] = await Promise.all(parsed.homeVaults.map(async (h) => {
       if (source === "remote") {
@@ -209,7 +211,10 @@ export async function meshInfoFlow(args: MeshInfoArgs): Promise<MeshInfoResult> 
         vaultRidHex: uuid7BytesToHex(h.vaultRid),
         vaultName: h.vaultName,
         acquisitionSource: vault?.source ?? null,
-        destination: vault === null ? null : presentVaultDestination(vault, mesh),
+        destination:
+          vault === null
+            ? null
+            : presentVaultDestination(vault, mesh, destinationPolicy ?? undefined),
       };
     }));
 

@@ -67,6 +67,53 @@ import { withFreshPublicationPermission } from "./publication-authority.js";
 
 export type GitRunner = (args: readonly string[], opts: GitRunOptions) => Promise<GitRunResult>;
 
+const PUBLICATION_READBACK_TIMEOUT_MS = 10_000;
+
+export async function verifyExactPublishedRef(args: {
+  git: GitRunner;
+  cwd: string;
+  remoteUrl: string;
+  remoteRef: string;
+  expectedHead?: string;
+}): Promise<boolean> {
+  const localHead =
+    args.expectedHead === undefined
+      ? await args.git(["rev-parse", "HEAD"], {
+          cwd: args.cwd,
+          allowFailure: true,
+          maxOutputBytes: 256,
+        })
+      : { code: 0, stdout: args.expectedHead, stderr: "" };
+  const expected = parseObjectId(localHead.stdout);
+  if (localHead.code !== 0 || expected === null) return false;
+  const observed = await args.git(
+    ["ls-remote", "--exit-code", args.remoteUrl, args.remoteRef],
+    {
+      cwd: args.cwd,
+      allowFailure: true,
+      timeoutMs: PUBLICATION_READBACK_TIMEOUT_MS,
+      maxOutputBytes: 1024,
+    },
+  );
+  if (observed.code !== 0) return false;
+  return exactRemoteObjectId(observed.stdout, args.remoteRef) === expected;
+}
+
+function parseObjectId(raw: string): string | null {
+  const value = raw.trim().toLowerCase();
+  return /^[a-f0-9]{40,64}$/u.test(value) ? value : null;
+}
+
+function exactRemoteObjectId(raw: string, remoteRef: string): string | null {
+  for (const line of raw.split(/\r?\n/u)) {
+    const [objectId, ref, extra] = line.trim().split(/\s+/u);
+    if (extra === undefined && ref === remoteRef && objectId !== undefined) {
+      return parseObjectId(objectId);
+    }
+  }
+  return null;
+}
+
 export interface MaterializeVaultOptions {
   handle: string;
   // B2a (Inc-2 Phase B slice 2) — the GitHub OWNER the vault repo lives under
@@ -455,6 +502,22 @@ export async function materializeVaultPublishable(
         ),
       );
       if (pushed.code === 0) {
+        const verified = await verifyExactPublishedRef({
+          git,
+          cwd: vault.path,
+          remoteUrl: canonicalPushUrl,
+          remoteRef: "refs/heads/main",
+        });
+        if (!verified) {
+          return {
+            ...result,
+            skipped: true,
+            skippedReason: "verification-pending",
+            warnings: [
+              "push completed, but the exact online vault ref could not yet be verified; retry scoped sync",
+            ],
+          };
+        }
         result.pushed = true;
         if (opts.registryDb === undefined) {
           throw new Error("push completed, but registry persistence is unavailable");
@@ -694,6 +757,18 @@ export async function commitPodRepo(
         },
       });
       if (pushed.code === 0) {
+        const verified = await verifyExactPublishedRef({
+          git,
+          cwd: podDir,
+          remoteUrl: canonicalUrl,
+          remoteRef: "refs/heads/main",
+        });
+        if (!verified) {
+          warnings.push(
+            "pod push completed, but the exact online pod ref could not yet be verified; retry sync",
+          );
+          return result;
+        }
         result.pushed = true;
         const originAfter = await git(["remote", "get-url", "origin"], {
           cwd: podDir,

@@ -32,7 +32,11 @@ import type { LytRunContext } from "@younndai/lyt-runner";
 
 import { runArcBuilderBody, type ArcBuilderOutcome } from "./arc-builder.js";
 import { runLaneBuilderBody, type LaneBuilderOutcome } from "./lane-builder.js";
-import { runMetadataFillerBody, type MetadataFillerOutcome } from "./metadata-filler.js";
+import {
+  runMetadataFillerBody,
+  type MetadataFillerOutcome,
+  type MetadataFillerScope,
+} from "./metadata-filler.js";
 
 export interface AutomatorBodyArgs {
   vaultPath: string;
@@ -48,6 +52,7 @@ export interface AutomatorBodyArgs {
     auditDb: Client;
     provenanceDb: Client;
   };
+  metadataFillerScope?: MetadataFillerScope;
 }
 
 export type AutomatorBodyFn = (ctx: LytRunContext, args: AutomatorBodyArgs) => Promise<unknown>;
@@ -67,4 +72,9 @@ export function resolveAutomatorBody(name: string): AutomatorBodyFn | null {
 }
 
 export { runMetadataFillerBody, runLaneBuilderBody, runArcBuilderBody };
-export type { MetadataFillerOutcome, LaneBuilderOutcome, ArcBuilderOutcome };
+export type {
+  MetadataFillerOutcome,
+  MetadataFillerScope,
+  LaneBuilderOutcome,
+  ArcBuilderOutcome,
+};

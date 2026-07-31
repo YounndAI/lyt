@@ -26,7 +26,7 @@ import {
   listVaults,
   type VaultRow,
 } from "../registry/repo.js";
-import { getMeshByRid } from "../registry/meshes-repo.js";
+import { getMeshByRid, type MeshRow } from "../registry/meshes-repo.js";
 import { computeDisplayName, vaultOriginCoordinate } from "../registry/vault-addressing.js";
 import {
   deriveLocalWritable,
@@ -36,6 +36,11 @@ import {
 } from "./writability.js";
 import { reprobeVaultAccessLost } from "./access-reprobe.js";
 import { presentVaultDestination, type DestinationPresentation } from "./destination-presentation.js";
+import {
+  loadDestinationPolicyContext,
+  resolveCanonicalOwnedVaultPublicationAuthority,
+  type DestinationPolicyContext,
+} from "./federation/destination-policy-service.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 import { detectLicenseFromContent, type DetectedLicense } from "../util/license-detect.js";
 import { ridsEqual } from "../util/uuid7.js";
@@ -58,6 +63,19 @@ export interface VaultLicensePosture {
   license: string | null;
   bucket: DetectedLicense["bucket"];
 }
+
+export type PublishabilityVerdict =
+  | WritabilityVerdict
+  | {
+      writable: false;
+      reason:
+        | "destination-local"
+        | "foreign"
+        | "missing-policy"
+        | "quarantined-policy"
+        | "contradictory-policy"
+        | "ambiguous-authority";
+    };
 
 export interface InfoFlowResult {
   vault: {
@@ -99,13 +117,13 @@ export interface InfoFlowResult {
     //     what a push/publish/share flow should read.
     localWritable: LocalWritability["localWritable"];
     localWritableReason: LocalWritability["reason"];
-    publishable: WritabilityVerdict["writable"];
-    publishableReason: WritabilityVerdict["reason"];
+    publishable: PublishabilityVerdict["writable"];
+    publishableReason: PublishabilityVerdict["reason"];
     // v1.G.2 — DEPRECATED alias of `publishable` (the gh push verdict), retained
     // for back-compat this version; consumers gating a LOCAL write must move to
     // `localWritable`, and push/share consumers to `publishable`. Removed next minor.
-    writable: WritabilityVerdict["writable"];
-    writableDetermination: WritabilityVerdict["reason"];
+    writable: PublishabilityVerdict["writable"];
+    writableDetermination: PublishabilityVerdict["reason"];
   };
   // v1.A.1b: outbound edges from this vault — empty until v1.B.1's
   // mesh-aware writes land; structurally kept for forward-compat.
@@ -193,6 +211,19 @@ export async function infoVaultFlow(
     const localWritability = await deriveLocalWritable(vault, db, ghOpts);
     const gitUrlOut = vault.gitUrl ?? (await getVaultByRid(db, vault.rid))?.gitUrl ?? null;
     const homeMesh = vault.homeMeshRid === null ? null : await getMeshByRid(db, vault.homeMeshRid);
+    const destinationPolicy = await loadDestinationPolicyContext(db);
+    const destination = presentVaultDestination(
+      { ...vault, gitUrl: gitUrlOut },
+      homeMesh,
+      destinationPolicy,
+    );
+    const publishability = deriveInfoPublishability(
+      vault,
+      homeMesh,
+      destinationPolicy,
+      destination,
+      writability,
+    );
 
     const displayName = await computeDisplayName(db, vault);
     const originCoordinate = vaultOriginCoordinate({ ...vault, gitUrl: gitUrlOut });
@@ -211,7 +242,7 @@ export async function infoVaultFlow(
         homeMeshRid: vault.homeMeshRidHex,
         gitUrl: gitUrlOut,
         acquisitionSource: vault.source,
-        destination: presentVaultDestination(vault, homeMesh),
+        destination,
         permissionObservation: presentPermissionObservation(writability),
         onlineState: "unknown",
         upstreamState: "unknown",
@@ -221,11 +252,11 @@ export async function infoVaultFlow(
         verifyFailCount: vault.verifyFailCount,
         localWritable: localWritability.localWritable,
         localWritableReason: localWritability.reason,
-        publishable: writability.writable,
-        publishableReason: writability.reason,
+        publishable: publishability.writable,
+        publishableReason: publishability.reason,
         // DEPRECATED alias of `publishable` (see the interface note).
-        writable: writability.writable,
-        writableDetermination: writability.reason,
+        writable: publishability.writable,
+        writableDetermination: publishability.reason,
       },
       edges: [],
       inboundEdges,
@@ -240,6 +271,39 @@ export async function infoVaultFlow(
   } finally {
     await closeRegistry(db);
   }
+}
+
+// GitHub push permission is an observation, not destination authority. A local
+// or refused destination therefore fails closed even when the current GitHub
+// identity happens to have write access to the repository named by stale state.
+export function applyDestinationPublishability(
+  destination: DestinationPresentation,
+  permission: WritabilityVerdict,
+  hasPublicationAuthority: boolean,
+): PublishabilityVerdict {
+  if (destination.kind === "github") {
+    return hasPublicationAuthority
+      ? permission
+      : { writable: false, reason: "missing-policy" };
+  }
+  if (destination.kind === "local") {
+    return { writable: false, reason: "destination-local" };
+  }
+  return {
+    writable: false,
+    reason: destination.reason ?? "missing-policy",
+  };
+}
+
+export function deriveInfoPublishability(
+  vault: VaultRow,
+  mesh: MeshRow | null | undefined,
+  context: DestinationPolicyContext,
+  destination: DestinationPresentation,
+  permission: WritabilityVerdict,
+): PublishabilityVerdict {
+  const authority = resolveCanonicalOwnedVaultPublicationAuthority(vault, mesh, context);
+  return applyDestinationPublishability(destination, permission, authority !== null);
 }
 
 function presentPermissionObservation(

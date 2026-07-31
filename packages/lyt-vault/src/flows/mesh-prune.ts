@@ -33,7 +33,8 @@ import {
 } from "../util/bucket-mesh.js";
 import { slugifyHandle } from "../util/federation-paths.js";
 import { hexToUuid7Bytes, ridsEqual } from "../util/uuid7.js";
-import { liveFedMeshes } from "../yon/federation-mesh-ledger-read.js";
+import { liveFedMeshes, observedMaxFedMeshHlc } from "../yon/federation-mesh-ledger-read.js";
+import { appendFedMeshTombstone } from "../yon/federation-mesh-ledger-write.js";
 import {
   liveSubscriptions,
   type LiveSubscription,
@@ -85,6 +86,10 @@ export interface MeshPruneResult {
   // Count of dangling mesh_vaults rows swept alongside the mesh row (rows whose
   // vault_rid no longer resolves to a live vault). 0 for a clean empty mesh.
   removedMeshVaultRows: number;
+  /** True when prune durably retracted a live @FED_MESH relationship. */
+  meshLedgerRetracted: boolean;
+  /** Prune never removes a local directory; explicit in the receipt. */
+  localDirectoryRemoved: false;
 }
 
 export async function meshPruneFlow(
@@ -185,17 +190,32 @@ export async function meshPruneFlow(
     //     subscription that folds into that bucket.
     // Only a PURE cache-orphan (no ledger backing) is safe to registry-only-delete.
     //
-    // This is READ-only detection + a refusal branch. It NEVER writes a ledger —
-    // durable removal (a @FED_MESH tombstone retraction / a subscription tombstone)
-    // is the deferred Option B, explicitly OUT OF SCOPE here.
+    // Detection is read-only. For an empty own mesh, the supported prune path
+    // now appends the existing @FED_MESH tombstone before deleting the derived
+    // cache row. Subscription-backed bucket meshes still refuse until their
+    // independent subscription/vault relationships are retracted first.
     const ledgerBacking = await detectLedgerBacking(db, mesh, opts.podRoot);
+    let meshLedgerRetracted = false;
     if (ledgerBacking === "own") {
-      throw new Error(
-        `Refusing to prune mesh '${name}': it still has a live federation-ledger entry ` +
-          `(@FED_MESH). Durable removal needs a ledger retraction (a mesh tombstone), tracked ` +
-          `for a later 0.12.x lane. Pruning the cache row now would be undone on the next ` +
-          `sync/rebuild/recover-pod.`,
+      // Retraction is an identity mutation: once the registry row supplies a
+      // stable rid, a display-name match is never an acceptable fallback.
+      const liveMesh = liveFedMeshes(opts.podRoot).find((candidate) =>
+        fedMeshRidMatches(candidate.meshRid, mesh),
       );
+      if (liveMesh === undefined) {
+        throw new Error(`Refusing to prune mesh '${name}': its durable mesh relationship changed during planning.`);
+      }
+      appendFedMeshTombstone({
+        meshRid: liveMesh.meshRid,
+        fedRidHex: liveMesh.fedRidHex,
+        meshName: liveMesh.meshName,
+        pushTarget: liveMesh.pushTarget,
+        pushKind: liveMesh.pushKind,
+        role: liveMesh.role,
+        observedMaxHlc: observedMaxFedMeshHlc(opts.podRoot),
+        podRoot: opts.podRoot,
+      });
+      meshLedgerRetracted = true;
     }
     if (ledgerBacking === "bucket") {
       throw new Error(
@@ -219,6 +239,8 @@ export async function meshPruneFlow(
       meshRidHex: mesh.ridHex,
       removed: true,
       removedMeshVaultRows: danglingRows,
+      meshLedgerRetracted,
+      localDirectoryRemoved: false,
     };
   } finally {
     await closeRegistry(db);

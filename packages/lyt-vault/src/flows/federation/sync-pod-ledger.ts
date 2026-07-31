@@ -47,7 +47,11 @@ import {
   isPodGeneratedArtifactPath,
 } from "./pod-transformation-proof.js";
 import { rebuildFederationCacheFlow } from "./rebuildFederationCacheFlow.js";
-import { normalizeGitHubRepoCoordinate, type GitRunner } from "./vault-publish.js";
+import {
+  normalizeGitHubRepoCoordinate,
+  verifyExactPublishedRef,
+  type GitRunner,
+} from "./vault-publish.js";
 import {
   observePublicationPermission,
   type PublicationPermissionObserver,
@@ -1137,7 +1141,14 @@ export async function syncPodLedgerFlow(
                   allowFailure: true,
                 });
                 if (pushed.code === 0) {
-                  result.pushed = true;
+                  const verified = await verifyExactPublishedRef({
+                    git,
+                    cwd: podDir,
+                    remoteUrl: originUrl,
+                    remoteRef: publicationRef,
+                  });
+                  if (verified) result.pushed = true;
+                  else warnings.push("pod ledger push completed, but exact online verification is pending");
                 } else {
                   warnings.push(
                     `Lyt couldn't send your pod's shared records to your online copy this time — it'll try again next sync. ${narrate(pushed.stderr).nextAction}`,
@@ -1167,7 +1178,14 @@ export async function syncPodLedgerFlow(
                       ),
                   });
                   if (pushed.code === 0) {
-                    result.pushed = true;
+                    const verified = await verifyExactPublishedRef({
+                      git,
+                      cwd: podDir,
+                      remoteUrl: configuredAuthority!.canonicalUrl,
+                      remoteRef: publicationRef,
+                    });
+                    if (verified) result.pushed = true;
+                    else warnings.push("pod ledger push completed, but exact online verification is pending");
                   } else {
                     warnings.push(
                       `Lyt couldn't send your pod's shared records to your online copy this time — it'll try again next sync. ${narrate(pushed.stderr).nextAction}`,

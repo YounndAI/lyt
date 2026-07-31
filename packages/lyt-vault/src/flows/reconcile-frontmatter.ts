@@ -52,7 +52,7 @@ import {
 } from "../templates/contract.js";
 import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
 import { closeVaultDb, getLytDbPath, isCorruptDatabaseError } from "../registry/vault-db.js";
-import { resolveSingleVault } from "../util/vault-resolve.js";
+import { inventoryVaultFiles } from "./vault-files.js";
 
 // ---------------------------------------------------------------------------
 // Increment 1 · Phase 0 (gate 1) — the frontmatter migration ENGINE.
@@ -295,6 +295,14 @@ export interface ReconcileScan {
   targetVersion: number;
   /** Figments behind targetVersion (forward-migration candidates). */
   behind: FrontmatterMigrationCandidate[];
+  /** Indexed cache rows that the shared inclusion policy now excludes. */
+  pendingRemovals: string[];
+  /** Exact shared inventory digest binding detect and apply. */
+  inventoryDigest: string;
+  /** Active `.lytignore` policy identity. */
+  ignorePolicy: { exists: boolean; sha256: string; byteLength: number };
+  /** Markdown entries excluded by floor, scaffold, policy, content, or readability gates. */
+  excluded: number;
 }
 
 /**
@@ -303,20 +311,42 @@ export interface ReconcileScan {
  * Read-only; the caller (`lyt vault reconcile`) decides whether to heal.
  */
 export async function reconcileVaultScan(vaultName: string | undefined): Promise<ReconcileScan> {
-  const vault = await resolveSingleVault(vaultName);
-  // Two independent walks (one per axis) — acceptable for an on-demand reconcile
-  // verb; not a hot path. Both use the identical funnel so the two views agree on
-  // which files are in scope.
-  const fm = scanFrontmatterContract(vault.path);
-  const idx = await scanUnindexedFigments(vault.path);
+  if (vaultName === undefined) {
+    throw new Error("reconcileVaultScan requires one registered vault name");
+  }
+  const inventory = await inventoryVaultFiles(vaultName);
+  const figments = inventory.entries.filter((entry) => entry.classification === "figment");
+  const targetVersion = FRONTMATTER_CONTRACT_VERSION;
+  const behind: FrontmatterMigrationCandidate[] = [];
+  for (const entry of figments) {
+    if (entry.contentSha256 === null) continue;
+    const raw = readFileSync(
+      `${inventory.vault.path}${sep}${entry.path.split("/").join(sep)}`,
+      "utf8",
+    );
+    const fromVersion = readFrontmatterVersion(raw);
+    if (fromVersion < targetVersion) behind.push({ relPath: entry.path, fromVersion });
+  }
   return {
-    vaultName: vault.name,
-    vaultPath: vault.path,
-    scanned: fm.scanned,
-    missingFrontmatter: fm.invalid,
-    unindexed: idx.unindexed,
-    indexPresent: idx.indexPresent,
-    targetVersion: fm.targetVersion,
-    behind: fm.behind,
+    vaultName: inventory.vault.name,
+    vaultPath: inventory.vault.path,
+    scanned: inventory.totals.indexableFigments,
+    missingFrontmatter: figments
+      .filter((entry) => entry.frontmatterMutationCandidate)
+      .map((entry) => ({ relPath: entry.path, missing: entry.missingFields })),
+    unindexed: figments.filter((entry) => !entry.indexed).map((entry) => entry.path),
+    indexPresent: existsSync(getLytDbPath(inventory.vault.path)),
+    targetVersion,
+    behind,
+    pendingRemovals: inventory.entries
+      .filter((entry) => entry.pendingRemoval)
+      .map((entry) => entry.path),
+    inventoryDigest: inventory.inventoryDigest,
+    ignorePolicy: {
+      exists: inventory.ignorePolicy.exists,
+      sha256: inventory.ignorePolicy.sha256,
+      byteLength: inventory.ignorePolicy.byteLength,
+    },
+    excluded: inventory.totals.excluded,
   };
 }

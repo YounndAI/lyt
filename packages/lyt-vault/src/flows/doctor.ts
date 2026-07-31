@@ -897,6 +897,46 @@ async function checkRegistry(opts: { sampleLimit: number; full: boolean }): Prom
     detail: lytDirIssues.length === 0 ? undefined : { issues: lytDirIssues },
   });
 
+  const trackedEditorState: { name: string; trackedCount: number; nextAction: string }[] = [];
+  for (const v of subjects) {
+    if (!existsSync(v.path)) continue;
+    try {
+      const raw = execFileSync("git", ["ls-files", "-z", "--", ".obsidian"], {
+        cwd: v.path,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const trackedCount = raw.split("\0").filter((entry) => entry.length > 0).length;
+      if (trackedCount === 0) continue;
+      trackedEditorState.push({
+        name: v.name,
+        trackedCount,
+        nextAction:
+          `lyt doctor --target editor-localization:${v.name} ` +
+          "--emit-machine-receipt --out <receipt.json> --json",
+      });
+    } catch {
+      // A non-git or unreadable vault is covered by the sibling shape checks.
+    }
+  }
+  out.push({
+    id: "vaults.editor-state-tracked",
+    group: "vaults",
+    label: opts.full
+      ? `generated editor state untracked (all ${active.length})`
+      : `generated editor state untracked (sample ${subjects.length}/${active.length})`,
+    status: trackedEditorState.length === 0 ? "pass" : "warn",
+    message:
+      trackedEditorState.length === 0
+        ? `${subjects.length} sampled vault(s); no tracked .obsidian paths`
+        : `${trackedEditorState.length} vault(s) track generated .obsidian state; local files are preserved by the scoped stop-tracking repair`,
+    remediation:
+      trackedEditorState.length === 0
+        ? undefined
+        : "Run each detail.nextAction, then follow the emitted scoped repair flow.",
+    detail: trackedEditorState.length === 0 ? undefined : { vaults: trackedEditorState },
+  });
+
   const nearExpiry: { name: string; until: string; remaining: string }[] = [];
   const expired: { name: string; until: string }[] = [];
   for (const v of active) {

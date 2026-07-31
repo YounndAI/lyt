@@ -25,6 +25,7 @@ import { computeDisplayNameSync } from "../registry/vault-addressing.js";
 import { closeVaultDb, getLytDbPath, openLytDb } from "../registry/vault-db.js";
 import { readGitRemoteOriginUrl } from "../util/git.js";
 import { presentVaultDestination, type DestinationPresentation } from "./destination-presentation.js";
+import { loadDestinationPolicyContext } from "./federation/destination-policy-service.js";
 import {
   countTombstonedRollupForTarget,
   latestTombstoneSeenForTarget,
@@ -86,11 +87,16 @@ export async function listVaultsFlow(opts: ListFlowOptions = {}): Promise<ListFl
       displayNames[v.ridHex] = computeDisplayNameSync(v, meshNameByRidHex);
     }
     const meshByRid = new Map(meshes.map((m) => [m.ridHex, m] as const));
+    const destinationPolicy = await loadDestinationPolicyContext(db);
     const destinations: ListFlowResult["destinations"] = {};
     for (const v of vaults) {
       destinations[v.ridHex] = {
         acquisitionSource: v.source,
-        destination: presentVaultDestination(v, v.homeMeshRidHex ? meshByRid.get(v.homeMeshRidHex) ?? null : null),
+        destination: presentVaultDestination(
+          v,
+          v.homeMeshRidHex ? meshByRid.get(v.homeMeshRidHex) ?? null : null,
+          destinationPolicy,
+        ),
         onlineState: "unknown",
         upstreamState: "unknown",
       };

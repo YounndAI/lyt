@@ -52,6 +52,10 @@ export interface VaultCheckReport {
   ahead: number;
   behind: number;
   dirtyCount: number;
+  /** 0.20.16 explicit units; legacy fields above remain for one release. */
+  aheadCommitCount: number;
+  behindCommitCount: number;
+  dirtyFileCount: number;
   hasUpstream: boolean;
   frozen: boolean;
   frozenUntil: string | null;
@@ -66,6 +70,9 @@ export interface SyncCheckResult {
     dirty: number;
     ahead: number;
     behind: number;
+    dirtyVaultCount: number;
+    aheadVaultCount: number;
+    behindVaultCount: number;
     diverged: number;
     frozen: number;
     noUpstream: number;
@@ -114,6 +121,9 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
       ahead: checked.ahead ?? 0,
       behind: checked.behind ?? 0,
       dirtyCount: checked.dirtyCount ?? 0,
+      aheadCommitCount: checked.aheadCommitCount ?? checked.ahead ?? 0,
+      behindCommitCount: checked.behindCommitCount ?? checked.behind ?? 0,
+      dirtyFileCount: checked.dirtyFileCount ?? checked.dirtyCount ?? 0,
       hasUpstream: checked.hasUpstream,
       frozen: checked.frozen,
       frozenUntil: checked.frozenUntil,
@@ -124,6 +134,9 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
     summary.dirty += evaluated.summary.dirty;
     summary.ahead += evaluated.summary.ahead;
     summary.behind += evaluated.summary.behind;
+    summary.dirtyVaultCount += (checked.dirtyFileCount ?? checked.dirtyCount ?? 0) > 0 ? 1 : 0;
+    summary.aheadVaultCount += (checked.aheadCommitCount ?? checked.ahead ?? 0) > 0 ? 1 : 0;
+    summary.behindVaultCount += (checked.behindCommitCount ?? checked.behind ?? 0) > 0 ? 1 : 0;
     summary.diverged += evaluated.summary.diverged;
     summary.frozen += evaluated.summary.frozen;
     summary.noUpstream += evaluated.summary.noUpstream;
@@ -161,6 +174,9 @@ function emptySummary(): SyncCheckResult["summary"] {
     dirty: 0,
     ahead: 0,
     behind: 0,
+    dirtyVaultCount: 0,
+    aheadVaultCount: 0,
+    behindVaultCount: 0,
     diverged: 0,
     frozen: 0,
     noUpstream: 0,

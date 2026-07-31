@@ -14,203 +14,335 @@
  * limitations under the License.
  */
 
-// `lyt vault reconcile <name> [--apply]` — Phase D (0.10.0 frontmatter lane, SC7).
-//
-// Makes a vault's DISK and its search INDEX agree, across two drift axes:
-//   1. missing-frontmatter — figments on disk that violate the 8-field contract
-//      (a raw agent/hand-dropped note, `testus/cats.md`). Heal = backfill.
-//   2. present-but-unindexed — figments on disk the FTS index does not carry (a
-//      raw `.md` copied in that never went through capture/reindex → search
-//      misses it). Heal = reindex.
-//
-// DEFAULT is detect-only (report the two drift sets, mutate nothing). `--apply`
-// heals: it runs the metadata-filler automator (fills missing frontmatter) THEN
-// reindexes the vault (indexes the present-but-unindexed AND re-indexes the freshly
-// backfilled figments), then RE-SCANS so the output reflects verified post-heal
-// reality, not an assumption. Backfill-before-reindex ordering is load-bearing: a
-// raw figment is filled first so the index row it gets carries real frontmatter.
-//
-// KNOWN LIMITATION — topic-enrich reads a possibly-STALE index (Phase E release review
-// FIX 5, DEFERRED). The metadata-filler's Phase-E topic enrichment reads the vault's
-// EXISTING topic labels from the search index (listDistinctTopics over figment_meta)
-// to classify against. Because backfill runs BEFORE the post-backfill reindex, that
-// read sees the index as it stood at reconcile START — so on a HYBRID vault whose
-// index is stale (topics authored on disk but not yet indexed), classify may miss
-// some current labels and leave a topic blank that a fresh index would have assigned.
-// This is a genuine tension with the load-bearing backfill-before-reindex ordering
-// (which exists so the backfilled FRONTMATTER lands in the index): naively adding a
-// reindex BEFORE the enrich-read would risk the Phase-D detect/heal contract this
-// path was cold-reviewed against (a review finding), so it is NOT forced here. It is a
-// narrow-impact gap: it affects ONLY hybrid-vault topic freshness, and topic-on-
-// import (pure cold import) is descoped anyway (tags enrich index-free; topic
-// seeding is a fast-follow). Fix candidate for the fast-follow: a pre-enrich reindex
-// of just the present-but-unindexed set, or reading topics from disk rather than the
-// index. Tags are UNAFFECTED (model-free, index-free).
-//
-// Lives in the meta CLI because the heal runs an automator (lyt-runner). Attached
-// to the lyt-vault `vault` parent in cli.ts. The DETECT scan itself lives in
-// lyt-vault (reconcileVaultScan) — pure + runner-free. C13: NOT `lyt repair`.
-
 import { Command } from "commander";
 
-import { reconcileVaultScan, reindexFlow, type ReconcileScan } from "@younndai/lyt-vault";
+import {
+  inventoryVaultFiles,
+  reindexFlow,
+  type VaultFileInventoryEntry,
+  type VaultFilesInventory,
+} from "@younndai/lyt-vault";
 
 import { runAutomator } from "../automator-run.js";
+import {
+  createMutationPreview,
+  prepareMutationApply,
+  type MutationApplySession,
+  type MutationPreviewReceipt,
+} from "./mutation-preview-receipt.js";
 
 interface ReconcileCliOpts {
+  dryRun?: boolean;
   apply?: boolean;
+  yes?: boolean;
+  receipt?: string;
+  path?: string;
   push?: boolean;
   json?: boolean;
 }
 
-function driftCount(scan: ReconcileScan): number {
-  return scan.missingFrontmatter.length + scan.unindexed.length;
+interface MetadataFillerOutcomeShape {
+  filesMutated: number;
+  fieldsFilledTotal: number;
+  filesWritten: string[];
+}
+
+function asOutcome(body: unknown): MetadataFillerOutcomeShape {
+  const value = (body ?? {}) as Partial<MetadataFillerOutcomeShape>;
+  return {
+    filesMutated: typeof value.filesMutated === "number" ? value.filesMutated : 0,
+    fieldsFilledTotal:
+      typeof value.fieldsFilledTotal === "number" ? value.fieldsFilledTotal : 0,
+    filesWritten: Array.isArray(value.filesWritten) ? value.filesWritten : [],
+  };
+}
+
+function isInteractive(): boolean {
+  return process.stdin.isTTY === true && process.stdout.isTTY === true;
+}
+
+function emitPreviewCompatibilityWarnings(opts: ReconcileCliOpts): void {
+  if (opts.dryRun === true) {
+    // eslint-disable-next-line no-console
+    console.error("warning: --dry-run is deprecated; preview is now the default and remains read-only");
+  }
+  if (opts.push === true) {
+    // eslint-disable-next-line no-console
+    console.error("warning: preview only; --push binds the receipt but nothing changes until --apply");
+  }
+}
+
+function receiptSummary(receipt: MutationPreviewReceipt): Record<string, unknown> {
+  return {
+    receipt_id: receipt.plan.id,
+    lifecycle: receipt.lifecycle.state,
+    created_at: receipt.plan.createdAt,
+    expires_at: receipt.plan.expiresAt,
+    vault: receipt.plan.vault,
+    scope: receipt.plan.scope,
+    push: receipt.plan.push,
+    candidate_count: receipt.plan.candidateCount,
+    exclusion_count: receipt.plan.exclusionCount,
+    exclusion_counts: receipt.plan.exclusionCounts,
+    pending_removal_count: receipt.plan.pendingRemovalCount,
+    unindexed_count: receipt.plan.unindexedCount,
+    reindex_required: receipt.plan.reindexRequired,
+    reindex_scope: receipt.plan.reindexScope,
+    candidates: receipt.plan.candidates,
+  };
 }
 
 export function buildReconcileCommand(): Command {
   return new Command("reconcile")
     .description(
-      "Detect (and with --apply, heal) drift between a vault's markdown on disk and its search index: figments with missing frontmatter (→ backfilled) and figments not yet indexed (→ reindexed). Detect-only by default. NOT `lyt repair`.",
+      "Preview disk/index and frontmatter reconciliation for one registered vault. Mutation requires --apply with the exact sealed --receipt; non-interactive apply also requires --yes.",
     )
-    .argument("<name>", "Vault name to reconcile (must be registered)")
-    .option("--apply", "Heal the detected drift (backfill missing frontmatter, then reindex)")
-    .option("--push", "With --apply, also git-commit + push the backfilled frontmatter (default: local only)")
-    .option("--json", "Emit a JSON result instead of the human-readable summary")
+    .argument("<name>", "Registered vault name to inspect or reconcile")
+    .option("--path <subtree>", "Restrict frontmatter candidates to one vault-relative subtree")
+    .option("--dry-run", "One-release compatibility alias for the default sealed preview")
+    .option("--apply", "Apply the exact sealed preview")
+    .option("--receipt <uuidv7>", "Exact preview receipt identifier required by --apply")
+    .option("--yes", "Required confirmation for non-interactive --apply")
+    .option("--push", "Bind the preview/apply to commit-and-push rather than local commit only")
+    .option("--json", "Emit structured JSON")
     .action(async (name: string, opts: ReconcileCliOpts) => {
-      const before = await reconcileVaultScan(name);
-
-      let healed: { backfilled: boolean; reindexed: boolean } | undefined;
-      let after: ReconcileScan | undefined;
-
-      if (opts.apply === true && driftCount(before) > 0) {
-        // 1. Backfill missing frontmatter FIRST (only when there is any) so the
-        //    subsequent reindex picks up real frontmatter, not a raw body. Default
-        //    noPush (local commit only) — honors the pod push-gate; --push opts in.
-        // (release review/a review finding). NOTE (a review finding, tracked #1): the filler has
-        //    no writable/subscriber gate — a whole-vault write can land on a
-        //    subscribed vault's local clone; --push-off caps the blast radius local.
-        let backfilled = false;
-        if (before.missingFrontmatter.length > 0) {
-          let fill;
-          try {
-            fill = await runAutomator({
-              automator: "metadata-filler",
-              vault: name,
-              ...(opts.push !== true ? { noPush: true } : {}),
-            });
-          } catch (err) {
-            emit(
-              opts,
-              before,
-              healed,
-              after,
-              `backfill errored: ${err instanceof Error ? err.message : String(err)}`,
-            );
-            process.exit(1);
-          }
-          if (!fill.ok) {
-            emit(opts, before, healed, after, `backfill failed: ${fill.errorSummary ?? "unknown"}`);
-            process.exit(1);
-          }
-          backfilled = true;
+      if (opts.apply === true && opts.dryRun === true) {
+        return reportError(opts, name, new Error("--apply and --dry-run are mutually exclusive"));
+      }
+      if (opts.apply !== true) {
+        if (opts.receipt !== undefined) {
+          return reportError(opts, name, new Error("--receipt is consumed only with --apply"));
         }
-        // 2. Reindex the vault — indexes present-but-unindexed figments AND
-        //    re-indexes the freshly backfilled ones (single content-tier rebuild).
-        await reindexFlow({ scope: "vault", target: name });
-        healed = { backfilled, reindexed: true };
-        // 3. Re-scan so the reported result is verified post-heal reality.
-        after = await reconcileVaultScan(name);
+        try {
+          emitPreviewCompatibilityWarnings(opts);
+          const receipt = await createMutationPreview({
+            operation: "reconcile",
+            vault: name,
+            ...(opts.path !== undefined ? { subtree: opts.path } : {}),
+            push: opts.push === true,
+          });
+          emitPreview(opts, receipt);
+        } catch (error) {
+          reportError(opts, name, error);
+        }
+        return;
       }
 
-      emit(opts, before, healed, after, null);
+      if (opts.receipt === undefined) {
+        return reportError(opts, name, new Error("--apply requires --receipt <uuidv7>"));
+      }
+      if (!isInteractive() && opts.yes !== true) {
+        return reportError(opts, name, new Error("non-interactive --apply requires --yes"));
+      }
+
+      let session: MutationApplySession | undefined;
+      try {
+        session = await prepareMutationApply({
+          operation: "reconcile",
+          vault: name,
+          ...(opts.path !== undefined ? { subtree: opts.path } : {}),
+          push: opts.push === true,
+          receiptId: opts.receipt,
+        });
+        const plan = session.getReceipt().plan;
+        let outcome: MetadataFillerOutcomeShape = {
+          filesMutated: 0,
+          fieldsFilledTotal: 0,
+          filesWritten: [],
+        };
+
+        if (plan.candidateCount > 0) {
+          const result = await runAutomator({
+            automator: "metadata-filler",
+            vault: session.inventory.vault.name,
+            skipSync: true,
+            ...(opts.push !== true ? { noPush: true } : {}),
+            metadataFillerScope: {
+              candidates: plan.candidates,
+              validateBeforeMutation: session.revalidateBeforeMutation,
+              onCandidateCompleted: session.markCandidateCompleted,
+              missingOnly: true,
+            },
+          });
+          if (!result.ok) {
+            throw new Error(result.errorSummary ?? `metadata-filler ended in ${result.status}`);
+          }
+          outcome = asOutcome(result.body);
+          if (outcome.filesMutated !== plan.candidateCount) {
+            throw new Error(
+              `sealed apply wrote ${outcome.filesMutated} candidate(s), expected ${plan.candidateCount}`,
+            );
+          }
+          await assertPostBackfillProjection(session.inventory, name, opts.path);
+        }
+
+        if (plan.reindexRequired) {
+          if (plan.candidateCount === 0) await session.revalidateBeforeMutation();
+          session.markMutationStarted();
+          await reindexFlow({ scope: "vault", target: session.inventory.vault.name });
+        }
+
+        const finalInventory = await inventoryVaultFiles(name, opts.path);
+        const remainingCandidates = finalInventory.entries.filter(
+          (entry) => entry.frontmatterMutationCandidate,
+        );
+        const remainingUnindexed = finalInventory.entries.filter(
+          (entry) => entry.classification === "figment" && !entry.indexed,
+        );
+        const remainingRemovals = finalInventory.entries.filter((entry) => entry.pendingRemoval);
+        if (
+          remainingCandidates.length > 0 ||
+          remainingUnindexed.length > 0 ||
+          remainingRemovals.length > 0
+        ) {
+          throw new Error(
+            "reconcile verification failed: " +
+              `${remainingCandidates.length} frontmatter candidate(s), ` +
+              `${remainingUnindexed.length} unindexed figment(s), ` +
+              `${remainingRemovals.length} pending removal(s) remain`,
+          );
+        }
+        session.complete();
+        emitApplied(opts, session.getReceipt(), outcome, finalInventory);
+      } catch (error) {
+        if (session !== undefined) {
+          try {
+            session.fail(error);
+          } catch {
+            /* report the original product failure; doctor owns receipt-store diagnostics */
+          }
+        }
+        reportError(opts, name, error);
+      }
     });
 }
 
-function emit(
-  opts: ReconcileCliOpts,
-  before: ReconcileScan,
-  healed: { backfilled: boolean; reindexed: boolean } | undefined,
-  after: ReconcileScan | undefined,
-  errorNote: string | null,
-): void {
-  const final = after ?? before;
-  const payload = {
-    vault: { name: before.vaultName, path: before.vaultPath },
-    applied: healed !== undefined,
-    index_present: before.indexPresent,
-    target_version: before.targetVersion,
-    before: {
-      scanned: before.scanned,
-      missing_frontmatter: before.missingFrontmatter.length,
-      unindexed: before.unindexed.length,
-      version_behind: before.behind.length,
-      missing_frontmatter_samples: before.missingFrontmatter.slice(0, 20),
-      unindexed_samples: before.unindexed.slice(0, 20),
-      version_behind_samples: before.behind.slice(0, 20),
-    },
-    ...(healed !== undefined
-      ? {
-          healed,
-          after: {
-            missing_frontmatter: final.missingFrontmatter.length,
-            unindexed: final.unindexed.length,
-          },
-        }
-      : {}),
-    ...(errorNote !== null ? { error: errorNote } : {}),
+function entryProjection(entry: VaultFileInventoryEntry): Record<string, unknown> {
+  return {
+    path: entry.path,
+    classification: entry.classification,
+    kind: entry.kind,
+    contentSha256: entry.contentSha256,
+    indexed: entry.indexed,
+    denseIndexed: entry.denseIndexed,
+    pendingRemoval: entry.pendingRemoval,
+    missingFields: entry.missingFields,
   };
+}
 
+async function assertPostBackfillProjection(
+  before: VaultFilesInventory,
+  vaultName: string,
+  subtree: string | undefined,
+): Promise<void> {
+  const after = await inventoryVaultFiles(vaultName, subtree);
+  if (
+    after.ignorePolicy.exists !== before.ignorePolicy.exists ||
+    after.ignorePolicy.sha256 !== before.ignorePolicy.sha256 ||
+    after.entries.length !== before.entries.length
+  ) {
+    throw new Error("vault or .lytignore changed during sealed backfill");
+  }
+  const candidates = new Set(
+    before.entries
+      .filter((entry) => entry.frontmatterMutationCandidate)
+      .map((entry) => entry.path),
+  );
+  for (let index = 0; index < before.entries.length; index += 1) {
+    const previous = before.entries[index]!;
+    const current = after.entries[index]!;
+    if (previous.path !== current.path) {
+      throw new Error("vault file set changed during sealed backfill");
+    }
+    if (candidates.has(previous.path)) {
+      if (
+        current.classification !== "figment" ||
+        current.frontmatterMutationCandidate ||
+        current.missingFields.length > 0 ||
+        current.indexed !== previous.indexed ||
+        current.denseIndexed !== previous.denseIndexed
+      ) {
+        throw new Error(`sealed backfill produced an unexpected projection for ${previous.path}`);
+      }
+      continue;
+    }
+    if (JSON.stringify(entryProjection(previous)) !== JSON.stringify(entryProjection(current))) {
+      throw new Error(`unplanned vault change detected during sealed backfill: ${previous.path}`);
+    }
+  }
+}
+
+function emitPreview(opts: ReconcileCliOpts, receipt: MutationPreviewReceipt): void {
+  const payload = { ok: true, operation: "reconcile", applied: false, ...receiptSummary(receipt) };
   if (opts.json === true) {
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
-
-  const lines: string[] = [];
-  lines.push(`reconcile ${before.vaultName} (${before.scanned} figment(s) on disk):`);
-  lines.push(
-    `  missing frontmatter: ${before.missingFrontmatter.length}` +
-      (before.missingFrontmatter.length > 0
-        ? ` — ${before.missingFrontmatter
-            .slice(0, 10)
-            .map((i) => i.relPath)
-            .join(", ")}${before.missingFrontmatter.length > 10 ? " …" : ""}`
-        : ""),
+  // eslint-disable-next-line no-console
+  console.log(
+    `reconcile preview ${receipt.plan.vault.name} [${receipt.plan.scope}]: ` +
+      `${receipt.plan.candidateCount} frontmatter candidate(s), ` +
+      `${receipt.plan.unindexedCount} unindexed, ` +
+      `${receipt.plan.pendingRemovalCount} pending removal(s), ` +
+      `${receipt.plan.exclusionCount} excluded.`,
   );
-  lines.push(
-    `  not indexed:         ${before.unindexed.length}` +
-      (before.indexPresent ? "" : " (index not built yet)") +
-      (before.unindexed.length > 0
-        ? ` — ${before.unindexed.slice(0, 10).join(", ")}${before.unindexed.length > 10 ? " …" : ""}`
-        : ""),
-  );
-  // Read-only migration axis: Figments behind the contract version. Empty at v1
-  // (nothing is behind the baseline); the write-apply heal rides Phase A, so this
-  // is surfaced but NOT counted in driftCount (which gates the backfill/reindex).
-  if (before.behind.length > 0) {
-    lines.push(
-      `  behind contract v${before.targetVersion}: ${before.behind.length}` +
-        ` — ${before.behind
-          .slice(0, 10)
-          .map((c) => c.relPath)
-          .join(", ")}${before.behind.length > 10 ? " …" : ""}`,
-    );
+  // eslint-disable-next-line no-console
+  console.log(`  receipt: ${receipt.plan.id} (expires ${receipt.plan.expiresAt})`);
+  if (receipt.plan.reindexRequired) {
+    // eslint-disable-next-line no-console
+    console.log(`  reindex: ${receipt.plan.reindexScope}-wide derived-cache rebuild`);
   }
+  for (const candidate of receipt.plan.candidates.slice(0, 20)) {
+    // eslint-disable-next-line no-console
+    console.log(`  ${candidate.path} — add: ${candidate.plannedMutations.join(", ")}`);
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `  apply: lyt vault reconcile '${receipt.plan.vault.name}' --apply --receipt ${receipt.plan.id}` +
+      `${opts.push === true ? " --push" : ""}`,
+  );
+}
 
-  if (healed !== undefined && after !== undefined) {
-    lines.push(
-      `  → healed: ${healed.backfilled ? "backfilled frontmatter, " : ""}reindexed. ` +
-        `Now: ${after.missingFrontmatter.length} missing frontmatter, ${after.unindexed.length} unindexed.`,
-    );
-  } else if (driftCount(before) > 0) {
-    lines.push(
-      `  → run \`lyt vault reconcile '${before.vaultName}' --apply\` to backfill + reindex.`,
+function emitApplied(
+  opts: ReconcileCliOpts,
+  receipt: MutationPreviewReceipt,
+  outcome: MetadataFillerOutcomeShape,
+  inventory: VaultFilesInventory,
+): void {
+  const payload = {
+    ok: true,
+    operation: "reconcile",
+    applied: true,
+    ...receiptSummary(receipt),
+    files_mutated: outcome.filesMutated,
+    fields_filled_total: outcome.fieldsFilledTotal,
+    files_written: outcome.filesWritten,
+    resulting_inventory_digest: inventory.inventoryDigest,
+  };
+  if (opts.json === true) {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `reconcile applied ${receipt.plan.vault.name} [${receipt.plan.scope}]: ` +
+      `${outcome.filesMutated}/${receipt.plan.candidateCount} frontmatter candidate(s), ` +
+      `index reconciled; receipt ${receipt.plan.id} completed.`,
+  );
+}
+
+function reportError(opts: ReconcileCliOpts, name: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  process.exitCode = 1;
+  if (opts.json === true) {
+    // eslint-disable-next-line no-console
+    console.log(
+      JSON.stringify({ ok: false, operation: "reconcile", vault: name, error: message }, null, 2),
     );
   } else {
-    lines.push("  → disk and index are in sync (nothing to do).");
+    // eslint-disable-next-line no-console
+    console.error(`reconcile refused ${name}: ${message}`);
   }
-  if (errorNote !== null) lines.push(`  ✗ ${errorNote}`);
-
-  // eslint-disable-next-line no-console
-  console.log(lines.join("\n"));
 }

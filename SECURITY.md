@@ -27,9 +27,10 @@ where feasible.
 
 ## Supported versions
 
-Lyt is in public **alpha**. Security fixes are applied to the latest published
-`alpha` release only. Pin to a released version and update promptly when a new
-alpha ships.
+Lyt is in public **alpha**. Security fixes are applied to the latest tested
+`latest` release. The `alpha` dist-tag is a preview channel and may receive a
+candidate fix first. Pin to a released version and update promptly when a new
+tested release ships.
 
 ## Responsible disclosure
 

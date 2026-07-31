@@ -3,6 +3,7 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -172,8 +173,14 @@ function providerContentChecks(
   updateOperationRoot: string,
 ): readonly CheckResult[] {
   let plan: ReturnType<typeof prepareInstallReconcilePlanV1>;
+  const anchorRead = readInstalledStateAnchorV1(updateOperationRoot);
   try {
-    plan = prepareInstallReconcilePlanV1(providers);
+    const basePlan = prepareInstallReconcilePlanV1(providers);
+    plan = prepareInstallReconcilePlanV1(
+      anchorRead.status === "present"
+        ? withVerifiedLegacyManualDigests(providers, basePlan, anchorRead.anchor.provider_destinations)
+        : providers,
+    );
   } catch (error) {
     return [
       failure(
@@ -194,16 +201,28 @@ function providerContentChecks(
       },
     ];
   }
-  const observed = new Map(
-    plan.objects.map((object) => [object.object_id, object.observed_digest] as const),
-  );
-  const anchorRead = readInstalledStateAnchorV1(updateOperationRoot);
-  const verification = verifyInstalledStateAnchorV1(updateOperationRoot, observed);
   const expected = new Map(
     anchorRead.status === "present"
       ? anchorRead.anchor.provider_destinations.map((entry) => [entry.object_id, entry.digest])
       : [],
   );
+  const legacyMatches = new Set(
+    plan.objects
+      .filter((object) => {
+        const anchored = expected.get(object.object_id);
+        return anchored !== undefined && object.trusted_legacy_digests.includes(anchored);
+      })
+      .map((object) => object.object_id),
+  );
+  const observed = new Map(
+    plan.objects.map((object) => [
+      object.object_id,
+      legacyMatches.has(object.object_id)
+        ? expected.get(object.object_id) ?? null
+        : object.observed_digest,
+    ] as const),
+  );
+  const verification = verifyInstalledStateAnchorV1(updateOperationRoot, observed);
   const mismatched = new Set(verification.mismatched_object_ids);
   const anchorCheck: CheckResult =
     verification.status === "match"
@@ -240,13 +259,29 @@ function providerContentChecks(
       const anchorUnknown = verification.status === "missing" || anchoredDigest === null;
       const anchorInvalid = verification.status === "invalid";
       const anchorMismatch = mismatched.has(object.object_id);
-      const status = anchorInvalid || anchorMismatch ? "fail" : anchorUnknown ? "warn" : "pass";
+      const providerDrift = object.disposition !== "already-current";
+      const objectAnchorStatus = anchorInvalid
+        ? "invalid"
+        : anchorUnknown
+          ? "missing"
+          : anchorMismatch
+            ? "mismatch"
+            : "match";
+      const status = anchorInvalid || anchorMismatch
+        ? "fail"
+        : anchorUnknown || providerDrift
+          ? "warn"
+          : "pass";
       const message = anchorInvalid
         ? `${object.target_path} cannot be verified because its installed-state anchor is invalid`
         : anchorMismatch
           ? `${object.target_path} differs from its externally anchored digest`
           : anchorUnknown
             ? `${object.target_path} has no externally anchored expected digest; health is unknown`
+            : providerDrift && legacyMatches.has(object.object_id)
+              ? `${object.target_path} matches verified legacy evidence but needs marker-owned reconciliation`
+              : providerDrift
+                ? `${object.target_path} matches installed-state evidence but differs from current provider content`
             : `${object.target_path} matches its externally anchored digest`;
       return {
         id: `install.provider.${checkId(object.object_id)}`,
@@ -267,11 +302,56 @@ function providerContentChecks(
           observed_digest: object.observed_digest,
           disposition: object.disposition,
           refusal_code: object.refusal_code,
-          anchor_status: verification.status,
+          anchor_status: objectAnchorStatus,
+          anchor_format: legacyMatches.has(object.object_id)
+            ? "legacy-whole-file"
+            : "managed-object",
         },
       } satisfies CheckResult;
     }),
   ];
+}
+
+function withVerifiedLegacyManualDigests(
+  providers: readonly InstallProviderV1[],
+  plan: ReturnType<typeof prepareInstallReconcilePlanV1>,
+  anchored: readonly Readonly<{ object_id: string; digest: string }>[],
+): readonly InstallProviderV1[] {
+  const planned = new Map(plan.objects.map((object) => [object.object_id, object] as const));
+  const expected = new Map(anchored.map((entry) => [entry.object_id, entry.digest] as const));
+  return Object.freeze(
+    providers.map((provider) =>
+      Object.freeze({
+        ...provider,
+        objects: Object.freeze(
+          provider.objects.map((object) => {
+            if (object.kind !== "marker-file") return object;
+            const anchoredDigest = expected.get(object.object_id);
+            const inspected = planned.get(object.object_id);
+            if (
+              anchoredDigest === undefined ||
+              anchoredDigest === inspected?.observed_digest ||
+              !existsSync(object.target_path)
+            ) {
+              return object;
+            }
+            const targetStat = lstatSync(object.target_path);
+            if (targetStat.isSymbolicLink() || !targetStat.isFile()) return object;
+            const wholeFileDigest = createHash("sha256")
+              .update(readFileSync(object.target_path))
+              .digest("hex");
+            if (wholeFileDigest !== anchoredDigest) return object;
+            return Object.freeze({
+              ...object,
+              trusted_legacy_digests: Object.freeze(
+                [...new Set([...object.trusted_legacy_digests, anchoredDigest])].sort(),
+              ),
+            });
+          }),
+        ),
+      }),
+    ),
+  );
 }
 
 function packagePayloadChecks(

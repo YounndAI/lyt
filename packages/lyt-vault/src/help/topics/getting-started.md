@@ -12,11 +12,12 @@ Five minutes from a fresh machine to a working vault.
 ## 1. Install Lyt
 
 ```bash
-npm install -g @younndai/lyt@alpha
+npm install -g @younndai/lyt
 ```
 
-The example uses the staged `alpha` channel; `latest` is also supported. Keep
-the configured channel explicit with `lyt update --channel alpha|latest`.
+The untagged install follows the tested `latest` channel. To evaluate a preview
+candidate, use `@younndai/lyt@alpha`. Keep channel changes explicit with
+`lyt update --channel alpha|latest`.
 
 ## 2. Bootstrap with the wizard
 

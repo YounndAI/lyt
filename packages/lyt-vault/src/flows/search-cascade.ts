@@ -94,7 +94,7 @@ import {
 } from "../registry/repo.js";
 import { listArcs, listMembersByArc } from "../registry/arcs-repo.js";
 import { listLanes, listMembersByLane } from "../registry/lanes-repo.js";
-import { searchFts } from "../registry/fts-repo.js";
+import { searchFts, searchTitleFts } from "../registry/fts-repo.js";
 import { loadAllKeyphrases } from "../registry/keyphrases-repo.js";
 import { keyphraseMatch, queryKeyphraseTokens } from "../util/keyphrase-extract.js";
 import { loadAllEmbeddings } from "../registry/embeddings-repo.js";
@@ -167,6 +167,12 @@ const GATHER_CAP_FACTOR = 8;
 // limit:30 gather lift.
 export const KEYPHRASE_BETA = 0.2;
 
+// Exact normalized title matches are a deterministic lexical signal, distinct
+// from fuzzy title/body BM25 strength. A full-point boost guarantees an exact
+// title outranks a body-only match for the same term without changing the
+// relative order of non-exact results.
+export const EXACT_TITLE_BOOST = 1;
+
 // feat/microrag-semantic — OPTIONAL dense-retrieval fusion constants. After the
 // lexical cascade produces its blended-scored ranked list AND (when semantic is
 // enabled + vectors are present) a dense cosine-ranked list, we fuse them with
@@ -217,6 +223,13 @@ export interface SearchResult {
   snippet: string;
   confidence: number;
   tier: number;
+  /** Additive retrieval membership. Structural provenance remains `tier`. */
+  foundBy: Array<"keyword" | "meaning">;
+  /** Small allow-listed frontmatter projection; values remain untrusted data. */
+  metadata?: Record<string, unknown>;
+  // Internal stable identity used only while gathering/fusing. Removed before
+  // returning the public result window.
+  vaultRidHex?: string;
   // Lane V fix-pass (A1 within-tier ordering): abs(FTS5 BM25 rank) for tier-2/3
   // hits — higher = stronger match. Undefined for tier-0/1 (arc/lane membership
   // carries no BM25 signal → treated as 0 in the blend + tiebreak). Deterministic
@@ -233,6 +246,8 @@ export interface SearchResult {
   // +β·kpMatch before the final sort. Deterministic from the index. Internal —
   // not part of the public result contract.
   kpMatch?: number;
+  // Internal exact-title signal folded into blendedScore once.
+  exactTitleMatch?: boolean;
 }
 
 export interface SearchTrace {
@@ -291,6 +306,12 @@ export interface SearchCascadeArgs {
   scope?: SearchCascadeScope;
   scopeTarget?: string;
   limit?: number;
+  /** Independent dense-only addition budget. Zero keeps dense reranking only. */
+  meaningLimit?: number;
+  /** Optional compatibility cap for the final combined result array. */
+  totalLimit?: number;
+  /** Additional allow-listed dotted frontmatter fields (for example meta.lifecycle). */
+  fields?: readonly string[];
   // feat/agent-query-expansion — OPTIONAL agent-supplied query-expansion terms
   // (6–10 domain/synonym tokens a relevant note might use but the literal query
   // omits). They are folded into the KEYWORD/BM25 channel ONLY: the effective
@@ -364,7 +385,11 @@ export interface SearchCascadeResult {
   query: string;
   scope: SearchCascadeScope;
   scopeTarget: string | null;
+  /** Compatibility scalar: the final combined result bound. */
   limit: number;
+  lexicalLimit: number;
+  meaningLimit: number;
+  maxResults: number;
   results: SearchResult[];
   trace: SearchTrace;
   durationMs: number;
@@ -385,13 +410,17 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
   const ftsQuery = expansionTerms.length > 0 ? `${query} ${expansionTerms.join(" ")}` : query;
-  const limit = Math.max(1, Math.floor(args.limit ?? 20));
+  const lexicalLimit = Math.max(1, Math.floor(args.limit ?? 20));
+  const meaningLimit = Math.max(0, Math.floor(args.meaningLimit ?? 10));
+  const maxResults = Math.max(1, Math.floor(args.totalLimit ?? lexicalLimit + meaningLimit));
   const scope: SearchCascadeScope = args.scope ?? "federation";
   // Lane V fix-pass — gather-all-then-rank. Collect up to `gatherCap` candidates
   // from every tier in every in-scope vault, THEN blend → global sort → truncate
   // to `limit`. The per-tier/per-vault cap bounds local reads without letting a
   // noisy tier or early vault starve another candidate source.
-  const gatherCap = limit * GATHER_CAP_FACTOR;
+  // `--limit` remains the lexical allowance; gather depth follows that same
+  // lexical contract rather than silently expanding with the new meaning budget.
+  const gatherCap = lexicalLimit * GATHER_CAP_FACTOR;
   const softTierAlpha = args.softTierAlpha ?? SOFT_TIER_ALPHA;
   // feat/keyphrase-boost — tokenize the query ONCE with the SAME tokenizer the
   // keyphrase index used, so a query token can only match a stored keyphrase
@@ -437,6 +466,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     key: string;
     figmentPath: string;
     vaultName: string;
+    vaultRidHex: string;
     meshName: string | null;
     vector: Float32Array;
   }
@@ -447,7 +477,10 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
       query: "",
       scope,
       scopeTarget: args.scopeTarget ?? null,
-      limit,
+      limit: maxResults,
+      lexicalLimit,
+      meaningLimit,
+      maxResults,
       results: [],
       trace: {
         tiersRun: [],
@@ -473,10 +506,12 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
   // registry has closed (the heal walks the FS + reindexes; it does not need
   // the cascade's open registry handle).
   let healTargets: readonly VaultRow[] = [];
+  const vaultPathByRidHex = new Map<string, string>();
 
   try {
     const targetVaults = await resolveScopeVaults(registryDb, scope, args.scopeTarget);
     healTargets = targetVaults;
+    for (const vault of targetVaults) vaultPathByRidHex.set(vault.ridHex, vault.path);
     // mesh-name lookup keyed by vault_rid hex for output enrichment.
     const meshNameByVaultHex = await resolveMeshNamesForVaults(registryDb, targetVaults);
 
@@ -559,7 +594,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
             seen: localSeen,
             remaining: gatherCap,
           },
-          new Map(laneHits.map((hit) => [`${vault.name}::${hit.figment_path}`, hit])),
+          new Map(laneHits.map((hit) => [`${vault.ridHex}::${hit.figment_path}`, hit])),
         );
         for (const hit of ftsHits) hits.push(hit);
         perTier[TIER_2] += ftsHits.length;
@@ -591,9 +626,10 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
           const rows = await loadAllEmbeddings(lytDb);
           for (const r of rows) {
             denseDocs.push({
-              key: `${vault.name}::${r.figmentRid}`,
+              key: `${vault.ridHex}::${r.figmentRid}`,
               figmentPath: r.figmentRid,
               vaultName: vault.name,
+              vaultRidHex: vault.ridHex,
               meshName,
               vector: r.vector,
             });
@@ -665,7 +701,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     // gather used per-vault LOCAL `seen` sets for race-free concurrency; this
     // reconstitutes the single dedup view Tier 3 expects — keyed identically by
     // `${vaultName}::${path}`.)
-    for (const r of results) seen.add(`${r.vault_name}::${r.figment_path}`);
+    for (const r of results) seen.add(`${r.vaultRidHex ?? r.vault_name}::${r.figment_path}`);
 
     // --- Tier 3 flush (after every primary vault searched) ------
     if (scope !== "vault" && tier3Candidates.length > 0) {
@@ -673,6 +709,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
       // Deterministic order across neighbor vaults.
       tier3Candidates.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       for (const neighbor of tier3Candidates) {
+        vaultPathByRidHex.set(neighbor.ridHex, neighbor.path);
         vaultsSearched.push(neighbor.name);
         const meshName = meshNameByVaultHex.get(neighbor.ridHex) ?? null;
         const lytDb = await openLytDbActionable(neighbor.path, neighbor.name);
@@ -729,11 +766,52 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     // are unchanged. Deterministic: kpMatch derives from the index. This raises
     // the PRIMARY sort key (blendedScore), so a buried body hit whose aboutness
     // matches the query can overtake a higher-FTS doc that doesn't (the lift).
-    r.blendedScore = r.confidence + softTierAlpha * norm + keyphraseBeta * (r.kpMatch ?? 0);
+    r.blendedScore =
+      r.confidence +
+      softTierAlpha * norm +
+      keyphraseBeta * (r.kpMatch ?? 0) +
+      (r.exactTitleMatch === true ? EXACT_TITLE_BOOST : 0);
   }
 
   // Final deterministic sort per Lock 0.3 — this is the LEXICAL ranked list.
   results.sort(compareSearchResult);
+
+  // Phase D — preserve stale-index recovery before dense-only admission. Once
+  // meaning results exist, a post-fusion empty check can no longer distinguish
+  // a genuinely empty lexical index from a valid zero-keyword query.
+  if (args.selfHeal === true && results.length === 0) {
+    const stale = healTargets.filter((v) => {
+      if (v.status === "tombstoned") return false;
+      const fz = readFrozenLock(v.path);
+      if (fz.frozen && !fz.expired) return false;
+      return isVaultStale(v.path);
+    });
+    if (stale.length > 0) {
+      const reindexedVaults: string[] = [];
+      for (const v of stale) {
+        try {
+          await rebuildVaultFlow({
+            vault: v.name,
+            ...(callerSuppliedRegistry && args.registryDb !== undefined
+              ? { registryDb: args.registryDb }
+              : {}),
+          });
+          writeIndexWatermark(v.path);
+          reindexedVaults.push(v.name);
+        } catch {
+          // The markdown SoT remains intact; a failed heal degrades to search.
+        }
+      }
+      if (reindexedVaults.length > 0) {
+        const retry = await searchCascadeFlow({ ...args, selfHeal: false });
+        return {
+          ...retry,
+          trace: { ...retry.trace, selfHealed: { reindexedVaults } },
+          durationMs: Date.now() - startedAt,
+        };
+      }
+    }
+  }
 
   // feat/microrag-semantic — OPTIONAL dense-retrieval fusion. When the dense arm
   // is active AND vectors were gathered AND the local model loads (so we can
@@ -764,12 +842,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
   // load, no fetch) — the read-never-fetches contract is unchanged: model never
   // loaded + absent → embedderMemoized() false → no fusion (byte-identical to
   // semantic:false). loadEmbedder() below never fetches on this path (no opts).
-  if (
-    semanticActive &&
-    denseDocs.length > 0 &&
-    results.length > 0 &&
-    (modelCachePresent() || embedderMemoized())
-  ) {
+  if (semanticActive && denseDocs.length > 0 && (modelCachePresent() || embedderMemoized())) {
     try {
       const load = await loadEmbedder();
       if (load.available) {
@@ -781,7 +854,8 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
           fusionBlendHi,
           fusionBlendMid,
           SNIPPET_LEN,
-          limit,
+          lexicalLimit,
+          meaningLimit,
         );
         const denseOnlyHitCount = fusedOrder.filter((result) => result.tier === DENSE_TIER).length;
         if (denseOnlyHitCount > 0) {
@@ -800,62 +874,16 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     }
   }
 
-  // Truncate to the caller's limit.
-  const truncated = results.slice(0, limit);
-
-  // --- V-C-1 Phase C (L3): empty-result self-heal ---------------------------
-  // Opt-in (args.selfHeal) so the harness/bench/direct-callers stay byte-
-  // deterministic. Fires ONLY on an empty result: if any in-scope vault has
-  // content NEWER than its index watermark — a non-Lyt write (Obsidian edit,
-  // git pull, manual drop) that L1/L2 can't catch — reindex those vault(s)
-  // ONCE, then re-run the query (selfHeal:false → no recursion) before
-  // reporting "no matches". An empty+fresh pod reports honestly (no heal).
-  if (args.selfHeal === true && truncated.length === 0) {
-    // actively-frozen vaults are excluded from the stale-heal target
-    // set — rebuildVaultFlow now REFUSES frozen (the F13 chokepoint), and a
-    // read verb must degrade gracefully on a frozen vault, not die on the
-    // heal. An EXPIRED freeze stays healable (enforceNotFrozen auto-unfreezes).
-    const stale = healTargets.filter((v) => {
-      if (v.status === "tombstoned") return false;
-      const fz = readFrozenLock(v.path);
-      if (fz.frozen && !fz.expired) return false;
-      return isVaultStale(v.path);
-    });
-    if (stale.length > 0) {
-      const reindexedVaults: string[] = [];
-      for (const v of stale) {
-        try {
-          await rebuildVaultFlow({
-            vault: v.name,
-            // C-1 — the self-heal rebuild is ALWAYS non-interactive: we do
-            // NOT pass `embeddingsInteractive`, so its embeddings build gate
-            // takes the non-interactive branch (never prompt, never auto-fetch
-            // the one-time local model). A 0-hit search must NEVER trigger a model
-            // download — it degrades to lexical cleanly.
-            // Reuse the caller's registry ONLY when it supplied one (still open);
-            // a self-opened registry was already closed in the finally above.
-            ...(callerSuppliedRegistry && args.registryDb !== undefined
-              ? { registryDb: args.registryDb }
-              : {}),
-          });
-          writeIndexWatermark(v.path);
-          reindexedVaults.push(v.name);
-        } catch {
-          // Non-fatal — the markdown SoT is intact; report "no matches" honestly.
-        }
-      }
-      if (reindexedVaults.length > 0) {
-        const retry = await searchCascadeFlow({ ...args, selfHeal: false });
-        // The retry carries `nudge` (it's spread from args), so its trace
-        // already holds the nudge decision-trace + the single cadence increment.
-        // We only ADD selfHealed here; ...retry.trace preserves trace.nudge.
-        return {
-          ...retry,
-          trace: { ...retry.trace, selfHealed: { reindexedVaults } },
-          durationMs: Date.now() - startedAt,
-        };
-      }
-    }
+  // The meaning allowance is additive only when dense fusion actually ran.
+  // Missing-model/vector/error fallback must preserve the lexical contract,
+  // not silently turn the unused meaning allowance into extra keyword slots.
+  const resultLimit = semanticFused ? maxResults : lexicalLimit;
+  const truncated = results.slice(0, resultLimit);
+  enrichFinalResultMetadata(truncated, vaultPathByRidHex, args.fields ?? []);
+  for (const result of truncated) {
+    delete result.vaultRidHex;
+    delete result.exactTitleMatch;
+    delete result.kpMatch;
   }
 
   // Phase D Slice 2b — first-search discovery nudge. Opt-in (args.nudge),
@@ -869,7 +897,10 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
     query,
     scope,
     scopeTarget: args.scopeTarget ?? null,
-    limit,
+    limit: maxResults,
+    lexicalLimit,
+    meaningLimit,
+    maxResults,
     results: truncated,
     trace: {
       tiersRun: [...tiersRunSet].sort((a, b) => a - b),
@@ -901,9 +932,7 @@ export async function searchCascadeFlow(args: SearchCascadeArgs): Promise<Search
 //     → STILL return a trace computed from the pre-write read +1 (the intended
 //     increment), with `persistError: true` so the agent isn't blinded.
 // The search result is NEVER failed by a best-effort nudge either way.
-async function maybeRunNudge(
-  args: SearchCascadeArgs,
-): Promise<NudgeDecisionTrace | undefined> {
+async function maybeRunNudge(args: SearchCascadeArgs): Promise<NudgeDecisionTrace | undefined> {
   if (args.nudge !== true) return undefined;
   const now = (args.nudgeNowFn ?? (() => new Date()))();
   const modelPresent = (args.nudgeModelPresentFn ?? modelCachePresent)();
@@ -932,8 +961,7 @@ async function maybeRunNudge(
 
     const { eligible, reason } = classifyEligibility(postState, modelPresent, now);
     const state = deriveOfferState(postState, modelPresent);
-    const lastAskMs =
-      postState.lastAskAt === null ? null : new Date(postState.lastAskAt).getTime();
+    const lastAskMs = postState.lastAskAt === null ? null : new Date(postState.lastAskAt).getTime();
     const daysSince = lastAskMs === null ? null : (now.getTime() - lastAskMs) / MS_PER_DAY;
     return {
       eligible,
@@ -958,9 +986,10 @@ async function maybeRunNudge(
 // the load-bearing recall-recovery the prototype proved (Q14/Q15-class docs
 // with zero lexical overlap but high cosine to the query).
 export interface DenseCandidate {
-  key: string; // `${vaultName}::${figmentPath}`
+  key: string; // `${vaultRidHex}::${figmentPath}`
   figmentPath: string;
   vaultName: string;
+  vaultRidHex: string;
   meshName: string | null;
   vector: Float32Array;
 }
@@ -972,6 +1001,10 @@ export interface DenseCandidate {
 // number — scoring/eval is path-based. tier=4 marks it "dense-only" in traces.
 const DENSE_ONLY_CONFIDENCE = 0.4;
 const DENSE_TIER = 4;
+// SEE ALSO: packages/lyt-skills/skills/{lyt-search,lyt-recall}/SKILL.md — their
+// JSON contract examples mirror this exact agent-facing caveat.
+export const MEANING_CANDIDATE_CAVEAT =
+  "Similarity candidates only — not confirmed matches. Inspect them only when useful for this task.";
 
 // The PROVEN confidence-gated rank-preserve fusion
 // (.scratch/microrag-eval.mts adaptRankpres-1.05-0.95, the clean ~0.60 winner).
@@ -987,11 +1020,11 @@ const DENSE_TIER = 4;
 //  1. keepN from the lexical TOP hit's blendedScore: >=hi→3, >=mid→2, else→0.
 //  2. Cosine-rank the FULL dense corpus against qVec (deterministic key
 //     tiebreak) → the dense ranked list.
-//  3. Restrict lexical membership to the caller's requested result window.
+//  3. Restrict lexical membership to the caller's requested lexical window.
 //     Emit lexical[0..keepN) FIXED, then walk the dense order. Dense overlap may
-//     reorder members of that lexical window; dense-only docs may consume only
-//     slots the lexical window did not fill. Emit any remaining window members.
-//     Deterministic, with no lexical-window eviction.
+//     reorder members of that lexical window; independently admit up to the
+//     meaning-only budget after excluding overlap. Emit any remaining lexical
+//     window members. Deterministic, with no lexical-window eviction.
 //
 // Exported for direct unit testing of the proven rule (deterministic, no model).
 export function fuseDense(
@@ -1001,10 +1034,11 @@ export function fuseDense(
   blendHi: number,
   blendMid: number,
   snippetLen: number = SNIPPET_LEN,
-  resultLimit?: number,
+  lexicalLimit?: number,
+  meaningLimit?: number,
 ): SearchResult[] {
   void snippetLen; // snippet enrichment for dense-only hits is deferred (see below)
-  const keyOf = (r: SearchResult): string => `${r.vault_name}::${r.figment_path}`;
+  const keyOf = (r: SearchResult): string => `${r.vaultRidHex ?? r.vault_name}::${r.figment_path}`;
 
   // keepN from the lexical top hit's blended score (the discriminative signal:
   // holds sit ~1.0-1.35, misses ~0.85-0.95 — see the prototype's confidence
@@ -1013,17 +1047,19 @@ export function fuseDense(
   // `resultLimit` is an additive final argument because fuseDense is exported.
   // Omission preserves the pre-B0 full-union helper contract for existing
   // callers; searchCascadeFlow passes its finite result window explicitly.
-  const boundedResultLimit =
-    resultLimit === undefined ? undefined : Math.max(0, Math.floor(resultLimit));
+  const boundedLexicalLimit =
+    lexicalLimit === undefined ? undefined : Math.max(0, Math.floor(lexicalLimit));
   const lexicalWindow =
-    boundedResultLimit === undefined ? lexical : lexical.slice(0, boundedResultLimit);
-  // A positive dense-only budget implies lexical.length < boundedResultLimit,
-  // therefore lexicalWindow is the whole lexical list. This prevents a genuine
-  // below-window lexical hit from being degraded into a dense-only result.
+    boundedLexicalLimit === undefined ? lexical : lexical.slice(0, boundedLexicalLimit);
+  // Search always supplies its independent meaning budget. Direct legacy
+  // callers that omit it retain the helper's prior behavior: fill vacancies
+  // in a finite lexical window, or return the full union when unbounded.
   const denseOnlyBudget =
-    boundedResultLimit === undefined
-      ? Number.POSITIVE_INFINITY
-      : Math.max(0, boundedResultLimit - lexicalWindow.length);
+    meaningLimit === undefined
+      ? boundedLexicalLimit === undefined
+        ? denseDocs.length
+        : Math.max(0, boundedLexicalLimit - lexicalWindow.length)
+      : Math.max(0, Math.floor(meaningLimit));
   const topBlend = lexicalWindow[0]?.blendedScore ?? lexicalWindow[0]?.confidence ?? 0;
   const keepN = FUSION_ADAPTIVE
     ? topBlend >= blendHi
@@ -1034,17 +1070,36 @@ export function fuseDense(
     : FUSION_KEEP_N_FALLBACK;
 
   // Dense cosine ranking over the WHOLE corpus. Deterministic tiebreak on key.
-  const denseRanked = [...denseDocs].sort((a, b) => {
-    const sa = cosine(qVec, a.vector);
-    const sb = cosine(qVec, b.vector);
-    if (sa !== sb) return sb - sa;
-    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
-  });
-
+  const denseRanked = denseDocs
+    .map((doc) => ({ doc, score: cosine(qVec, doc.vector) }))
+    .sort((a, b) =>
+      a.score !== b.score
+        ? b.score - a.score
+        : a.doc.key < b.doc.key
+          ? -1
+          : a.doc.key > b.doc.key
+            ? 1
+            : 0,
+    );
   // Lexical-result lookup by key so a dense doc the lexical cascade also
   // returned reuses its (richer, snippet-bearing) SearchResult identity.
   const lexByKey = new Map<string, SearchResult>();
   for (const r of lexicalWindow) lexByKey.set(keyOf(r), r);
+
+  // Meaning admission is rank-only. Lexical overlap does not consume the
+  // independent meaning-only allowance: select dense-only candidates after
+  // excluding the lexical window, then take the requested budget. Separately,
+  // the top dense window may corroborate lexical hits through `foundBy`; that
+  // provenance never changes which group owns the row.
+  const denseCorroborating = new Set(
+    denseRanked.slice(0, denseOnlyBudget).map((candidate) => candidate.doc.key),
+  );
+  const meaningEligible = new Set(
+    denseRanked
+      .filter((candidate) => !lexByKey.has(candidate.doc.key))
+      .slice(0, denseOnlyBudget)
+      .map((candidate) => candidate.doc.key),
+  );
 
   // Materialize a dense-only doc into a minimal SearchResult. Snippet is empty
   // (the doc body isn't in hand here — the vault DBs are closed; the human
@@ -1057,6 +1112,8 @@ export function fuseDense(
     snippet: "",
     confidence: DENSE_ONLY_CONFIDENCE,
     tier: DENSE_TIER,
+    foundBy: ["meaning"],
+    vaultRidHex: d.vaultRidHex,
   });
 
   const out: SearchResult[] = [];
@@ -1073,14 +1130,22 @@ export function fuseDense(
 
   // 1. Keep lexical top-keepN fixed at their ranks.
   for (const r of lexicalWindow.slice(0, keepN)) emit(r);
-  // 2. Walk dense order. Reuse lexical-window results freely; admit a dense-only
-  //    result only while the lexical search left an actual slot available.
+  // 2. Walk dense order. Reuse lexical-window results freely and independently
+  //    admit up to the meaning-only budget after lexical overlap was excluded.
   let denseOnlyEmitted = 0;
-  for (const d of denseRanked) {
+  for (const candidate of denseRanked) {
+    const d = candidate.doc;
     const lex = lexByKey.get(d.key);
     if (lex !== undefined) {
+      if (denseCorroborating.has(d.key) && !lex.foundBy.includes("meaning")) {
+        lex.foundBy.push("meaning");
+      }
       emit(lex);
-    } else if (denseOnlyEmitted < denseOnlyBudget && emit(materialize(d))) {
+    } else if (
+      meaningEligible.has(d.key) &&
+      denseOnlyEmitted < denseOnlyBudget &&
+      emit(materialize(d))
+    ) {
       denseOnlyEmitted += 1;
     }
   }
@@ -1331,7 +1396,7 @@ async function runTier0Arcs(args: TierArgs): Promise<SearchResult[]> {
     const members = await listMembersByArc(args.lytDb, arc.rid);
     for (const m of members) {
       if (out.length >= args.remaining) break;
-      const key = `${args.vault.name}::${m.figmentPath}`;
+      const key = `${args.vault.ridHex}::${m.figmentPath}`;
       if (args.seen.has(key)) continue;
       args.seen.add(key);
       out.push({
@@ -1341,6 +1406,8 @@ async function runTier0Arcs(args: TierArgs): Promise<SearchResult[]> {
         snippet: readSnippetFromDisk(args.vault.path, m.figmentPath),
         confidence: SEARCH_CONFIDENCE_TIER_0,
         tier: TIER_0,
+        foundBy: ["keyword"],
+        vaultRidHex: args.vault.ridHex,
       });
     }
     if (out.length >= args.remaining) break;
@@ -1365,7 +1432,7 @@ async function runTier1Lanes(args: TierArgs): Promise<SearchResult[]> {
     const members = await listMembersByLane(args.lytDb, lane.rid);
     for (const m of members) {
       if (out.length >= args.remaining) break;
-      const key = `${args.vault.name}::${m.figmentPath}`;
+      const key = `${args.vault.ridHex}::${m.figmentPath}`;
       if (args.seen.has(key)) continue;
       args.seen.add(key);
       out.push({
@@ -1375,6 +1442,8 @@ async function runTier1Lanes(args: TierArgs): Promise<SearchResult[]> {
         snippet: readSnippetFromDisk(args.vault.path, m.figmentPath),
         confidence: SEARCH_CONFIDENCE_TIER_1,
         tier: TIER_1,
+        foundBy: ["keyword"],
+        vaultRidHex: args.vault.ridHex,
       });
     }
     if (out.length >= args.remaining) break;
@@ -1391,26 +1460,60 @@ async function runTier2Fts(
   enrichableLaneHits: ReadonlyMap<string, SearchResult> = new Map(),
 ): Promise<SearchResult[]> {
   if (args.remaining <= 0) return [];
-  const hits = await searchFts(args.lytDb, args.query, args.remaining);
+  const [titleHits, hits] = await Promise.all([
+    searchTitleFts(args.lytDb, args.query, args.remaining),
+    searchFts(args.lytDb, args.query, args.remaining),
+  ]);
   const out: SearchResult[] = [];
+  const outByKey = new Map<string, SearchResult>();
+  // Exact titles are the only title hits with priority admission. Broad/fuzzy
+  // title matches wait until after body FTS so they cannot consume the whole
+  // gather window and hide stronger body evidence.
+  for (const h of titleHits.filter((hit) => hit.exactNormalizedMatch)) {
+    if (out.length >= args.remaining) break;
+    const key = `${args.vault.ridHex}::${h.figmentPath}`;
+    if (args.seen.has(key)) {
+      const laneHit = enrichableLaneHits.get(key);
+      if (laneHit !== undefined) {
+        laneHit.rawScore = Math.max(laneHit.rawScore ?? 0, h.rawHits);
+        laneHit.exactTitleMatch ||= h.exactNormalizedMatch;
+      }
+      continue;
+    }
+    args.seen.add(key);
+    const result: SearchResult = {
+      figment_path: h.figmentPath,
+      vault_name: args.vault.name,
+      mesh_name: args.meshName,
+      snippet: readSnippetFromDisk(args.vault.path, h.figmentPath),
+      confidence: SEARCH_CONFIDENCE_TIER_2,
+      tier: TIER_2,
+      foundBy: ["keyword"],
+      vaultRidHex: args.vault.ridHex,
+      rawScore: h.rawHits,
+      exactTitleMatch: h.exactNormalizedMatch,
+    };
+    out.push(result);
+    outByKey.set(key, result);
+  }
   for (const h of hits) {
     if (out.length >= args.remaining) break;
-    const key = `${args.vault.name}::${h.figmentPath}`;
+    const key = `${args.vault.ridHex}::${h.figmentPath}`;
     if (args.seen.has(key)) {
       // A lane match owns the result's Tier-1 provenance, but it must not erase
       // the same document's body-strength evidence. Without this merge, every
       // member of a broad matched lane inherited one of a few identical scores
       // even when FTS5 could distinguish their relevance. Arc hits deliberately
       // remain untouched so their stronger Tier-0 contract does not change.
-      const laneHit = enrichableLaneHits.get(key);
-      if (laneHit !== undefined) {
-        laneHit.rawScore = Math.max(laneHit.rawScore ?? 0, h.rawHits);
-        laneHit.snippet = h.snippet;
+      const existing = outByKey.get(key) ?? enrichableLaneHits.get(key);
+      if (existing !== undefined) {
+        existing.rawScore = Math.max(existing.rawScore ?? 0, h.rawHits);
+        existing.snippet = h.snippet;
       }
       continue;
     }
     args.seen.add(key);
-    out.push({
+    const result: SearchResult = {
       figment_path: h.figmentPath,
       vault_name: args.vault.name,
       mesh_name: args.meshName,
@@ -1420,8 +1523,37 @@ async function runTier2Fts(
       snippet: h.snippet,
       confidence: SEARCH_CONFIDENCE_TIER_2,
       tier: TIER_2,
+      foundBy: ["keyword"],
+      vaultRidHex: args.vault.ridHex,
       rawScore: h.rawHits, // BM25 strength → soft-tier blend + tiebreak
-    });
+    };
+    out.push(result);
+    outByKey.set(key, result);
+  }
+  for (const h of titleHits.filter((hit) => !hit.exactNormalizedMatch)) {
+    if (out.length >= args.remaining) break;
+    const key = `${args.vault.ridHex}::${h.figmentPath}`;
+    if (args.seen.has(key)) {
+      const existing = outByKey.get(key) ?? enrichableLaneHits.get(key);
+      if (existing !== undefined) {
+        existing.rawScore = Math.max(existing.rawScore ?? 0, h.rawHits);
+      }
+      continue;
+    }
+    args.seen.add(key);
+    const result: SearchResult = {
+      figment_path: h.figmentPath,
+      vault_name: args.vault.name,
+      mesh_name: args.meshName,
+      snippet: readSnippetFromDisk(args.vault.path, h.figmentPath),
+      confidence: SEARCH_CONFIDENCE_TIER_2,
+      tier: TIER_2,
+      foundBy: ["keyword"],
+      vaultRidHex: args.vault.ridHex,
+      rawScore: h.rawHits,
+    };
+    out.push(result);
+    outByKey.set(key, result);
   }
   return out;
 }
@@ -1458,22 +1590,82 @@ async function resolveTier3Neighbors(
 
 async function runTier3EdgeFts(args: TierArgs): Promise<SearchResult[]> {
   if (args.remaining <= 0) return [];
-  const hits = await searchFts(args.lytDb, args.query, args.remaining);
+  const [titleHits, hits] = await Promise.all([
+    searchTitleFts(args.lytDb, args.query, args.remaining),
+    searchFts(args.lytDb, args.query, args.remaining),
+  ]);
   const out: SearchResult[] = [];
-  for (const h of hits) {
+  const outByKey = new Map<string, SearchResult>();
+  for (const h of titleHits.filter((hit) => hit.exactNormalizedMatch)) {
     if (out.length >= args.remaining) break;
-    const key = `${args.vault.name}::${h.figmentPath}`;
+    const key = `${args.vault.ridHex}::${h.figmentPath}`;
     if (args.seen.has(key)) continue;
     args.seen.add(key);
-    out.push({
+    const result: SearchResult = {
+      figment_path: h.figmentPath,
+      vault_name: args.vault.name,
+      mesh_name: args.meshName,
+      snippet: readSnippetFromDisk(args.vault.path, h.figmentPath),
+      confidence: SEARCH_CONFIDENCE_TIER_3,
+      tier: TIER_3,
+      foundBy: ["keyword"],
+      vaultRidHex: args.vault.ridHex,
+      rawScore: h.rawHits,
+      exactTitleMatch: h.exactNormalizedMatch,
+    };
+    out.push(result);
+    outByKey.set(key, result);
+  }
+  for (const h of hits) {
+    if (out.length >= args.remaining) break;
+    const key = `${args.vault.ridHex}::${h.figmentPath}`;
+    if (args.seen.has(key)) {
+      const existing = outByKey.get(key);
+      if (existing !== undefined) {
+        existing.rawScore = Math.max(existing.rawScore ?? 0, h.rawHits);
+        existing.snippet = h.snippet;
+      }
+      continue;
+    }
+    args.seen.add(key);
+    const result: SearchResult = {
       figment_path: h.figmentPath,
       vault_name: args.vault.name,
       mesh_name: args.meshName,
       snippet: h.snippet,
       confidence: SEARCH_CONFIDENCE_TIER_3,
       tier: TIER_3,
+      foundBy: ["keyword"],
+      vaultRidHex: args.vault.ridHex,
       rawScore: h.rawHits, // BM25 strength → soft-tier blend + tiebreak
-    });
+    };
+    out.push(result);
+    outByKey.set(key, result);
+  }
+  for (const h of titleHits.filter((hit) => !hit.exactNormalizedMatch)) {
+    if (out.length >= args.remaining) break;
+    const key = `${args.vault.ridHex}::${h.figmentPath}`;
+    if (args.seen.has(key)) {
+      const existing = outByKey.get(key);
+      if (existing !== undefined) {
+        existing.rawScore = Math.max(existing.rawScore ?? 0, h.rawHits);
+      }
+      continue;
+    }
+    args.seen.add(key);
+    const result: SearchResult = {
+      figment_path: h.figmentPath,
+      vault_name: args.vault.name,
+      mesh_name: args.meshName,
+      snippet: readSnippetFromDisk(args.vault.path, h.figmentPath),
+      confidence: SEARCH_CONFIDENCE_TIER_3,
+      tier: TIER_3,
+      foundBy: ["keyword"],
+      vaultRidHex: args.vault.ridHex,
+      rawScore: h.rawHits,
+    };
+    out.push(result);
+    outByKey.set(key, result);
   }
   return out;
 }
@@ -1544,6 +1736,148 @@ function readSnippetFromDisk(vaultPath: string, figmentPath: string): string {
   const body = stripFrontmatterForSnippet(raw).replace(/^\s+/, "");
   if (body.length <= SNIPPET_LEN) return body.replace(/\s+/g, " ").trim();
   return body.slice(0, SNIPPET_LEN).replace(/\s+/g, " ").trim() + "…";
+}
+
+const DEFAULT_METADATA_FIELDS = ["title", "tags", "topic", "modified", "weight"] as const;
+const MAX_ADDITIONAL_METADATA_FIELDS = 20;
+const FRONTMATTER_FIELD_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
+
+function enrichFinalResultMetadata(
+  results: readonly SearchResult[],
+  vaultPathByRidHex: ReadonlyMap<string, string>,
+  requestedFields: readonly string[],
+): void {
+  const fields = [
+    ...DEFAULT_METADATA_FIELDS,
+    ...requestedFields
+      .map((field) => field.trim())
+      .filter(
+        (field, index, all) =>
+          field.length > 0 &&
+          FRONTMATTER_FIELD_RE.test(field) &&
+          all.indexOf(field) === index &&
+          !DEFAULT_METADATA_FIELDS.includes(field as (typeof DEFAULT_METADATA_FIELDS)[number]),
+      )
+      .slice(0, MAX_ADDITIONAL_METADATA_FIELDS),
+  ];
+
+  for (const result of results) {
+    const rid = result.vaultRidHex;
+    if (rid === undefined) continue;
+    const vaultPath = vaultPathByRidHex.get(rid);
+    if (vaultPath === undefined) continue;
+    const abs = resolveContainedVaultPath(vaultPath, result.figment_path);
+    if (abs === null) continue;
+    let raw: string;
+    try {
+      raw = readFileSync(abs, "utf8");
+    } catch {
+      continue;
+    }
+    const parsed = parseProjectedFrontmatter(raw);
+    if (parsed === null) continue;
+    const metadata: Record<string, unknown> = {};
+    for (const field of fields) {
+      const value = readDottedField(parsed, field);
+      if (value !== undefined) metadata[field] = value;
+    }
+    if (Object.keys(metadata).length > 0) result.metadata = metadata;
+  }
+}
+
+function parseProjectedFrontmatter(raw: string): Record<string, unknown> | null {
+  const lines = raw.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return null;
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  const stack: Array<{ indent: number; value: Record<string, unknown> }> = [
+    { indent: -1, value: out },
+  ];
+  let closed = false;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim() === "---") {
+      closed = true;
+      break;
+    }
+    if (line.trim().length === 0 || line.trimStart().startsWith("#")) continue;
+    const match = /^(\s*)([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    if (match === null) continue;
+    const indent = match[1]!.replace(/\t/g, "  ").length;
+    const key = match[2]!;
+    if (key === "__proto__" || key === "prototype" || key === "constructor") continue;
+    while (stack.length > 1 && indent <= stack[stack.length - 1]!.indent) stack.pop();
+    const parent = stack[stack.length - 1]!.value;
+    const rawValue = match[3]!;
+    if (rawValue.trim().length === 0) {
+      const child: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+      parent[key] = child;
+      stack.push({ indent, value: child });
+      continue;
+    }
+    const value = parseInlineFrontmatterValue(rawValue);
+    if (value !== undefined) parent[key] = value;
+  }
+  if (!closed) return null;
+  pruneEmptyProjectedMappings(out);
+  return out;
+}
+
+function pruneEmptyProjectedMappings(value: Record<string, unknown>): void {
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child !== "object" || child === null || Array.isArray(child)) continue;
+    pruneEmptyProjectedMappings(child as Record<string, unknown>);
+    if (Object.keys(child).length === 0) delete value[key];
+  }
+}
+
+function parseInlineFrontmatterValue(raw: string): unknown {
+  const value = raw.trim();
+  if (value.length === 0 || value === "null" || value === "~") return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return Number(value);
+  if (value.startsWith('"') || value.startsWith("[") || value.startsWith("{")) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      if (value.startsWith("[") && value.endsWith("]")) {
+        return value
+          .slice(1, -1)
+          .split(",")
+          .map((item) => item.trim().replace(/^['"]|['"]$/g, ""))
+          .filter(Boolean);
+      }
+      return undefined;
+    }
+  }
+  if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+    return value.slice(1, -1).replace(/''/g, "'");
+  }
+  return value;
+}
+
+function readDottedField(root: Record<string, unknown>, field: string): unknown {
+  let current: unknown = root;
+  for (const segment of field.split(".")) {
+    if (
+      typeof current !== "object" ||
+      current === null ||
+      Array.isArray(current) ||
+      !Object.prototype.hasOwnProperty.call(current, segment)
+    ) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  if (
+    current === undefined ||
+    typeof current === "function" ||
+    typeof current === "symbol" ||
+    typeof current === "bigint"
+  ) {
+    return undefined;
+  }
+  return current;
 }
 
 function stripFrontmatterForSnippet(raw: string): string {

@@ -24,7 +24,7 @@ import { vaultRepoName } from "../util/federation-paths.js";
 import { appendFedVaultTombstone } from "../yon/federation-vault-ledger-write.js";
 import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
 import { appendSubscriptionTombstone } from "../yon/subscription-ledger-write.js";
-import { liveSubscriptions } from "../yon/subscription-ledger-read.js";
+import { liveSubscriptions, observedMaxSubscriptionHlc } from "../yon/subscription-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
@@ -82,7 +82,9 @@ export async function forgetVaultFlow(
             `cannot be derived because the registered git origin is missing or invalid.`,
         );
       }
-      // The subscription ledger is the durable cross-machine authority. Write
+      // The subscription ledger is the durable desired-state authority over
+      // every locally present shard. Cross-machine convergence remains a later
+      // multi-machine claim; this path only guarantees the local fold/rebuild.
       // its tombstone before removing the local registry row so a failed append
       // cannot leave an apparently-forgotten vault that later resurrects.
       appendSubscriptionTombstone({
@@ -90,10 +92,11 @@ export async function forgetVaultFlow(
         rid: vault.ridHex,
         entryMode:
           vault.source === "shared" || vault.source === "subscribed"
-            ? entryModeForSource(vault.source)
+              ? entryModeForSource(vault.source)
             : liveSubscription?.entryMode === "shared"
               ? "shared"
               : "subscribe",
+        observedMaxHlc: observedMaxSubscriptionHlc(),
       });
       subscriptionLedgerTombstoned = true;
     }

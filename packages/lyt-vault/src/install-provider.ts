@@ -3,7 +3,6 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
-import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 
 import {
@@ -12,6 +11,7 @@ import {
   resolveRuntimeDestination,
   type AgentManualRuntime,
 } from "./flows/agent-manual.js";
+import { inspectManagedManualMarker } from "./flows/agent-guidance.js";
 
 export interface VaultInstallProviderObjectV1 {
   readonly object_id: string;
@@ -45,6 +45,10 @@ export async function buildVaultInstallProviderObjectsV1(options: {
     });
     const target = resolveRuntimeDestination(runtime, home);
     if (target === null) continue;
+    const marker = inspectManagedManualMarker(generated.content);
+    if (marker.status !== "exact") {
+      throw new Error("install-provider-generated-manual-marker-invalid");
+    }
     objects.push(
       Object.freeze({
         object_id: `manual:${runtime}`,
@@ -53,9 +57,9 @@ export async function buildVaultInstallProviderObjectsV1(options: {
         provider_version: options.version,
         target_path: target,
         content: generated.content,
-        expected_digest: createHash("sha256").update(generated.content, "utf8").digest("hex"),
-        marker_begin: `<!-- lyt-manual v${generated.markerVersion} BEGIN -->`,
-        marker_end: `<!-- lyt-manual v${generated.markerVersion} END -->`,
+        expected_digest: marker.digest,
+        marker_begin: marker.markerBegin,
+        marker_end: marker.markerEnd,
         trusted_legacy_digests: Object.freeze([]),
       }),
     );

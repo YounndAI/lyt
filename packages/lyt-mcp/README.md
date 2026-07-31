@@ -16,11 +16,11 @@
   <a href="https://linkyourthink.com">Website</a> · <a href="https://github.com/YounndAI/lyt">Repository</a> · <a href="./LICENSE">Apache 2.0</a> · <a href="https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md">Trademark Policy</a> · <a href="https://github.com/YounndAI/lyt/blob/main/CONTRIBUTING.md">Contributing</a>
 </p>
 
-[![npm](https://img.shields.io/npm/v/@younndai/lyt-mcp/alpha)](https://www.npmjs.com/package/@younndai/lyt-mcp)
+[![npm](https://img.shields.io/npm/v/@younndai/lyt-mcp)](https://www.npmjs.com/package/@younndai/lyt-mcp)
 [![license](https://img.shields.io/npm/l/@younndai/lyt-mcp)](./LICENSE)
 [![status](https://img.shields.io/badge/status-public%20alpha-orange)](https://github.com/YounndAI/lyt#status)
 
-> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. Install only via the `alpha` dist-tag. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
+> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. The normal install follows `latest`; `@alpha` is the opt-in preview channel. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
 
 ## What is this?
 
@@ -33,7 +33,7 @@ You usually do not install this package directly — install [`@younndai/lyt`](h
 ## Install (standalone)
 
 ```bash
-npm install -g @younndai/lyt-mcp@alpha
+npm install -g @younndai/lyt-mcp
 lyt-mcp mcp start        # starts an MCP server over stdio
 ```
 
@@ -57,7 +57,7 @@ Or, from inside Claude Code: `claude mcp add lyt --command lyt-mcp -- mcp start`
 
 A stable MCP tool set covering the vault + mesh + registry operations, including:
 
-- **`search`** — tiered-cascade search (arcs → lanes → FTS5 → edges) across your pod, a mesh, or a vault, confidence-ranked. Accepts an optional **agent query-expansion** array (up to 20 domain/synonym terms folded into the keyword channel) so an agent can widen recall on a vocabulary mismatch. Returns a **recall-lean** result — a compact top-N list of `path` / `vault` / `mesh` / `snippet` / `tier` / `confidence` per hit, with the internal scoring noise stripped — sized for an agent triaging among many similar results.
+- **`search`** — tiered-cascade search (arcs → lanes → FTS5 → edges) across your pod, a mesh, or a vault. Accepts an optional **agent query-expansion** array (up to 20 domain/synonym terms folded into the direct-text channel), independent `limit` and `meaningLimit` allowances, and a bounded `fields` frontmatter allow-list. The receipt reports `lexicalLimit`, `meaningLimit`, and `maxResults`; keeps the compatibility-ranked `results` array; and separates `groups.directTextMatches` from metadata-only `groups.meaningCandidates`. Every row carries additive `foundBy` provenance. Meaning candidates have a standing similarity-not-confirmed-match caveat and must be assessed by the consuming agent.
 - **`vault.list` / `vault.info` / `vault.verify` / `vault.reconnect`** — enumerate and inspect vaults, check writability, heal a moved vault.
 - **`vault.access` / `vault.invites`** (read) and **`vault.share` / `vault.unshare` / `vault.invites.accept` / `vault.abandon`** (handler-gated writes) — vault sharing over GitHub collaborator ACLs.
 - **`capture`** — write a Figment under the 8-field frontmatter contract.

@@ -45,7 +45,7 @@ import {
 } from "../util/federation-paths.js";
 import { resolveRemoteUrl, resolveRemoteUrlFromSlug } from "../util/remote-url.js";
 import { uuid7BytesToHex } from "../util/uuid7.js";
-import { liveSubscriptions } from "../yon/subscription-ledger-read.js";
+import { liveSubscriptions, observedMaxSubscriptionHlc } from "../yon/subscription-ledger-read.js";
 import { appendSubscriptionActive } from "../yon/subscription-ledger-write.js";
 import { cloneVaultFlow } from "./clone.js";
 import { reflectInboundIndex } from "./reflect-index.js";
@@ -648,6 +648,7 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       coordinate,
       rid: subscribedSummary.ridHex,
       entryMode: entryModeForSource(subscribedVault.source === "shared" ? "shared" : "subscribed"),
+      observedMaxHlc: observedMaxSubscriptionHlc(),
     });
 
     // 6. Local libSQL index build. Best-effort: upsert*Cache flows open the

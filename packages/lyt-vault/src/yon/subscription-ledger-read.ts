@@ -18,6 +18,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { canonicalizeCoordinate } from "../registry/vault-addressing.js";
+import { type Hlc, compareHlc, compareHlcStamped, parseHlc } from "../util/hlc.js";
 import { walkLedger, type LedgerRecord } from "./ledger-read.js";
 import {
   getSubscriptionsLedgerDir,
@@ -35,21 +36,9 @@ import {
 // current. walkLedger returns each shard's records in APPEND ORDER, which is
 // the merge authority for that shard.
 //
-// FOLD (OR-Set, add-wins): the convergence function over the union of all
-// shards. A vault-subscription (keyed by `coordinate`) is LIVE iff some shard
-// has an `active` record for it that is not superseded by a tombstone —
-// ADD-WINS: a fresh `active` record in ANY shard beats a stale `tombstoned`
-// one. Resolution is by per-shard append order, NEVER by `added_at` (audit
-// only). Deterministic output: sorted by `coordinate`.
-//
-// Why add-wins across shards reduces to "any shard ends active": within one
-// shard, the LAST record for a coordinate is that shard's verdict (append
-// order = causal order for a single writer). Across shards there is no global
-// order — `added_at` is audit-only and forbidden as a merge key — so the only
-// monotone, deterministic, conflict-free rule is the lattice join: a
-// coordinate is live iff ANY shard's final verdict is `active`. A tombstone
-// only "wins" when EVERY shard's final verdict is `tombstoned` (nobody
-// re-added). That is exactly OR-Set add-wins.
+// FOLD: legacy rows reproduce the exact pre-0.20.16 add-wins verdict as a
+// synthetic floor. HLC-bearing rows then resolve one coordinate-keyed LWW
+// register by (hlc, writerId, seq). `added_at` remains audit-only.
 
 export interface SubscriptionRecord {
   coordinate: string;
@@ -57,6 +46,11 @@ export interface SubscriptionRecord {
   entryMode: string;
   addedAt: string;
   state: SubscriptionState;
+  /** Null for legacy pre-0.20.16 rows. */
+  hlc: Hlc | null;
+  /** True only when an HLC field was present but malformed; never a legacy floor event. */
+  hlcMalformed?: boolean;
+  seq: number;
   // The shard (writerId) the record came from. Useful for provenance + tests.
   writerId: string;
 }
@@ -112,100 +106,92 @@ function toSubscriptionRecord(rec: LedgerRecord, writerId: string): Subscription
   if (coordinate === undefined || coordinate.length === 0) return null;
   const stateRaw = rec.fields.get("state");
   const state: SubscriptionState = stateRaw === "tombstoned" ? "tombstoned" : "active";
+  const rawHlc = rec.fields.get("hlc");
+  const hlc = rawHlc === undefined ? null : parseHlc(rawHlc);
   return {
     coordinate,
     rid: rec.fields.get("rid") ?? "",
     entryMode: rec.fields.get("entry_mode") ?? "subscribe",
     addedAt: rec.fields.get("added_at") ?? "",
     state,
+    hlc,
+    hlcMalformed: rawHlc !== undefined && hlc === null,
+    seq: parseSeq(rec.fields.get("seq")),
     writerId,
   };
 }
 
-// The OR-Set add-wins fold. Consolidates all shards → the deterministic live
-// subscription set, sorted by coordinate.
-//
-// Algorithm:
-//  1. Per shard, in APPEND order, take the LAST record per coordinate as that
-//     shard's verdict (append order = causal order for one writer).
-//  2. Across shards, a coordinate is LIVE iff ANY shard's verdict is `active`
-//     (add-wins lattice join). `added_at` is never consulted.
-//  3. Output sorted by coordinate ASC for determinism.
+// Migration-safe HLC-LWW desired-state fold. Legacy rows first reproduce the
+// exact 0.20.15 add-wins verdict as a synthetic floor. HLC-bearing 0.20.16+
+// events then form one coordinate-keyed LWW register above that floor.
 export function foldSubscriptions(records: readonly SubscriptionRecord[]): LiveSubscription[] {
-  // deferred-E — IDENTITY is keyed on the CANONICAL coordinate, never the RAW
-  // string. Two writers (or one writer across machines) can subscribe the SAME
-  // upstream vault via DIFFERENT coordinate spellings (case-different host, or a
-  // known-forge owner/repo case variant). Folding on the raw string would treat
-  // those as DISTINCT coordinates and emit TWO live subscriptions for one vault;
-  // keying on `canonicalizeCoordinate(...)` collapses them to ONE — the
-  // convergence-correct identity. canonicalizeCoordinate is idempotent and
-  // passes non-forge coordinates through unchanged, so already-canonical inputs
-  // are unaffected. Every map below (per-shard verdict, cross-shard live,
-  // tombstonedOnly) keys on this canonical form so add-wins/tombstone semantics
-  // operate on identity, not spelling.
-
-  // shard verdict: canonical coordinate -> last record seen for it within that shard.
-  const perShard = new Map<string, Map<string, SubscriptionRecord>>();
+  const legacyPerShard = new Map<string, Map<string, SubscriptionRecord>>();
+  const modernWinner = new Map<string, SubscriptionRecord>();
   for (const rec of records) {
-    let shard = perShard.get(rec.writerId);
+    const key = canonicalizeCoordinate(rec.coordinate);
+    // A malformed 0.20.16+ event is corrupt modern data, not legacy history.
+    // Ignore it fail-closed so an invalid active cannot be laundered into the
+    // synthetic add-wins floor and resurrect a subscription.
+    if (rec.hlcMalformed === true) continue;
+    if (rec.hlc !== null) {
+      const current = modernWinner.get(key);
+      if (current === undefined || compareModern(rec, current) > 0) modernWinner.set(key, rec);
+      continue;
+    }
+    let shard = legacyPerShard.get(rec.writerId);
     if (shard === undefined) {
       shard = new Map<string, SubscriptionRecord>();
-      perShard.set(rec.writerId, shard);
+      legacyPerShard.set(rec.writerId, shard);
     }
-    // Records arrive in append order within a writerId (readAllSubscriptionRecords
-    // walks each shard contiguously), so a later set() overwrites the earlier
-    // verdict — last-write-wins within the shard. Key on the canonical
-    // coordinate so two spellings within one shard collapse to one verdict.
-    shard.set(canonicalizeCoordinate(rec.coordinate), rec);
+    shard.set(key, rec);
   }
 
-  // add-wins join across shards: live iff any shard's verdict is active. Keep
-  // the winning active record (any active verdict) for its informational
-  // rid/entry_mode.
-  //
-  // TIE-BREAK = min(writerId) on the read path: `perShard` is populated in the
-  // order records arrive, and the on-disk read path (readAllSubscriptionRecords
-  // → listSubscriptionShards sorts writerIds ASC) feeds them in sorted-writerId
-  // order — so iteration here is sorted-writerId order. The `!live.has`
-  // first-active-wins guard therefore resolves a tie (two writers naming the
-  // SAME coordinate with DIFFERENT informational fields, e.g. entry_mode
-  // subscribe vs shared) to the LOWEST writerId deterministically. The
-  // coordinate's LIVENESS is unaffected (add-wins); only the informational
-  // rid/entry_mode carried forward is the lowest-writerId shard's. (As a pure
-  // function, the fold resolves by INPUT order; the sort lives in the read
-  // path.) Pinned by the "entry_mode tie → min(writerId)" unit test.
-  const live = new Map<string, LiveSubscription>();
-  const tombstonedOnly = new Set<string>();
-  for (const shard of perShard.values()) {
+  // Reproduce the old cross-shard add-wins verdict exactly. Sorting writer IDs
+  // preserves its deterministic informational winner independently of input order.
+  const legacyActive = new Map<string, SubscriptionRecord>();
+  for (const writerId of [...legacyPerShard.keys()].sort()) {
+    const shard = legacyPerShard.get(writerId)!;
     for (const rec of shard.values()) {
-      // Re-canonicalize the record's coordinate as the cross-shard key. The
-      // emitted `LiveSubscription.coordinate` is the CANONICAL form — it is the
-      // convergence value, so callers (incl. the subscribe-flow idempotence
-      // check) compare against the same canonical key the fold deduped on.
       const key = canonicalizeCoordinate(rec.coordinate);
-      if (rec.state === "active") {
-        if (!live.has(key)) {
-          live.set(key, {
-            coordinate: key,
-            rid: rec.rid,
-            entryMode: rec.entryMode,
-          });
-        }
-      } else {
-        tombstonedOnly.add(key);
-      }
+      if (rec.state === "active" && !legacyActive.has(key)) legacyActive.set(key, rec);
     }
   }
-  // A coordinate that is active in any shard is live regardless of tombstones
-  // elsewhere (add-wins). tombstonedOnly is informational; the live map is the
-  // authority. Output sorted by coordinate ASC.
-  void tombstonedOnly;
-  return [...live.values()].sort((a, b) => (a.coordinate < b.coordinate ? -1 : a.coordinate > b.coordinate ? 1 : 0));
+
+  const keys = new Set([...legacyActive.keys(), ...modernWinner.keys()]);
+  const live: LiveSubscription[] = [];
+  for (const key of [...keys].sort()) {
+    const winner = modernWinner.get(key) ?? legacyActive.get(key);
+    if (winner === undefined || winner.state !== "active") continue;
+    live.push({ coordinate: key, rid: winner.rid, entryMode: winner.entryMode });
+  }
+  return live;
 }
 
 // Convenience: read + fold in one call.
 export function liveSubscriptions(podRoot?: string): LiveSubscription[] {
   return foldSubscriptions(readAllSubscriptionRecords(podRoot));
+}
+
+export function observedMaxSubscriptionHlc(podRoot?: string): Hlc | null {
+  let max: Hlc | null = null;
+  for (const record of readAllSubscriptionRecords(podRoot)) {
+    if (record.hlc === null) continue;
+    if (max === null || compareHlc(record.hlc, max) > 0) max = record.hlc;
+  }
+  return max;
+}
+
+function compareModern(a: SubscriptionRecord, b: SubscriptionRecord): number {
+  if (a.hlc === null || b.hlc === null) throw new Error("modern subscription comparison requires HLC rows");
+  return compareHlcStamped(
+    { hlc: a.hlc, writerId: a.writerId, seq: a.seq },
+    { hlc: b.hlc, writerId: b.writerId, seq: b.seq },
+  );
+}
+
+function parseSeq(raw: string | undefined): number {
+  const value = raw === undefined ? NaN : Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 function safeIsDir(p: string): boolean {

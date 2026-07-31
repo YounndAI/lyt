@@ -7,39 +7,24 @@ MARLINK TRADING SRL.
 > issue or a discussion before starting non-trivial work so we can confirm
 > direction and avoid duplicated effort.
 
-## Contributor License Agreement (REQUIRED)
+## External code contributions are temporarily closed
 
-Before we can accept your contribution, we need you to sign a Contributor
-License Agreement (CLA). The CLA is a one-time legal document that confirms:
+For the 0.20.16 release, this repository uses a **no-external-code** inbound-IP
+gate. Issues, discussions, bug reports, and documentation feedback are welcome,
+but MARLINK TRADING SRL will not merge code contributed by external parties
+while this gate is active. Please do not open a code pull request expecting it
+to be accepted.
 
-- You have the right to grant us the license terms specified in the CLA
-- You grant us a broad, perpetual license to use, modify, and re-license your contribution
-- You receive no special contributor rights: no royalties, governance, trademark rights, private license-back, approval rights, or claims against future relicensing or posture changes
-- Your contribution is provided "as is" without warranty
+We intend to reopen external code contributions after a CLA service is installed
+and enforced on every pull request. At that point, contributors will need the
+[Individual CLA](https://github.com/YounndAI/lyt/blob/main/CLA.md) or
+[Entity CLA](https://github.com/YounndAI/lyt/blob/main/CLA-entity.md), as
+applicable. The presence of those documents today does not mean CLA enforcement
+is active.
 
-### Which CLA do I sign?
+## Maintainer code checklist
 
-- **[Individual CLA](https://github.com/YounndAI/lyt/blob/main/CLA.md)** — if you are
-  contributing on your own behalf, on your own time, and your employer has no
-  claim to your intellectual-property output.
-- **[Entity CLA](https://github.com/YounndAI/lyt/blob/main/CLA-entity.md)** — if you are
-  contributing as an employee or contractor on behalf of an employer or
-  organization. The Entity CLA covers all contributors your organization
-  authorizes (listed in its Schedule A).
-
-If you are unsure, sign **both**.
-
-### How to sign
-
-When you open your first pull request, our [CLA bot](https://cla-assistant.io)
-will comment with a link to sign. You can sign electronically via GitHub OAuth
-— no paperwork required. Once signed, your future contributions are
-automatically covered. **Pull requests cannot be merged until the CLA bot
-confirms a signed CLA is on file for all contributors.**
-
-## Code contribution checklist
-
-- [ ] Signed the appropriate CLA (see above)
+- [ ] Change is authored under the active no-external-code gate
 - [ ] Apache-2.0 copyright header included in any new source files (see existing files for the exact block)
 - [ ] Code follows existing project conventions (TypeScript strict mode, libSQL-only data layer, cross-platform paths)
 - [ ] Focused tests added for new functionality; `npm run build`, `npm run typecheck`, and `npm test` green

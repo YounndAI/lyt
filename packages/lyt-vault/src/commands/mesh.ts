@@ -122,12 +122,12 @@ interface MeshPruneCliOpts {
 // empty rows a junction-safe pod cleanup leaves behind. DESTRUCTIVE + fail-closed:
 // mirrors `vault abandon`'s confirm gate. The CLI wires `confirmed` from `--yes`;
 // the flow refuses without it (defense-in-depth beneath any future MCP dispatch
-// gate). It NEVER touches disk (registry-row-only), so no reparse-point traversal
-// occurs; a mesh that still has homed vaults is REFUSED (naming them), never pruned.
+// gate). It NEVER removes a directory, so no reparse-point traversal occurs. A
+// live @FED_MESH relationship is retracted before the registry cache row.
 function buildMeshPruneSubcommand(): Command {
   return new Command("prune")
     .description(
-      "Remove an EMPTY / ORPHAN mesh (no homed vaults) from the registry. Registry-row-only — files and directories are NEVER touched. Refuses a mesh that still has homed vaults. Requires --yes.",
+      "Retract and prune an EMPTY / ORPHAN mesh (no homed vaults). No files or directories are removed. Refuses a mesh that still has homed vaults. Requires --yes.",
     )
     .argument("<name>", "Registered mesh name (empty/orphan)")
     .option("--yes", "Confirm pruning the mesh")
@@ -144,6 +144,10 @@ function buildMeshPruneSubcommand(): Command {
         console.log(`Pruned mesh '${result.meshName}' (mesh:${result.meshRidHex}).`);
         // eslint-disable-next-line no-console
         console.log(`  registry row removed; no files or directories were touched.`);
+        if (result.meshLedgerRetracted) {
+          // eslint-disable-next-line no-console
+          console.log(`  durable mesh relationship retracted; rebuild will not restore it.`);
+        }
         if (result.removedMeshVaultRows > 0) {
           // eslint-disable-next-line no-console
           console.log(`  cleared ${result.removedMeshVaultRows} dangling mesh_vaults row(s).`);

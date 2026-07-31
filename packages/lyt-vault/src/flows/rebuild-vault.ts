@@ -30,7 +30,11 @@ import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByName } from "../registry/repo.js";
-import { healLytDbIfCorrupt } from "../registry/vault-db.js";
+import { closeVaultDb, healLytDbIfCorrupt, openLytDb } from "../registry/vault-db.js";
+import {
+  deleteEmbeddingByPath,
+  loadAllEmbeddings,
+} from "../registry/embeddings-repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { rebuildLanesFlow, type RebuildLanesResult } from "./rebuild-lanes.js";
 import { rebuildArcsFlow, type RebuildArcsResult } from "./rebuild-arcs.js";
@@ -47,7 +51,10 @@ import {
 import { embeddingsEnabled } from "../util/config.js";
 import { modelCachePresent as defaultModelCachePresent } from "../util/embeddings.js";
 import type { EmbeddingsBuildPhase } from "../util/embeddings-progress.js";
-import { walkVaultFigmentFiles } from "./upsert-fts-cache.js";
+import {
+  toVaultRelPosix,
+  walkVaultFigmentFiles,
+} from "./upsert-fts-cache.js";
 import { resolveAskedState } from "./embeddings-offer-state.js";
 import { markAsked } from "../registry/nudge-state-repo.js";
 import type { OfferState } from "../util/nudge-state.js";
@@ -159,6 +166,12 @@ export async function rebuildVaultFlow(args: RebuildVaultArgs): Promise<RebuildV
     // corpus and the keyphrase corpus refresh together. Full-walk only — the
     // incremental per-write path is deferred (see rebuild-keyphrases.ts header).
     const keyphrases = await rebuildKeyphrasesFlow({ vault, registryDb });
+    // `.lytignore` and the immutable index floor are authoritative for every
+    // content tier. FTS/meta/keyphrases rebuild from the shared walker above,
+    // but the embeddings build may be skipped (disabled, model absent, or
+    // Handler declines the download). Remove only rows that the same walker no
+    // longer admits so a newly ignored figment cannot remain dense-searchable.
+    await removeExcludedEmbeddingRows(vaultRow.path);
     // feat/microrag-semantic + C-1 — build the per-doc dense-vector cache,
     // gated by embeddingsBuildGate() (the handler-ratified prompt+visible-fetch
     // decision tree). With default-ON embeddings the BUILD path can otherwise
@@ -201,6 +214,22 @@ export async function rebuildVaultFlow(args: RebuildVaultArgs): Promise<RebuildV
     };
   } finally {
     if (!callerSupplied) await closeRegistry(registryDb);
+  }
+}
+
+async function removeExcludedEmbeddingRows(vaultPath: string): Promise<void> {
+  const admitted = new Set(
+    walkVaultFigmentFiles(vaultPath).map((path) => toVaultRelPosix(path, vaultPath)),
+  );
+  const db = await openLytDb(vaultPath);
+  try {
+    for (const row of await loadAllEmbeddings(db)) {
+      if (!admitted.has(row.figmentRid)) {
+        await deleteEmbeddingByPath(db, row.figmentRid);
+      }
+    }
+  } finally {
+    await closeVaultDb(db);
   }
 }
 

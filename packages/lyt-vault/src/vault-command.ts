@@ -25,6 +25,7 @@ import { buildDestinationCommand } from "./commands/destination.js";
 import { buildDisconnectCommand } from "./commands/disconnect.js";
 import { buildForgetCommand } from "./commands/forget.js";
 import { buildFreezeCommand } from "./commands/freeze.js";
+import { buildFilesCommand } from "./commands/files.js";
 import { buildInfoCommand } from "./commands/info.js";
 import { buildInitCommand } from "./commands/init.js";
 import { buildJoinCommand } from "./commands/join.js";
@@ -62,6 +63,7 @@ export function buildVaultSubcommand(): Command {
   vault.addCommand(buildCloneCommand());
   vault.addCommand(buildListCommand());
   vault.addCommand(buildInfoCommand());
+  vault.addCommand(buildFilesCommand());
   vault.addCommand(buildDestinationCommand());
   vault.addCommand(buildRefreshCommand());
   vault.addCommand(buildOpenCommand());

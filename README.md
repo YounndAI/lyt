@@ -27,7 +27,7 @@
   <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D20.9-brightgreen" /></a>
 </p>
 
-> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but it is alpha software: surfaces change between releases, documentation is still growing, and you may hit rough edges. Install only via the `alpha` dist-tag. Your vaults are plain markdown in plain git repos — your data is never locked in. Found something? [Open an issue](https://github.com/YounndAI/lyt/issues) or see [CONTRIBUTING.md](CONTRIBUTING.md).
+> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but it is alpha software: surfaces change between releases, documentation is still growing, and you may hit rough edges. The normal install follows `latest`; `@alpha` is the opt-in preview channel. Your vaults are plain markdown in plain git repos — your data is never locked in. Found something? [Open an issue](https://github.com/YounndAI/lyt/issues) or see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -43,12 +43,12 @@ You keep the markdown. Lyt is the thin federation layer over it: it never asks y
 
 ## Status
 
-**Public alpha — in active testing.** Lyt is being validated with a small alpha cohort right now. The CLI surface, file formats, and docs may change between alpha releases without deprecation cycles. Install with the `alpha` dist-tag (see below). Nothing phones home, and your notes stay plain markdown in plain git repos, so trying Lyt risks none of your data. Feedback is welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+**Public alpha — in active testing.** Lyt is being validated with a small alpha cohort right now. The CLI surface, file formats, and docs may change between releases without deprecation cycles. The untagged install follows the tested `latest` channel; use `@alpha` only when you deliberately want the preview candidate. Nothing phones home, and your notes stay plain markdown in plain git repos. Feedback is welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Install
 
 ```bash
-npm install -g @younndai/lyt@alpha
+npm install -g @younndai/lyt
 ```
 
 This installs the unified `lyt` binary. You can also install from source:
@@ -60,7 +60,7 @@ git clone https://github.com/YounndAI/lyt && cd lyt && npm install && npm run bu
 ## Quick start
 
 ```bash
-npm install -g @younndai/lyt@alpha
+npm install -g @younndai/lyt
 lyt init                   # interactive setup wizard
 ```
 
@@ -102,9 +102,9 @@ available afterward through read-only vault/mesh info.
 
 ## Search
 
-`lyt search "<query>"` ranks results across your whole pod (or a single `--mesh` / `--vault`) through a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — each tier carrying a confidence score.
+`lyt search "<query>"` retrieves across your whole pod (or a single `--mesh` / `--vault`) with independent lexical/structural and meaning budgets. Direct text matches and meaning candidates are returned as separate labelled groups with method provenance; meaning candidates are similarity suggestions, not confirmed matches. The default allowances are 20 direct results plus 10 additional meaning-only candidates, so the default maximum is 30.
 
-On top of the lexical cascade, Lyt adds **optional on-device semantic search** to surface notes that keyword matching misses (different words, same meaning). It runs a one-time local embedding model (`bge-small-en-v1.5`, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) and fuses its results into the cascade under a confidence gate. Semantic search is **on by default when the model is available**, and degrades silently to the lexical cascade when it isn't — no errors, no cloud calls, nothing leaves your machine.
+The optional on-device meaning layer uses a one-time local embedding model (`bge-small-en-v1.5`, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)). It runs only when the model is already available and never borrows unused direct-result capacity. Meaning candidates are bounded similarity suggestions for the consuming agent to assess; they are not filtered by a calibrated relevance threshold and are not confirmed matches. Without the model, Lyt reports direct results only — no errors, no cloud calls, nothing leaves your machine.
 
 The one-time local model download is **handler-gated**: on an interactive terminal, `lyt reindex` asks before fetching and shows progress; in non-interactive, scripted, or MCP contexts Lyt never auto-downloads and simply uses lexical search. Disable semantic fusion any time with `lyt search --no-semantic` or globally via `LYT_EMBEDDINGS=0`.
 
@@ -121,12 +121,13 @@ lyt primer --scope vault|mesh|federation
 lyt reindex [--all|--mesh <m>|--vault <v>]
 
 lyt vault init|adopt|join|clone|move|rename|forget|disconnect|delete|list|info
+lyt vault files|backfill|reconcile
 lyt vault add-edge|refresh|verify|sync-metadata|regen-context|snapshot|freeze
 lyt vault share|unshare|access|invites|abandon
 lyt alias <name> <target> [--list|--remove]
 
 lyt mesh init|join|list|info|subscribe|add-edge|validate|adopt|rebuild-registry
-lyt mesh status|clone-all|rebuild-rollup
+lyt mesh status|clone-all|rebuild-rollup|prune
 lyt federation init|list|rebuild     lyt discover     lyt repair [--dry-run|--apply]
 lyt identity|machine|provenance|audit|housekeep
 

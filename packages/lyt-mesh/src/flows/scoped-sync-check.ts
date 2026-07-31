@@ -86,6 +86,10 @@ export interface ScopedVaultCheckReport {
   readonly ahead: number | null;
   readonly behind: number | null;
   readonly dirtyCount: number | null;
+  /** 0.20.16 explicit units; legacy fields above remain for one release. */
+  readonly aheadCommitCount: number | null;
+  readonly behindCommitCount: number | null;
+  readonly dirtyFileCount: number | null;
   readonly hasUpstream: boolean;
   readonly frozen: boolean;
   readonly frozenUntil: string | null;
@@ -99,6 +103,9 @@ export interface ScopedCheckSummary {
   readonly dirty: number;
   readonly ahead: number;
   readonly behind: number;
+  readonly dirtyVaultCount: number;
+  readonly aheadVaultCount: number;
+  readonly behindVaultCount: number;
   readonly diverged: number;
   readonly frozen: number;
   readonly noUpstream: number;
@@ -509,6 +516,9 @@ function report(
     ahead: fields.ahead ?? null,
     behind: fields.behind ?? null,
     dirtyCount: fields.dirtyCount ?? null,
+    aheadCommitCount: fields.aheadCommitCount ?? fields.ahead ?? null,
+    behindCommitCount: fields.behindCommitCount ?? fields.behind ?? null,
+    dirtyFileCount: fields.dirtyFileCount ?? fields.dirtyCount ?? null,
     hasUpstream: fields.hasUpstream ?? false,
     frozen: fields.frozen ?? false,
     frozenUntil: fields.frozenUntil ?? null,
@@ -564,11 +574,19 @@ function parseAheadBehind(stdout: string): { ahead: number; behind: number } | n
 }
 
 function summarize(checked: ScopedVaultCheckReport): ScopedCheckSummary {
+  const dirtyVaultCount = (checked.dirtyFileCount ?? 0) > 0 ? 1 : 0;
+  const aheadVaultCount = (checked.aheadCommitCount ?? 0) > 0 ? 1 : 0;
+  const behindVaultCount = (checked.behindCommitCount ?? 0) > 0 ? 1 : 0;
   const summary = {
     clean: 0,
-    dirty: 0,
-    ahead: 0,
-    behind: 0,
+    // One-release compatibility projection: the legacy names are exact aliases
+    // of the explicit vault-count authority, never competing classifications.
+    dirty: dirtyVaultCount,
+    ahead: aheadVaultCount,
+    behind: behindVaultCount,
+    dirtyVaultCount,
+    aheadVaultCount,
+    behindVaultCount,
     diverged: 0,
     frozen: 0,
     noUpstream: 0,
@@ -576,12 +594,6 @@ function summarize(checked: ScopedVaultCheckReport): ScopedCheckSummary {
   };
   if (checked.vaultStatus !== "active") summary.skippedNonActive = 1;
   else if (checked.status === "clean") summary.clean = 1;
-  else if (checked.status === "dirty") summary.dirty = 1;
-  else if (checked.status === "dirty-behind") {
-    summary.dirty = 1;
-    summary.behind = 1;
-  } else if (checked.status.startsWith("ahead-")) summary.ahead = 1;
-  else if (checked.status.startsWith("behind-")) summary.behind = 1;
   else if (checked.status === "diverged") summary.diverged = 1;
   else if (checked.status === "frozen") summary.frozen = 1;
   else if (checked.status === "no-upstream") summary.noUpstream = 1;
@@ -752,6 +764,9 @@ function emptySummary(): ScopedCheckSummary {
     dirty: 0,
     ahead: 0,
     behind: 0,
+    dirtyVaultCount: 0,
+    aheadVaultCount: 0,
+    behindVaultCount: 0,
     diverged: 0,
     frozen: 0,
     noUpstream: 0,

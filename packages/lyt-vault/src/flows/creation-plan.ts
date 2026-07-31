@@ -94,13 +94,16 @@ export interface CreationIntendedEffectsV1 {
   remote_effects: readonly [];
 }
 
-export function plannedMeshPodEffectPathsV1(includePodScaffold: boolean): string[] {
+export function plannedMeshPodEffectPathsV1(
+  includePodScaffold: boolean,
+  includeMeshLedger: boolean = true,
+): string[] {
   const writerId = getWriterId();
   return [
     ...(includePodScaffold ? [".gitignore", "README.md", "identity.yon"] : []),
     "pod.yon",
     `ledger/destination-policy/${writerId}.yon`,
-    `ledger/meshes/${writerId}.yon`,
+    ...(includeMeshLedger ? [`ledger/meshes/${writerId}.yon`] : []),
     `ledger/machines/${writerId}.yon`,
     `ledger/vaults/${writerId}.yon`,
   ].sort();
@@ -208,7 +211,7 @@ export function plannedSingleVaultEffectsV1(args: {
   ];
   if (pod.kind === "create") {
     const podRoot = getFederationRepoDir(pod.handle);
-    const podPaths = plannedMeshPodEffectPathsV1(true);
+    const podPaths = plannedMeshPodEffectPathsV1(true, mesh.kind !== "none");
     localWrites.push({
       root: podRoot,
       exact_paths: podPaths.map((path) => join(podRoot, path)),

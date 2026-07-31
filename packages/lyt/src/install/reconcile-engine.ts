@@ -24,6 +24,7 @@ import { createRequire } from "node:module";
 
 import {
   composeManagedManualMarker,
+  inspectManagedManualMarker,
   newUuidv7Bytes,
   openReceiptAttempt,
   parseReceiptV1ForEmission,
@@ -470,10 +471,16 @@ function inspectProviderObject(object: InstallableProviderObjectV1): ReconcileOb
       }
     } else if (object.kind === "marker-file" && stat.isFile()) {
       const current = readFileSync(object.target_path, "utf8");
-      const next = replaceOwnedMarker(current, object);
-      observedDigest = digestBytes(Buffer.from(current));
-      expectedAppliedDigest = digestBytes(Buffer.from(next));
-      disposition = next === current ? "already-current" : "planned";
+      replaceOwnedMarker(current, object);
+      const marker = inspectManagedManualMarker(current);
+      if (marker.status === "malformed") {
+        throw new Error("install-reconcile-malformed-managed-marker");
+      }
+      observedDigest = marker.status === "exact" ? marker.digest : null;
+      expectedAppliedDigest = object.expected_digest;
+      disposition = marker.status === "exact" && marker.digest === object.expected_digest
+        ? "already-current"
+        : "planned";
     } else {
       disposition = "refused";
       refusalCode = "unsupported-leaf-type";
@@ -512,7 +519,7 @@ function revalidateObject(
   }
   if (
     source.kind === "marker-file" &&
-    digestBytes(Buffer.from(source.content)) !== source.expected_digest
+    markerDigest(source.content, source.marker_begin, source.marker_end) !== source.expected_digest
   ) {
     throw new Error("install-reconcile-provider-drift");
   }
@@ -521,7 +528,16 @@ function revalidateObject(
 function stageObject(root: string, object: InstallableProviderObjectV1): string {
   assertPathChainHasNoLinks(root, true);
   const expectedAppliedDigest = inspectProviderObject(object).expected_applied_digest;
-  const objectRoot = join(root, "objects", expectedAppliedDigest);
+  const markerContent =
+    object.kind === "marker-file"
+      ? replaceOwnedMarker(
+          existsSync(object.target_path) ? readFileSync(object.target_path, "utf8") : "",
+          object,
+        )
+      : null;
+  const stagingDigest =
+    markerContent === null ? expectedAppliedDigest : digestBytes(Buffer.from(markerContent));
+  const objectRoot = join(root, "objects", stagingDigest);
   assertPathChainHasNoLinks(objectRoot, true);
   const primary = join(objectRoot, object.kind === "directory-link" ? "content" : "content.md");
   mkdirSync(objectRoot, { recursive: true });
@@ -531,10 +547,7 @@ function stageObject(root: string, object: InstallableProviderObjectV1): string 
     if (!existsSync(staged)) {
       if (object.kind === "directory-link") cpSync(object.source_path, staged, { recursive: true });
       else {
-        const existing = existsSync(object.target_path)
-          ? readFileSync(object.target_path, "utf8")
-          : "";
-        writeFileSync(staged, replaceOwnedMarker(existing, object), {
+        writeFileSync(staged, markerContent!, {
           encoding: "utf8",
           flag: "wx",
         });
@@ -542,7 +555,7 @@ function stageObject(root: string, object: InstallableProviderObjectV1): string 
     }
     const actual =
       object.kind === "directory-link" ? digestPathTree(staged) : digestBytes(readFileSync(staged));
-    if (actual === expectedAppliedDigest) return staged;
+    if (actual === stagingDigest) return staged;
   }
   throw new Error("install-reconcile-staging-mismatch");
 }
@@ -617,10 +630,28 @@ function assertProviderSet(providers: readonly InstallProviderV1[]): void {
             (digest) => !/^[a-f0-9]{64}$/.test(digest) || digest === object.expected_digest,
           ),
       )
+      || provider.objects.some(
+        (object) =>
+          object.kind === "marker-file" &&
+          markerDigest(object.content, object.marker_begin, object.marker_end) !==
+            object.expected_digest,
+      )
     ) {
       throw new Error("install-provider-invalid-manifest");
     }
   }
+}
+
+function markerDigest(content: string, markerBegin: string, markerEnd: string): string {
+  const marker = inspectManagedManualMarker(content);
+  if (
+    marker.status !== "exact" ||
+    marker.markerBegin !== markerBegin ||
+    marker.markerEnd !== markerEnd
+  ) {
+    throw new Error("install-provider-invalid-managed-marker");
+  }
+  return marker.digest;
 }
 
 function replaceOwnedMarker(

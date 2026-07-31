@@ -56,7 +56,9 @@ import type { Client } from "@libsql/client";
 
 import { closeVaultDb, openLytDb, openProvenanceDb } from "../registry/vault-db.js";
 import { deleteFtsByPath, upsertFtsDocByPath } from "../registry/fts-repo.js";
+import { deleteEmbeddingByPath } from "../registry/embeddings-repo.js";
 import { deleteEdgesByPath, replaceEdgesForFigment } from "../registry/figment-edges-repo.js";
+import { deleteKeyphrasesByPath } from "../registry/keyphrases-repo.js";
 import { deleteMetaByPath, upsertFigmentMeta } from "../registry/figment-meta-repo.js";
 import { recordProvenance } from "../registry/provenance-write.js";
 import { newUuidv7Bytes } from "../util/uuid7.js";
@@ -68,7 +70,9 @@ import {
   type FigmentDates,
   type FigmentTopicTags,
 } from "./upsert-fts-cache.js";
+import { parseFigmentTitle } from "../util/figment-title.js";
 import { isIndexablePath } from "../util/indexable.js";
+import { loadLytIgnorePolicy } from "../util/lytignore.js";
 
 // src= attribution carried in the provenance ledger + @STAMP for
 // capture-time reconciles. Distinct from `automator:*` (those are
@@ -175,7 +179,7 @@ function sha256(content: string): string {
 function readFigmentBody(
   vaultPath: string,
   relPath: string,
-): (ExtractedFtsBody & FigmentDates & FigmentTopicTags) | null {
+): (ExtractedFtsBody & FigmentDates & FigmentTopicTags & { title: string }) | null {
   const abs = join(vaultPath, relPath);
   if (!existsSync(abs)) return null;
   // C2 (Lane M Wave 0 v2.1) — symlink info-disclosure guard. `lstat` does
@@ -206,13 +210,15 @@ function readFigmentBody(
   // would DROP must not be indexed here either, else the row vanishes on the
   // next reindex. (Symlinks are already rejected above, so g3/g4 never follow a
   // link out of the vault.)
-  if (!isIndexablePath(relPath, undefined, vaultPath)) return null;
+  const ignorePolicy = loadLytIgnorePolicy(vaultPath);
+  if (!isIndexablePath(relPath, ignorePolicy.matcher, vaultPath)) return null;
   try {
     const raw = readFileSync(abs, "utf8");
     return {
       ...extractFtsBody(raw),
       ...parseFigmentDates(raw),
       ...parseFigmentTopicTags(raw),
+      title: parseFigmentTitle(raw),
     };
   } catch {
     return null;
@@ -281,7 +287,11 @@ export async function reconcileFigmentWrite(
             // provenance append is NON-idempotent (a retried append would
             // double-append), so it is never retried — release review fix.
             await withBusyRetry(() =>
-              upsertFtsDocByPath(lytDb, { figmentPath: args.relPath, body: extracted.body }),
+              upsertFtsDocByPath(lytDb, {
+                figmentPath: args.relPath,
+                body: extracted.body,
+                title: extracted.title,
+              }),
             );
             await withBusyRetry(() => replaceEdgesForFigment(lytDb, args.relPath, extracted.links));
             await withBusyRetry(() =>
@@ -308,6 +318,17 @@ export async function reconcileFigmentWrite(
               });
               provenanceRecorded = true;
             }
+          } else {
+            // The event may represent a delete, a newly ignored path, or a file
+            // that crossed a fixed inclusion gate. The shared policy verdict owns
+            // the answer: remove every derived tier instead of leaving a stale row
+            // merely because an "upsert" event was observed.
+            const removed = await withBusyRetry(() => deleteFtsByPath(lytDb, args.relPath));
+            await withBusyRetry(() => deleteEdgesByPath(lytDb, args.relPath));
+            await withBusyRetry(() => deleteMetaByPath(lytDb, args.relPath));
+            await withBusyRetry(() => deleteKeyphrasesByPath(lytDb, args.relPath));
+            await withBusyRetry(() => deleteEmbeddingByPath(lytDb, args.relPath));
+            ftsChanged = removed > 0;
           }
           break;
         }
@@ -315,6 +336,8 @@ export async function reconcileFigmentWrite(
           const removed = await withBusyRetry(() => deleteFtsByPath(lytDb, args.relPath));
           await withBusyRetry(() => deleteEdgesByPath(lytDb, args.relPath));
           await withBusyRetry(() => deleteMetaByPath(lytDb, args.relPath));
+          await withBusyRetry(() => deleteKeyphrasesByPath(lytDb, args.relPath));
+          await withBusyRetry(() => deleteEmbeddingByPath(lytDb, args.relPath));
           ftsChanged = removed > 0;
           // Gate the provenance write on an actual removal — no phantom
           // provenance row on a no-op delete (release review fix).
@@ -344,10 +367,16 @@ export async function reconcileFigmentWrite(
           await withBusyRetry(() => deleteFtsByPath(lytDb, fromRel));
           await withBusyRetry(() => deleteEdgesByPath(lytDb, fromRel));
           await withBusyRetry(() => deleteMetaByPath(lytDb, fromRel));
+          await withBusyRetry(() => deleteKeyphrasesByPath(lytDb, fromRel));
+          await withBusyRetry(() => deleteEmbeddingByPath(lytDb, fromRel));
           const extracted = readFigmentBody(vaultPath, args.relPath);
           if (extracted !== null) {
             await withBusyRetry(() =>
-              upsertFtsDocByPath(lytDb, { figmentPath: args.relPath, body: extracted.body }),
+              upsertFtsDocByPath(lytDb, {
+                figmentPath: args.relPath,
+                body: extracted.body,
+                title: extracted.title,
+              }),
             );
             await withBusyRetry(() => replaceEdgesForFigment(lytDb, args.relPath, extracted.links));
             await withBusyRetry(() =>

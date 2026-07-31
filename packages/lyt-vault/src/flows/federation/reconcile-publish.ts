@@ -58,6 +58,7 @@ import {
   commitPodRepo,
   establishPublishedVaultTracking,
   materializeVaultPublishable,
+  verifyExactPublishedRef,
   type GitRunner,
 } from "./vault-publish.js";
 import {
@@ -92,6 +93,7 @@ import {
 export type VaultPublishStatus =
   | "published"
   | "pulled-then-published"
+  | "verification-pending"
   | "conflict"
   | "failed"
   | "skipped";
@@ -734,6 +736,20 @@ async function publishOneVault(
       }),
     );
     if (pushed.code === 0) {
+      const verified = await verifyExactPublishedRef({
+        git: opts.git,
+        cwd,
+        remoteUrl: canonicalUrl,
+        remoteRef: "refs/heads/main",
+      });
+      if (!verified) {
+        return {
+          ...base,
+          status: "verification-pending",
+          pushed: false,
+          message: "push completed, but the exact online ref could not yet be verified",
+        };
+      }
       try {
         await establishPublishedVaultTracking({
           vault,

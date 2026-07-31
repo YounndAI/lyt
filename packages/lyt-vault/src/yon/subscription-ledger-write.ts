@@ -18,6 +18,7 @@ import { join } from "node:path";
 
 import { getFederationRoot } from "../util/federation-paths.js";
 import { getWriterId } from "../util/writer-id.js";
+import { type Hlc, serializeHlc, stampNext } from "../util/hlc.js";
 import { appendLedgerRecord, type AppendLedgerRecordResult } from "./ledger-write.js";
 
 // Fed-v2 Layer-1 (Phase C) — the WRITE half of the per-writer append-only
@@ -27,9 +28,9 @@ import { appendLedgerRecord, type AppendLedgerRecordResult } from "./ledger-writ
 // logs under `<podRoot>/ledger/subscriptions/<writerId>/`. Each writer (= each
 // machine, keyed by getWriterId()) only ever appends to its OWN shard dir —
 // never another writer's. The shards converge across machines by git
-// construction (disjoint write paths never conflict-merge); the OR-Set fold
-// (subscription-ledger-read.ts foldSubscriptions) reconciles the union into
-// the live subscription set.
+// construction (disjoint write paths never conflict-merge); the migration-safe
+// HLC-LWW fold (subscription-ledger-read.ts foldSubscriptions) reconciles the
+// locally present union into the live subscription set.
 //
 // A subscription event is a single `@SUBSCRIPTION` record appended via the
 // generic ledger writer (ledger-write.ts appendLedgerRecord) — REUSED, not
@@ -61,13 +62,20 @@ export interface AppendSubscriptionArgs {
   rid: string;
   entryMode: SubscriptionEntryMode;
   state: SubscriptionState;
+  /** 0.20.16+ merge key; tests may pin it, production advances the persisted clock. */
+  hlc?: Hlc;
+  /** Greatest HLC already observed across every locally present shard. */
+  observedMaxHlc?: Hlc | null;
+  seq?: number;
   // AUDIT ONLY. Defaults to now. The fold IGNORES this for identity, sort, and
-  // add-wins resolution (per-shard append ORDER is the merge authority).
+  // merge resolution. Legacy rows alone retain their historical add-wins fold.
   addedAt?: string;
   // Test seam — override the pod root (defaults to getFederationRoot()).
   podRoot?: string;
   // Test seam — override the writer id (defaults to getWriterId()).
   writerId?: string;
+  // Test seam for the persisted HLC clock.
+  hlcPath?: string;
 }
 
 // Directory holding every writer's subscription shard:
@@ -86,6 +94,19 @@ export function appendSubscriptionRecord(
   const ledgerDir = getSubscriptionsLedgerDir(args.podRoot);
   const ledgerPath = join(ledgerDir, `${writerId}.yon`);
   const addedAt = args.addedAt ?? new Date().toISOString();
+  let hlc: Hlc;
+  let seq: number;
+  if (args.hlc !== undefined) {
+    hlc = args.hlc;
+    seq = args.seq ?? 0;
+  } else {
+    const stamped = stampNext(writerId, {
+      observedMaxHlc: args.observedMaxHlc ?? null,
+      path: args.hlcPath,
+    });
+    hlc = stamped.hlc;
+    seq = stamped.seq;
+  }
   return appendLedgerRecord({
     ledgerPath,
     ledgerName: writerId,
@@ -94,6 +115,8 @@ export function appendSubscriptionRecord(
       ["coordinate", args.coordinate],
       ["rid", args.rid],
       ["entry_mode", args.entryMode],
+      ["hlc", serializeHlc(hlc)],
+      ["seq", seq],
       ["added_at", addedAt],
       ["state", args.state],
     ],
@@ -112,10 +135,9 @@ export function appendSubscriptionActive(
 }
 
 // Convenience for the unsubscribe path: append a `tombstoned` record to the
-// CURRENT writer's OWN shard (never mutate another shard). The tombstone
-// supersedes any earlier `active` for the same coordinate WITHIN this shard,
-// and — via the add-wins OR-Set fold — is itself superseded by any later
-// `active` (re-subscribe) in ANY shard.
+// CURRENT writer's OWN shard (never mutate another shard). A newer HLC
+// tombstone dominates every observed stale active shard; a later intentional
+// active re-subscribe wins with a newer HLC.
 export function appendSubscriptionTombstone(
   args: Omit<AppendSubscriptionArgs, "state">,
 ): AppendLedgerRecordResult {

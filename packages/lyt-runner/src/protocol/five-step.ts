@@ -87,6 +87,10 @@ export interface FiveStepOptions {
   ttlMs?: number; // lease TTL; default lyt-vault leases-repo DEFAULT_TTL_MS
   commitMessage?: string;
   noPush?: boolean;
+  // Sealed broad mutations validate an exact preview against the live tree.
+  // Pulling between preview and body would invalidate that contract, so those
+  // callers skip the automatic pull and perform their own exact revalidation.
+  skipSync?: boolean;
   dryRun?: boolean; // when true, skips lease acquisition + git pull/push
   // For traceability on the runId. The orchestrator INSERTs automator_runs
   // with this id when vaultDb is supplied; otherwise the bytes are
@@ -202,7 +206,7 @@ export async function runFiveStep(
   // ---- Step 2 — vault sync -------------------------------------------
   const stepSync = startStep(ctx, "sync", runtime.getNow());
   await recordStepStarted(persistRunLedger ? vaultDb! : null, runId, stepSync, runtime.getNow());
-  if (opts.dryRun === true) {
+  if (opts.dryRun === true || opts.skipSync === true) {
     finishStep(stepSync, runtime.getNow(), true);
     ctx.status = "synced";
   } else {

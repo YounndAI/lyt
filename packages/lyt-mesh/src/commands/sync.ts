@@ -131,7 +131,21 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       "--vault <name>",
       "Scope sync or --check to ONE registered vault (by name, mesh-qualified name, origin coordinate, unique leaf, or an @-sigil pod-local alias — a bare name is NOT resolved as an alias). Only that vault is inspected or synced, and pod-wide passes are skipped.",
     )
+    .option(
+      "--resolve-conflict <choice>",
+      "Resolve a scoped note conflict without prompting: mine | online | both. Requires --vault.",
+    )
     .action(async (opts: SyncCliOpts) => {
+      if (opts.resolveConflict !== undefined) {
+        if (opts.vault === undefined) {
+          console.error("lyt sync: --resolve-conflict requires --vault.");
+          process.exit(1);
+        }
+        if (!(["mine", "online", "both"] as const).includes(opts.resolveConflict)) {
+          console.error("lyt sync: --resolve-conflict must be mine, online, or both.");
+          process.exit(1);
+        }
+      }
       if (opts.check === true && opts.watch === true) {
         // eslint-disable-next-line no-console
         console.error("lyt sync: --check and --watch are mutually exclusive.");
@@ -817,6 +831,7 @@ export function classifyScopedPublishEligibility(args: {
     case "not-git-repo":
     case "access-lost":
     case "origin-mismatch":
+    case "pushed-verification-pending":
     case "error":
       return { status: "sync-incomplete", pushTarget, reportStatus: args.reportStatus ?? null };
   }
@@ -844,6 +859,7 @@ interface SyncCliOpts {
   message?: string;
   // R7/S3 — `--vault <name>` scopes the sync to one registered vault.
   vault?: string;
+  resolveConflict?: "mine" | "online" | "both";
 }
 
 // === Forge scope guard (R7 / S3 · SC6) ================================
@@ -981,6 +997,9 @@ async function resolveSyncAuthority(vaultRids?: readonly string[]): Promise<{
 // overwritten; the user resolves later). Never surfaces a raw git marker.
 export function makeConflictResolver(opts: SyncCliOpts): ConflictResolver {
   return async ({ vaultName, conflictPaths }) => {
+    if (opts.resolveConflict !== undefined) {
+      return opts.resolveConflict === "online" ? "theirs" : opts.resolveConflict;
+    }
     if (process.stdin.isTTY !== true || opts.json === true || opts.quiet === true) {
       return "both";
     }
@@ -1024,6 +1043,7 @@ const SYNC_STATUS_LABEL: Record<string, string> = {
   clean: "up to date",
   committed: "saved",
   pushed: "saved online",
+  "pushed-verification-pending": "sent; checking online copy",
   pulled: "updated",
   "diverged-synced": "synced",
   conflict: "needs you",
@@ -1294,6 +1314,9 @@ export function printCheckHuman(
     dirty: number;
     ahead: number;
     behind: number;
+    dirtyVaultCount: number;
+    aheadVaultCount: number;
+    behindVaultCount: number;
     diverged: number;
     frozen: number;
     noUpstream: number;
@@ -1306,17 +1329,14 @@ export function printCheckHuman(
     return;
   }
   // Count DISTINCT vaults that need sync from the reports themselves — a single
-  // vault can now span two summary categories (A2a's `dirty-behind` is counted
-  // under both `dirty` and `behind`), so summing the category counters would
-  // double-count it. For every pre-A2a status this distinct count equals the
-  // former category sum (each vault landed in exactly one category), so the
-  // headline number is unchanged for all existing states.
+  // vault can span multiple explicit predicate categories, so summing category
+  // counters would double-count it.
   const needsSync = reports.filter((r) => isNeedsSyncStatus(r.status)).length;
   // firewall-C1 completion — plain wording ("unsaved / to send / to receive")
   // instead of the git jargon "dirty / ahead / behind / diverged".
   const summaryLine =
     needsSync > 0
-      ? `${needsSync} vault(s) need sync (${summary.dirty} unsaved, ${summary.ahead} to send, ${summary.behind} to receive, ${summary.diverged} to send & receive)`
+      ? `${needsSync} vault(s) need sync (${summary.dirtyVaultCount} unsaved, ${summary.aheadVaultCount} to send, ${summary.behindVaultCount} to receive, ${summary.diverged} to send & receive)`
       : "All vaults up to date";
   // eslint-disable-next-line no-console
   console.log(`lyt sync --check: ${summaryLine}`);

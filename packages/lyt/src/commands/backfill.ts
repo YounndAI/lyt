@@ -14,42 +14,22 @@
  * limitations under the License.
  */
 
-// `lyt vault backfill <name>` — Phase D (0.10.0 frontmatter-contract lane).
-//
-// The DEDICATED, purpose-named heal verb that runs the metadata-filler automator
-// body against one vault: it walks every indexable figment, fills any MISSING
-// mandatory frontmatter field with a deterministic default (dates from the file's
-// REAL git-committer / fs-mtime date, NOT now; purpose/topic left BLANK + flagged;
-// provenance-stamped src=automator:metadata-filler), and NEVER overwrites an
-// existing value. Idempotent — a second run fills nothing.
-//
-// GIT POSTURE (release review / a review finding): a backfill WRITES to disk. By default
-// it does NOT push (the automator commits LOCALLY only) — honoring this pod's
-// push-gate discipline (a hygiene verb must never silently publish to origin).
-// `--push` opts INTO the commit+push. `--dry-run` is a TRUE read-only preview: it
-// reports which figments WOULD be filled and writes NOTHING (the previous mapping
-// to the automator's `dryRun`, which still writes the body, was a foot-gun).
-//
-// WRITABLE-GATE GAP (release review, tracked follow-up #1): the underlying
-// metadata-filler body has NO writable/subscriber gate — a whole-vault frontmatter
-// write can land on a SUBSCRIBED / not-owned vault's local clone. This is a
-// PRE-EXISTING Phase-C gap (see the WRITER note in lyt-vault util/indexable.ts), not
-// introduced here; `--push` defaulting OFF caps the blast radius to the local clone.
-// Wiring a `vault info` writable check into these verbs is the next follow-up.
-//
-// Lives in the meta @younndai/lyt CLI (not lyt-vault) because running an automator
-// pulls in lyt-runner, which depends on lyt-vault — registering it inside lyt-vault
-// would cycle. Attached to the lyt-vault-registered `vault` parent in cli.ts. C13:
-// NOT `lyt repair` (repair stays registry/mesh-structure only, no content mutation).
-
 import { Command } from "commander";
 
-import { reconcileVaultScan } from "@younndai/lyt-vault";
-
 import { runAutomator } from "../automator-run.js";
+import {
+  createMutationPreview,
+  prepareMutationApply,
+  type MutationApplySession,
+  type MutationPreviewReceipt,
+} from "./mutation-preview-receipt.js";
 
 interface BackfillCliOpts {
   dryRun?: boolean;
+  apply?: boolean;
+  yes?: boolean;
+  receipt?: string;
+  path?: string;
   push?: boolean;
   json?: boolean;
 }
@@ -61,127 +41,202 @@ interface MetadataFillerOutcomeShape {
   filesWritten: string[];
 }
 
-// The metadata-filler body returns a MetadataFillerOutcome; runAutomator surfaces
-// it as `result.body` (context.bodyResult, typed `unknown`). Narrow defensively so
-// a body-shape drift degrades to zeros rather than throwing on the CLI surface.
 function asOutcome(body: unknown): MetadataFillerOutcomeShape {
-  const o = (body ?? {}) as Partial<MetadataFillerOutcomeShape>;
+  const value = (body ?? {}) as Partial<MetadataFillerOutcomeShape>;
   return {
-    filesScanned: typeof o.filesScanned === "number" ? o.filesScanned : 0,
-    filesMutated: typeof o.filesMutated === "number" ? o.filesMutated : 0,
-    fieldsFilledTotal: typeof o.fieldsFilledTotal === "number" ? o.fieldsFilledTotal : 0,
-    filesWritten: Array.isArray(o.filesWritten) ? o.filesWritten : [],
+    filesScanned: typeof value.filesScanned === "number" ? value.filesScanned : 0,
+    filesMutated: typeof value.filesMutated === "number" ? value.filesMutated : 0,
+    fieldsFilledTotal:
+      typeof value.fieldsFilledTotal === "number" ? value.fieldsFilledTotal : 0,
+    filesWritten: Array.isArray(value.filesWritten) ? value.filesWritten : [],
+  };
+}
+
+function isInteractive(): boolean {
+  return process.stdin.isTTY === true && process.stdout.isTTY === true;
+}
+
+function emitPreviewCompatibilityWarnings(opts: BackfillCliOpts): void {
+  if (opts.dryRun === true) {
+    // eslint-disable-next-line no-console
+    console.error("warning: --dry-run is deprecated; preview is now the default and remains read-only");
+  }
+  if (opts.push === true) {
+    // eslint-disable-next-line no-console
+    console.error("warning: preview only; --push binds the receipt but nothing changes until --apply");
+  }
+}
+
+function receiptSummary(receipt: MutationPreviewReceipt): Record<string, unknown> {
+  return {
+    receipt_id: receipt.plan.id,
+    lifecycle: receipt.lifecycle.state,
+    created_at: receipt.plan.createdAt,
+    expires_at: receipt.plan.expiresAt,
+    vault: receipt.plan.vault,
+    scope: receipt.plan.scope,
+    push: receipt.plan.push,
+    candidate_count: receipt.plan.candidateCount,
+    exclusion_count: receipt.plan.exclusionCount,
+    exclusion_counts: receipt.plan.exclusionCounts,
+    pending_removal_count: receipt.plan.pendingRemovalCount,
+    candidates: receipt.plan.candidates,
   };
 }
 
 export function buildBackfillCommand(): Command {
   return new Command("backfill")
     .description(
-      "Backfill missing frontmatter across a vault's figments (deterministic: real git/fs dates, purpose/topic left blank + flagged, provenance-stamped). Never overwrites existing values. Writes locally; use --push to also commit + push. NOT `lyt repair`.",
+      "Preview missing-frontmatter additions for one registered vault. Mutation requires --apply with the exact sealed --receipt; non-interactive apply also requires --yes.",
     )
-    .argument("<name>", "Vault name to backfill (must be registered)")
-    .option("--dry-run", "Preview which figments WOULD be filled — read-only, writes nothing")
-    .option("--push", "Also git-commit + push the fills (default: write locally, run `lyt sync` to publish)")
-    .option("--json", "Emit a JSON result instead of the human-readable summary")
+    .argument("<name>", "Registered vault name to inspect or backfill")
+    .option("--path <subtree>", "Restrict preview/apply to one vault-relative subtree")
+    .option("--dry-run", "One-release compatibility alias for the default sealed preview")
+    .option("--apply", "Apply the exact sealed preview")
+    .option("--receipt <uuidv7>", "Exact preview receipt identifier required by --apply")
+    .option("--yes", "Required confirmation for non-interactive --apply")
+    .option("--push", "Bind the preview/apply to commit-and-push rather than local commit only")
+    .option("--json", "Emit structured JSON")
     .action(async (name: string, opts: BackfillCliOpts) => {
-      // --dry-run — TRUE read-only preview. Report what WOULD be filled (the
-      // missing-frontmatter figments the scan finds); write nothing, run no automator.
-      if (opts.dryRun === true) {
-        let scan;
-        try {
-          scan = await reconcileVaultScan(name);
-        } catch (err) {
-          reportError(opts, name, err);
-          process.exit(1);
+      if (opts.apply === true && opts.dryRun === true) {
+        return reportError(opts, name, new Error("--apply and --dry-run are mutually exclusive"));
+      }
+      if (opts.apply !== true) {
+        if (opts.receipt !== undefined) {
+          return reportError(opts, name, new Error("--receipt is consumed only with --apply"));
         }
-        const wouldFill = scan.missingFrontmatter;
-        if (opts.json === true) {
-          // eslint-disable-next-line no-console
-          console.log(
-            JSON.stringify(
-              {
-                dry_run: true,
-                vault: { name: scan.vaultName, path: scan.vaultPath },
-                scanned: scan.scanned,
-                would_fill: wouldFill.length,
-                figments: wouldFill,
-              },
-              null,
-              2,
-            ),
-          );
-        } else {
-          // eslint-disable-next-line no-console
-          console.log(
-            `backfill --dry-run ${scan.vaultName}: ${wouldFill.length}/${scan.scanned} figment(s) would be filled (nothing written).`,
-          );
-          for (const f of wouldFill.slice(0, 20)) {
-            // eslint-disable-next-line no-console
-            console.log(`  ${f.relPath} — missing: ${f.missing.join(", ")}`);
-          }
-          if (wouldFill.length > 20) {
-            // eslint-disable-next-line no-console
-            console.log(`  … and ${wouldFill.length - 20} more`);
-          }
+        try {
+          emitPreviewCompatibilityWarnings(opts);
+          const receipt = await createMutationPreview({
+            operation: "backfill",
+            vault: name,
+            ...(opts.path !== undefined ? { subtree: opts.path } : {}),
+            push: opts.push === true,
+          });
+          emitPreview(opts, receipt);
+        } catch (error) {
+          reportError(opts, name, error);
         }
         return;
       }
 
-      // Real backfill. Default noPush (write + commit LOCALLY only); --push opts in.
-      let result;
+      if (opts.receipt === undefined) {
+        return reportError(opts, name, new Error("--apply requires --receipt <uuidv7>"));
+      }
+      if (!isInteractive() && opts.yes !== true) {
+        return reportError(opts, name, new Error("non-interactive --apply requires --yes"));
+      }
+
+      let session: MutationApplySession | undefined;
       try {
-        result = await runAutomator({
-          automator: "metadata-filler",
+        session = await prepareMutationApply({
+          operation: "backfill",
           vault: name,
-          ...(opts.push !== true ? { noPush: true } : {}),
+          ...(opts.path !== undefined ? { subtree: opts.path } : {}),
+          push: opts.push === true,
+          receiptId: opts.receipt,
         });
-      } catch (err) {
-        reportError(opts, name, err);
-        process.exit(1);
-      }
-      const outcome = asOutcome(result.body);
-
-      const payload = {
-        ok: result.ok,
-        vault: { name: result.plan.vaultName, path: result.plan.vaultPath },
-        automator_version: result.automatorVersion,
-        status: result.status,
-        error_summary: result.errorSummary,
-        pushed: opts.push === true,
-        files_scanned: outcome.filesScanned,
-        files_mutated: outcome.filesMutated,
-        fields_filled_total: outcome.fieldsFilledTotal,
-        files_written: outcome.filesWritten,
-      };
-
-      if (opts.json === true) {
-        // eslint-disable-next-line no-console
-        console.log(JSON.stringify(payload, null, 2));
-      } else {
-        // eslint-disable-next-line no-console
-        console.log(
-          `${result.ok ? "✓" : "✗"} backfill ${payload.vault.name}: ` +
-            `${outcome.filesMutated}/${outcome.filesScanned} figment(s) filled ` +
-            `(${outcome.fieldsFilledTotal} field(s))${opts.push === true ? " [pushed]" : " [local — run `lyt sync` to publish]"}` +
-            `${payload.error_summary !== null ? ` — ${payload.error_summary}` : ""}`,
-        );
-        if (outcome.filesMutated === 0 && result.ok) {
-          // eslint-disable-next-line no-console
-          console.log("  all figments already carry contract-valid frontmatter (nothing to fill).");
+        if (session.getReceipt().plan.candidateCount > 0) session.markMutationStarted();
+        const result = await runAutomator({
+          automator: "metadata-filler",
+          vault: session.inventory.vault.name,
+          skipSync: true,
+          ...(opts.push !== true ? { noPush: true } : {}),
+          metadataFillerScope: {
+            candidates: session.getReceipt().plan.candidates,
+            validateBeforeMutation: session.revalidateBeforeMutation,
+            onCandidateCompleted: session.markCandidateCompleted,
+            missingOnly: true,
+          },
+        });
+        if (!result.ok) {
+          throw new Error(result.errorSummary ?? `metadata-filler ended in ${result.status}`);
         }
+        const outcome = asOutcome(result.body);
+        if (outcome.filesMutated !== session.getReceipt().plan.candidateCount) {
+          throw new Error(
+            `sealed apply wrote ${outcome.filesMutated} candidate(s), expected ${session.getReceipt().plan.candidateCount}`,
+          );
+        }
+        session.complete();
+        emitApplied(opts, session.getReceipt(), outcome);
+      } catch (error) {
+        if (session !== undefined) {
+          try {
+            session.fail(error);
+          } catch {
+            /* report the original product failure; receipt persistence is checked by doctor */
+          }
+        }
+        reportError(opts, name, error);
       }
-
-      if (!result.ok) process.exit(1);
     });
 }
 
-function reportError(opts: BackfillCliOpts, name: string, err: unknown): void {
-  const msg = err instanceof Error ? err.message : String(err);
+function emitPreview(opts: BackfillCliOpts, receipt: MutationPreviewReceipt): void {
+  const payload = { ok: true, operation: "backfill", applied: false, ...receiptSummary(receipt) };
   if (opts.json === true) {
     // eslint-disable-next-line no-console
-    console.log(JSON.stringify({ ok: false, vault: name, error: msg }, null, 2));
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `backfill preview ${receipt.plan.vault.name} [${receipt.plan.scope}]: ` +
+      `${receipt.plan.candidateCount} candidate(s), ${receipt.plan.exclusionCount} excluded.`,
+  );
+  // eslint-disable-next-line no-console
+  console.log(`  receipt: ${receipt.plan.id} (expires ${receipt.plan.expiresAt})`);
+  for (const candidate of receipt.plan.candidates.slice(0, 20)) {
+    // eslint-disable-next-line no-console
+    console.log(`  ${candidate.path} — add: ${candidate.plannedMutations.join(", ")}`);
+  }
+  if (receipt.plan.candidates.length > 20) {
+    // eslint-disable-next-line no-console
+    console.log(`  … and ${receipt.plan.candidates.length - 20} more`);
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `  apply: lyt vault backfill '${receipt.plan.vault.name}' --apply --receipt ${receipt.plan.id}` +
+      `${opts.push === true ? " --push" : ""}`,
+  );
+}
+
+function emitApplied(
+  opts: BackfillCliOpts,
+  receipt: MutationPreviewReceipt,
+  outcome: MetadataFillerOutcomeShape,
+): void {
+  const payload = {
+    ok: true,
+    operation: "backfill",
+    applied: true,
+    ...receiptSummary(receipt),
+    files_mutated: outcome.filesMutated,
+    fields_filled_total: outcome.fieldsFilledTotal,
+    files_written: outcome.filesWritten,
+  };
+  if (opts.json === true) {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `backfill applied ${receipt.plan.vault.name} [${receipt.plan.scope}]: ` +
+      `${outcome.filesMutated}/${receipt.plan.candidateCount} candidate(s), ` +
+      `${outcome.fieldsFilledTotal} field(s); receipt ${receipt.plan.id} completed.`,
+  );
+}
+
+function reportError(opts: BackfillCliOpts, name: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  process.exitCode = 1;
+  if (opts.json === true) {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({ ok: false, operation: "backfill", vault: name, error: message }, null, 2));
   } else {
     // eslint-disable-next-line no-console
-    console.error(`✗ backfill ${name}: ${msg}`);
+    console.error(`backfill refused ${name}: ${message}`);
   }
 }

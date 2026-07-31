@@ -502,6 +502,25 @@ export async function recoverVaultsFromPodManifest(
         // Recovery is idempotent over partial/legacy local state. The ownership
         // preflight above authenticated this exact target before any mutation,
         // so converge an existing row to the verified manifest authority too.
+        if (existingMesh.ownCreated !== true) {
+          const verifiedPromotion =
+            policyWinner !== null &&
+            policyWinner.state === "active" &&
+            policyWinner.destinationKind === "github" &&
+            policyWinner.targetOwner?.toLowerCase() === m.pushTarget.toLowerCase() &&
+            policyWinner.targetKind === (m.pushKind === "org" ? "org" : "user");
+          if (!verifiedPromotion) {
+            warnings.push(
+              `mesh ${m.meshName}: ownership promotion refused — an existing foreign mesh ` +
+                `requires a matching active RID-bound destination-policy winner plus live ` +
+                `GitHub ownership authentication`,
+            );
+            continue;
+          }
+          await prepareOwnedMeshDestinationProjection(db, rid);
+          await projectOwnedMeshDestination(db, rid, meshProjectionFromPolicy(policyWinner));
+          continue;
+        }
         if (policyWinner === null) {
           // Legacy absence cannot clear a projection already known to come from
           // explicit 0.20 policy. Only legacy/unconfigured rows may be seeded

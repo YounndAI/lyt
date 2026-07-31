@@ -16,11 +16,11 @@
   <a href="https://linkyourthink.com">Website</a> · <a href="https://github.com/YounndAI/lyt">Repository</a> · <a href="./LICENSE">Apache 2.0</a> · <a href="https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md">Trademark Policy</a> · <a href="https://github.com/YounndAI/lyt/blob/main/CONTRIBUTING.md">Contributing</a>
 </p>
 
-[![npm](https://img.shields.io/npm/v/@younndai/lyt-skills/alpha)](https://www.npmjs.com/package/@younndai/lyt-skills)
+[![npm](https://img.shields.io/npm/v/@younndai/lyt-skills)](https://www.npmjs.com/package/@younndai/lyt-skills)
 [![license](https://img.shields.io/npm/l/@younndai/lyt-skills)](./LICENSE)
 [![status](https://img.shields.io/badge/status-public%20alpha-orange)](https://github.com/YounndAI/lyt#status)
 
-> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. Install only via the `alpha` dist-tag. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
+> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. The normal install follows `latest`; `@alpha` is the opt-in preview channel. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
 
 ## What is this?
 
@@ -31,7 +31,7 @@ The `/lyt-create` skill routes mesh/vault creation and Receipt V1 interpretation
 ## Install
 
 ```bash
-npm install -g @younndai/lyt@alpha   # the meta package bundles lyt-skills
+npm install -g @younndai/lyt         # the meta package bundles lyt-skills
 lyt skills install                   # links the 12 SKILL.md files into your harness(es)
 ```
 

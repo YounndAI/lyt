@@ -41,8 +41,21 @@
 // provenance). This keeps the hook scoped + testable per arc §11.6.
 
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, relative, sep, posix } from "node:path";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  type Stats,
+} from "node:fs";
+import { basename, dirname, isAbsolute, posix, relative, resolve, sep } from "node:path";
 
 import type { Client } from "@libsql/client";
 import {
@@ -118,6 +131,18 @@ export interface WriteWithStampArgs {
     auditDb: Client;
     provenanceDb: Client;
   };
+  // Broad metadata mutation uses the sealed preview/apply boundary. It binds
+  // every target to an exact preimage, rejects symlinked leaves/parents, and
+  // atomically replaces the existing regular file on the same filesystem.
+  safeAtomicReplace?: boolean;
+  expectedPreimageSha256?: string;
+  // The Phase-B backfill contract permits only missing contract fields to be
+  // added. Keep provenance in the ledgers without injecting/updating the
+  // `last_provenance` frontmatter scalar on that exact path.
+  preserveFrontmatterBytes?: boolean;
+  // Called immediately after the filesystem replacement and before ledger
+  // emission. The receipt owner uses this to persist partial-completion state.
+  onFilesystemReplaced?: () => void;
 }
 
 export interface WriteWithStampResult {
@@ -148,23 +173,24 @@ export async function writeMarkdownWithStamp(
 
   // §11.6 guard — handler-written notes get an inert pass-through.
   if (runContext === null || vaultDb === null) {
-    ensureParentDir(args.path);
-    writeFileSync(args.path, args.content, "utf8");
+    writePayload(args, args.content);
     return { provenanceId: null, hash, ts, fired: false };
   }
 
   // Step 3a — upsert last_provenance: line into the frontmatter.
-  const mutated = upsertLastProvenance(args.content, {
-    src: args.stamp.src,
-    ts,
-    ...(args.stamp.method !== undefined ? { method: args.stamp.method } : {}),
-    ...(args.stamp.confidence !== undefined ? { confidence: args.stamp.confidence } : {}),
-    hash: `sha256:${hash}`,
-  });
+  const mutated =
+    args.preserveFrontmatterBytes === true
+      ? args.content
+      : upsertLastProvenance(args.content, {
+          src: args.stamp.src,
+          ts,
+          ...(args.stamp.method !== undefined ? { method: args.stamp.method } : {}),
+          ...(args.stamp.confidence !== undefined ? { confidence: args.stamp.confidence } : {}),
+          hash: `sha256:${hash}`,
+        });
 
   // Step 4 — write the file.
-  ensureParentDir(args.path);
-  writeFileSync(args.path, mutated, "utf8");
+  writePayload(args, mutated);
 
   // Steps 5+6 — record provenance + audit via the split-DB primitive.
   const provenanceId = newUuidv7Bytes();
@@ -199,8 +225,7 @@ export async function writeYonWithStamp(
   const ts = new Date(tsMs).toISOString();
 
   if (runContext === null || vaultDb === null) {
-    ensureParentDir(args.path);
-    writeFileSync(args.path, args.content, "utf8");
+    writePayload(args, args.content);
     return { provenanceId: null, hash, ts, fired: false };
   }
 
@@ -219,8 +244,7 @@ export async function writeYonWithStamp(
   });
   const mutated = `${stampLine}\n\n${args.content}`;
 
-  ensureParentDir(args.path);
-  writeFileSync(args.path, mutated, "utf8");
+  writePayload(args, mutated);
 
   const provenanceId = newUuidv7Bytes();
   const targetId = computeTargetId(args.path, args.vaultRoot);
@@ -420,6 +444,103 @@ export function formatYonStampRecord(args: YonStampRecordArgs): string {
 
 function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function sha256Bytes(content: Uint8Array): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function assertContainedRegularTarget(absPath: string, vaultRoot: string): Stats {
+  const root = resolve(vaultRoot);
+  const target = resolve(absPath);
+  const rel = relative(root, target);
+  if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`sealed write target escapes or equals the vault root: ${absPath}`);
+  }
+
+  const rootStat = lstatSync(root);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error("sealed write requires a real registered vault root");
+  }
+
+  let current = root;
+  const segments = rel.split(sep).filter(Boolean);
+  for (let index = 0; index < segments.length; index++) {
+    current = resolve(current, segments[index]!);
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`sealed write refuses a reparse-point component: ${current}`);
+    }
+    if (index < segments.length - 1 && !stat.isDirectory()) {
+      throw new Error(`sealed write parent is not a directory: ${current}`);
+    }
+    if (index === segments.length - 1) {
+      if (!stat.isFile()) throw new Error(`sealed write target is not a regular file: ${current}`);
+      return stat;
+    }
+  }
+  throw new Error(`sealed write target could not be validated: ${absPath}`);
+}
+
+function atomicReplaceBoundPreimage(args: WriteWithStampArgs, content: string): void {
+  const vaultRoot = args.vaultRoot;
+  const expected = args.expectedPreimageSha256;
+  if (vaultRoot === undefined || vaultRoot.length === 0 || expected === undefined) {
+    throw new Error(
+      "safeAtomicReplace requires vaultRoot and expectedPreimageSha256 from a sealed preview",
+    );
+  }
+  const targetStat = assertContainedRegularTarget(args.path, vaultRoot);
+  const livePreimage = readFileSync(args.path);
+  const liveHash = sha256Bytes(livePreimage);
+  if (liveHash !== expected) {
+    throw new Error(`sealed write preimage changed for ${computeTargetId(args.path, vaultRoot)}`);
+  }
+
+  const parent = dirname(args.path);
+  const temp = resolve(
+    parent,
+    `.${basename(args.path)}.lyt-atomic-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`,
+  );
+  const bytes = Buffer.from(content, "utf8");
+  let fd: number | null = null;
+  try {
+    fd = openSync(temp, "wx", targetStat.mode);
+    writeFileSync(fd, bytes);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    chmodSync(temp, targetStat.mode);
+    // Revalidate after staging and immediately before replacement. This closes
+    // the parent/leaf swap window and repeats the exact preimage comparison.
+    assertContainedRegularTarget(args.path, vaultRoot);
+    if (sha256Bytes(readFileSync(args.path)) !== expected) {
+      throw new Error(`sealed write preimage changed before replace: ${computeTargetId(args.path, vaultRoot)}`);
+    }
+    renameSync(temp, args.path);
+    if (sha256Bytes(readFileSync(args.path)) !== sha256Bytes(bytes)) {
+      throw new Error(`sealed write post-replace verification failed: ${computeTargetId(args.path, vaultRoot)}`);
+    }
+    args.onFilesystemReplaced?.();
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best-effort close of this exact owned file descriptor */
+      }
+    }
+    if (existsSync(temp)) unlinkSync(temp);
+  }
+}
+
+function writePayload(args: WriteWithStampArgs, content: string): void {
+  if (args.safeAtomicReplace === true) {
+    atomicReplaceBoundPreimage(args, content);
+    return;
+  }
+  ensureParentDir(args.path);
+  writeFileSync(args.path, content, "utf8");
 }
 
 function ensureParentDir(absPath: string): void {

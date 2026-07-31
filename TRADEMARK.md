@@ -6,8 +6,9 @@ MARLINK TRADING SRL.
 The Apache License, Version 2.0 under which this project is distributed grants
 you broad rights to use, modify, and redistribute the **software**. It does
 **not** grant any right to use the **trade names, trademarks, service marks, or
-product names** of MARLINK TRADING SRL, except as required for describing the
-origin of the work and reproducing the content of the `NOTICE` file.
+product names** of MARLINK TRADING SRL, except as required for reasonable and
+customary use in describing the origin of the work and reproducing the content
+of the `NOTICE` file.
 
 ## Permitted without prior permission
 

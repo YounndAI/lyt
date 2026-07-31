@@ -16,11 +16,11 @@
   <a href="https://linkyourthink.com">Website</a> · <a href="https://github.com/YounndAI/lyt">Repository</a> · <a href="./LICENSE">Apache 2.0</a> · <a href="https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md">Trademark Policy</a> · <a href="https://github.com/YounndAI/lyt/blob/main/CONTRIBUTING.md">Contributing</a>
 </p>
 
-[![npm](https://img.shields.io/npm/v/@younndai/lyt-vault/alpha)](https://www.npmjs.com/package/@younndai/lyt-vault)
+[![npm](https://img.shields.io/npm/v/@younndai/lyt-vault)](https://www.npmjs.com/package/@younndai/lyt-vault)
 [![license](https://img.shields.io/npm/l/@younndai/lyt-vault)](./LICENSE)
 [![status](https://img.shields.io/badge/status-public%20alpha-orange)](https://github.com/YounndAI/lyt#status)
 
-> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. Install only via the `alpha` dist-tag. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
+> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. The normal install follows `latest`; `@alpha` is the opt-in preview channel. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
 
 ## What is this?
 
@@ -33,7 +33,7 @@ You usually do not install this package directly — install [`@younndai/lyt`](h
 ## Install (standalone)
 
 ```bash
-npm install -g @younndai/lyt-vault@alpha
+npm install -g @younndai/lyt-vault
 ```
 
 This exposes a `lyt-vault` binary for the vault-owned verb groups. Install
@@ -54,9 +54,9 @@ lyt alias <name> <target>          # pod-local name → vault rid (survives rena
 # Capture and find knowledge
 lyt capture "<text>" [--dir <subdir>]   # save a Figment (markdown note) with frontmatter;
                                    #   --dir chooses where it lands, topic picked interactively
-lyt search "<query>" [--vault <name>] [--mesh <m>] [--no-semantic] [--json]
-                                   # tiered search (arcs → lanes → FTS5 → edges)
-                                   #   + optional on-device semantic fusion
+lyt search "<query>" [--vault <name>] [--mesh <m>] [--limit <n>] [--meaning-limit <n>]
+                                   [--fields <key,...>] [--no-semantic] [--json]
+                                   # labelled direct matches + metadata-only meaning candidates
 lyt reindex [--all|--mesh <m>|--vault <name>]
                                    # rebuild the libSQL search caches from the markdown SoT
 lyt sync --check --vault <mesh>/<vault> --json
@@ -87,9 +87,10 @@ The full v1 verb set also includes `vault clone|forget|disconnect|delete|add-edg
 
 ## Search
 
-`lyt search` runs a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — each tier carrying a confidence score, ranked into one list. On top of that, an **optional on-device semantic layer** surfaces notes keyword matching misses (different words, same meaning): a one-time local embedding model (`bge-small-en-v1.5`, CPU-only via [fastembed](https://www.npmjs.com/package/fastembed)) whose results are fused into the cascade under a confidence gate.
+`lyt search` runs a tiered cascade — arc membership, lane membership, full-text (FTS5/BM25), then one-hop mesh edges — with an **optional on-device semantic layer** that can surface notes keyword matching misses (different words, same meaning). The compatibility `results` array preserves the settled rank, while human and machine receipts separate rows into **Direct text matches** and metadata-only **Meaning-based candidates**. Defaults are 20 direct results plus up to 10 additional meaning candidates (30 maximum); `--limit` and `--meaning-limit` control those allowances independently. Every row carries additive `foundBy` provenance, and `--fields <key,...>` requests a bounded extra frontmatter projection.
 
 - Semantic search is **on by default when the model is available**, and degrades silently to the lexical cascade when it isn't — no error, no cloud call, byte-identical to `--no-semantic`.
+- Meaning candidates are bounded similarity suggestions, not confirmed matches. They are not filtered by a calibrated absolute score threshold; the consuming agent decides whether they are useful for the current question.
 - The one-time local model download is **handler-gated**: `lyt reindex` on an interactive terminal prompts before fetching; non-interactive / scripted / MCP runs never auto-download. The model caches under `~/lyt/.embeddings-cache/`, never inside a vault.
 - Embeddings run **locally on CPU** — there is no remote inference and `fastembed` is an `optionalDependency`, so install succeeds even where its native runtime can't build.
 - Turn fusion off with `lyt search --no-semantic`, or disable it globally via `LYT_EMBEDDINGS=0`.
@@ -98,16 +99,17 @@ The full v1 verb set also includes `vault clone|forget|disconnect|delete|add-edg
 
 Every note carries an 8-field frontmatter contract — `title`, `created`, `modified`, `tags`, `topic`, `purpose`, `mesh-visibility`, `weight`. Lyt keeps it correct at rest, sets it at capture, and heals legacy files without touching your prose. The `backfill` and `reconcile` verbs below ship in the unified [`@younndai/lyt`](https://www.npmjs.com/package/@younndai/lyt) binary (they compose the automation runner, which this package deliberately does not depend on).
 
-- **`lyt vault backfill <name>`** fills missing fields in place — title, genuine `created`/`modified` dates (from git history, falling back to file mtime), keyword `tags`, `topic`, and defaults. It never moves files.
-- **`lyt vault reconcile <name> [--apply]`** scans every note against the index, flags files that are present-but-unindexed or missing frontmatter, and with `--apply` backfills then reindexes them — drop a raw `.md` into a vault and it gets healed. Both verbs commit locally by default (`--push` to opt in).
+- **`lyt vault files <name> [--path <subtree>]`** inventories every Markdown file and explains whether policy includes it, whether it is indexed, whether it needs missing frontmatter, or whether a stale cache row needs removal. A root `.lytignore` is versioned policy; it supports `#`, `!`, `*`, `**`, `?`, and `/`, while `.lyt`, `.obsidian`, and `.git` always remain excluded.
+- **`lyt vault backfill <name>`** is a read-only sealed preview by default. It lists exactly which missing fields would be added — title, genuine `created`/`modified` dates (from git history, falling back to file mtime), keyword `tags`, `topic`, and defaults — without moving files or changing authored values. Apply that exact preview with `--apply --receipt <id>`; non-interactive apply also requires `--yes`. The deprecated `--dry-run` alias warns, and preview-time `--push` warns that it binds intent without changing anything.
+- **`lyt vault reconcile <name>`** uses the same preview/apply rail while also finding present-but-unindexed files and stale FTS/dense rows. Receipts expire after 30 minutes, are single-use, and refuse drift before writing; failures distinguish refusal-before-write from partial mutation. A subtree receipt names its candidates separately from the vault-wide derived-cache rebuild. `--push` binds both preview and apply to commit-and-push instead of the default local commit. Direct `lyt automator run metadata-filler` is refused so there is only one broad-write rail.
 - **Tags need no model** — keyword extraction runs on any vault, including a freshly imported one. When a local embedding model is present, `topic:` is enriched too: capture _suggests_ one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure — ranked against your current on-disk labels and computed on-device. With no model, tags still fill and topic stays blank.
-- **Your writing is never overwritten** — `purpose` is left blank and flagged rather than guessed, authored values are preserved, and every machine-filled field is provenance-stamped so it stays distinguishable from what you wrote. Nothing is ever sent off your machine.
+- **Your writing is never overwritten** — `purpose` is left blank and flagged rather than guessed, authored values are preserved byte-for-byte, and machine-filled field provenance is recorded in the ledger. Nothing is ever sent off your machine.
 - **`lyt doctor`** counts notes with missing or invalid frontmatter (`--full` scans every vault; the default samples).
 
 ## Key features
 
 - **Markdown is the source of truth.** The libSQL index is a regenerable cache — delete it and `lyt reindex` restores it from your notes. No black-box database ever owns your knowledge.
-- **Search agents can use** — `lyt search --json` returns ranked, structured hits with vault, path, snippet, tier, and confidence; the same search backs the agent-harness skills and the MCP server.
+- **Search agents can use** — `lyt search --json` reports `lexicalLimit`, `meaningLimit`, and `maxResults`, preserves the compatibility-ranked `results`, separates direct matches from caveated meaning candidates, and returns bounded metadata plus `foundBy` provenance; the same contract backs the agent-harness skills and MCP server.
 - **YON-structured declarations** — `.lyt/vault.yon` is the machine-readable source of truth for the vault's mesh shape; any AI agent reads it directly.
 - **Self-healing** — corrupt index files are quarantined and rebuilt; `lyt doctor` and `lyt repair` diagnose and fix registry drift.
 - **Never phones home** — zero passive telemetry; every network operation is user-initiated and inspectable.

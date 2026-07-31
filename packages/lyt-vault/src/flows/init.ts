@@ -834,7 +834,12 @@ function freshPodMutationPaths(
     !expectedLedgerPaths.every((path) => paths.includes(path)) ||
     !paths.includes("pod.yon")
   ) {
-    throw new Error("Fresh pod checkpoint is missing a required Lyt-authored path.");
+    const missing = [...requiredPaths, ...expectedLedgerPaths, "pod.yon"].filter(
+      (path, index, all) => all.indexOf(path) === index && !paths.includes(path),
+    );
+    throw new Error(
+      `Fresh pod checkpoint is missing required Lyt-authored path(s): ${missing.join(", ")}.`,
+    );
   }
   return [...new Set(paths)].sort();
 }

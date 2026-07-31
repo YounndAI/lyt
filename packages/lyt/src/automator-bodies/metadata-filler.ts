@@ -118,6 +118,20 @@ export interface MetadataFillerArgs {
     auditDb: Client;
     provenanceDb: Client;
   };
+  metadataFillerScope?: MetadataFillerScope;
+}
+
+export interface MetadataFillerCandidate {
+  path: string;
+  preimageSha256: string;
+  plannedMutations: string[];
+}
+
+export interface MetadataFillerScope {
+  candidates: readonly MetadataFillerCandidate[];
+  validateBeforeMutation: () => Promise<void>;
+  onCandidateCompleted: (path: string) => void;
+  missingOnly: true;
 }
 
 export interface MetadataFillerOutcome {
@@ -133,11 +147,34 @@ export async function runMetadataFillerBody(
   ctx: LytRunContext,
   args: MetadataFillerArgs,
 ): Promise<MetadataFillerOutcome> {
+  if (args.metadataFillerScope === undefined) {
+    throw new Error(
+      "metadata-filler requires a sealed preview scope; use 'lyt vault backfill' or 'lyt vault reconcile'",
+    );
+  }
+  const scope = args.metadataFillerScope;
   // Phase C — KEEP-FLAT: walk the WHOLE vault (not <vault>/notes) via the
   // single index funnel, which excludes the immutable floor (.lyt/.obsidian/.git)
   // AND `lyt-scaffold: true` sentinel files (isIndexable g6). This is a pure
   // metadata backfill IN PLACE — no file is relocated or sharded.
-  const targets = walkVaultMarkdownFiles(args.vaultPath, isIndexable);
+  await scope.validateBeforeMutation();
+  const walkedTargets = walkVaultMarkdownFiles(args.vaultPath, isIndexable);
+  const walkedByPath = new Map(
+    walkedTargets.map((path) => [toVaultRel(path, args.vaultPath), path] as const),
+  );
+  const candidateByPath = new Map(
+    scope.candidates.map((candidate) => [candidate.path, candidate] as const),
+  );
+  if (candidateByPath.size !== scope.candidates.length) {
+    throw new Error("sealed metadata-filler scope contains duplicate candidate paths");
+  }
+  const targets = scope.candidates.map((candidate) => {
+    const target = walkedByPath.get(candidate.path);
+    if (target === undefined) {
+      throw new Error(`sealed metadata-filler candidate is no longer indexable: ${candidate.path}`);
+    }
+    return target;
+  });
   const outcome: MetadataFillerOutcome = {
     filesScanned: targets.length,
     filesMutated: 0,
@@ -168,13 +205,22 @@ export async function runMetadataFillerBody(
     // needs no fill (or needs only non-enriched fields) must NEVER pay the
     // enrichFigment embed cost. Skip a no-op file before touching the model.
     const missing = detectMissingMandatoryFields(raw);
+    const relPath = toVaultRel(absPath, args.vaultPath);
+    const sealedCandidate = candidateByPath.get(relPath);
+    if (
+      sealedCandidate !== undefined &&
+      JSON.stringify(missing) !== JSON.stringify(sealedCandidate.plannedMutations)
+    ) {
+      throw new Error(`sealed metadata-filler mutation plan changed for ${relPath}`);
+    }
     // Phase E.1 FIX B — a present-but-BLANK `topic: ""` / `tags: []` is CONTRACT-
     // VALID (the key is present, so detectMissingMandatoryFields / hasField / the
     // doctor treat it PRESENT — we do NOT change that shared semantics), but it is a
     // placeholder, not an authored value, so enrichment SHOULD fill it. This
     // metadata-filler-LOCAL predicate finds those blank placeholders. A NON-blank
     // authored value is never in this set → the rail "never overwrite authored" holds.
-    const blankEnrichable = detectBlankEnrichableFields(raw);
+    const blankEnrichable =
+      scope.missingOnly === true ? [] : detectBlankEnrichableFields(raw);
     if (missing.length === 0 && blankEnrichable.length === 0) continue;
 
     // Phase C backfill: source created/modified from the file's REAL historical
@@ -201,7 +247,16 @@ export async function runMetadataFillerBody(
       filenameSlug: filenameSlug(absPath),
       now: faithfulDate,
       ...(enriched !== undefined ? { enriched } : {}),
+      ...(scope.missingOnly === true
+        ? { replaceBlankEnrichable: false }
+        : {}),
     });
+    if (
+      sealedCandidate !== undefined &&
+      JSON.stringify(filled.fieldsFilled) !== JSON.stringify(sealedCandidate.plannedMutations)
+    ) {
+      throw new Error(`sealed metadata-filler filled an unplanned field for ${relPath}`);
+    }
     if (filled.fieldsFilled.length === 0) continue;
 
     // Provenance/distinguishable (Risk Register — "machine fields provenance-
@@ -244,11 +299,20 @@ export async function runMetadataFillerBody(
         },
       },
       ...(args.ledgerClients !== undefined ? { ledgerClients: args.ledgerClients } : {}),
+      ...(sealedCandidate !== undefined
+        ? {
+            safeAtomicReplace: true,
+            expectedPreimageSha256: sealedCandidate.preimageSha256,
+            preserveFrontmatterBytes: true,
+            onFilesystemReplaced: () =>
+              scope.onCandidateCompleted(relPath),
+          }
+        : {}),
     });
 
     outcome.filesMutated += 1;
     outcome.fieldsFilledTotal += filled.fieldsFilled.length;
-    outcome.filesWritten.push(toVaultRel(absPath, args.vaultPath));
+    outcome.filesWritten.push(relPath);
   }
 
   return outcome;
@@ -473,6 +537,7 @@ interface FillDefaults {
   // to the pre-E deterministic default ("[]" / '""'). Optional so the pure
   // frontmatter tests can call fillMissingMandatoryFields without an embedder.
   enriched?: FigmentEnrichment;
+  replaceBlankEnrichable?: boolean;
 }
 
 export function fillMissingMandatoryFields(raw: string, defaults: FillDefaults): FillResult {
@@ -488,7 +553,9 @@ export function fillMissingMandatoryFields(raw: string, defaults: FillDefaults):
 }
 
 function fillMissingMandatoryFieldsInner(raw: string, defaults: FillDefaults): FillResult {
-  const lines = raw.split(/\r?\n/);
+  const preservedLines = splitLinesPreservingEndings(raw);
+  const newline = preservedLines.find((line) => line.ending.length > 0)?.ending ?? "\n";
+  const lines = preservedLines.map((line) => line.text);
   let firstNonEmpty = -1;
   for (let i = 0; i < lines.length; i++) {
     if (lines[i]!.length > 0) {
@@ -500,7 +567,7 @@ function fillMissingMandatoryFieldsInner(raw: string, defaults: FillDefaults): F
   if (firstNonEmpty === -1 || lines[firstNonEmpty] !== FRONTMATTER_DELIM) {
     const fresh = renderFreshFrontmatter(defaults);
     return {
-      content: `${fresh}\n${raw}`,
+      content: `${fresh.replaceAll("\n", newline)}${newline}${raw}`,
       fieldsFilled: [...MANDATORY_FIELDS],
     };
   }
@@ -517,7 +584,7 @@ function fillMissingMandatoryFieldsInner(raw: string, defaults: FillDefaults): F
     // a fresh block and leave the broken doc untouched below it.
     const fresh = renderFreshFrontmatter(defaults);
     return {
-      content: `${fresh}\n${raw}`,
+      content: `${fresh.replaceAll("\n", newline)}${newline}${raw}`,
       fieldsFilled: [...MANDATORY_FIELDS],
     };
   }
@@ -553,7 +620,7 @@ function fillMissingMandatoryFieldsInner(raw: string, defaults: FillDefaults): F
   //   - top-level (indent-0) keys only, inside the LEADING block bounds — a `meta:`-
   //     nested `topic` or a body `---` can't be hit (same anchor as the walks above).
   const blankReplaced: MandatoryField[] = [];
-  for (const field of ["topic", "tags"] as const) {
+  for (const field of defaults.replaceBlankEnrichable === false ? [] : (["topic", "tags"] as const)) {
     if (!present.has(field)) continue; // absent → handled by the insertion path below
     const rendered = renderDefault(field, defaults);
     if (rendered === blankDefaultFor(field)) continue; // no non-blank enrichment → leave as-is
@@ -564,6 +631,7 @@ function fillMissingMandatoryFieldsInner(raw: string, defaults: FillDefaults): F
       const value = line.slice(line.indexOf(":") + 1).trim();
       if (!isBlankEnrichableValue(field, value)) break; // authored non-blank → NEVER overwrite
       lines[i] = `${field}: ${rendered}`;
+      preservedLines[i]!.text = lines[i]!;
       blankReplaced.push(field);
       break;
     }
@@ -573,20 +641,49 @@ function fillMissingMandatoryFieldsInner(raw: string, defaults: FillDefaults): F
     return { content: raw, fieldsFilled: [] };
   }
 
-  // Insert the missing fields right before the closing delim, re-joining with
-  // `\n`. NOTE: the downstream stamp hook (upsertLastProvenance) also splits on
-  // /\r?\n/ and rejoins with `\n`, so a CRLF-authored figment is normalized to
-  // LF on any mutation. That flattening is pre-existing hook behavior; Phase C
-  // only broadens WHICH files reach it (whole vault vs `notes/`). Preserving
-  // CRLF end-to-end is a tracked cross-cutting follow-up, not fixed here.
+  // Insert the missing fields before the closing delimiter while preserving
+  // the source document's newline convention and every existing line byte.
   // (closeIdx is still valid: blank-replace only rewrites lines in place, never
   // splices, so it does not shift the closing-delim index.)
   const insertions = missing.map((f) => `${f}: ${renderDefault(f, defaults)}`);
-  if (insertions.length > 0) lines.splice(closeIdx, 0, ...insertions);
+  if (insertions.length > 0) {
+    const insertionEnding = preservedLines[closeIdx - 1]?.ending || preservedLines[closeIdx]?.ending || newline;
+    preservedLines.splice(
+      closeIdx,
+      0,
+      ...insertions.map((text) => ({ text, ending: insertionEnding })),
+    );
+  }
   return {
-    content: lines.join("\n"),
+    content: preservedLines.map((line) => line.text + line.ending).join(""),
     fieldsFilled: [...missing, ...blankReplaced],
   };
+}
+
+interface PreservedLine {
+  text: string;
+  ending: "" | "\n" | "\r\n";
+}
+
+function splitLinesPreservingEndings(raw: string): PreservedLine[] {
+  const lines: PreservedLine[] = [];
+  let cursor = 0;
+  while (cursor < raw.length) {
+    const lf = raw.indexOf("\n", cursor);
+    if (lf === -1) {
+      lines.push({ text: raw.slice(cursor), ending: "" });
+      cursor = raw.length;
+      break;
+    }
+    const crlf = lf > cursor && raw[lf - 1] === "\r";
+    lines.push({
+      text: raw.slice(cursor, crlf ? lf - 1 : lf),
+      ending: crlf ? "\r\n" : "\n",
+    });
+    cursor = lf + 1;
+  }
+  if (raw.length === 0 || raw.endsWith("\n")) lines.push({ text: "", ending: "" });
+  return lines;
 }
 
 // Phase E.1 FIX B — is a present `topic`/`tags` value a BLANK placeholder (safe to

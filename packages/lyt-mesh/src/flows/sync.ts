@@ -94,6 +94,7 @@ export type VaultSyncStatus =
   | "clean"
   | "committed"
   | "pushed"
+  | "pushed-verification-pending"
   | "pulled"
   | "diverged-synced"
   | "conflict"
@@ -193,7 +194,7 @@ export interface VaultSyncReport {
   // 0.12.0 Phase D · A1 — set when a concurrent-write conflict was resolved via
   // the plain keep-mine/theirs/both choice (absent when there was no conflict, or
   // when no resolver was supplied and the legacy `conflict` report was returned).
-  conflictResolution?: ConflictChoice;
+  conflictResolution?: "mine" | "online" | "both";
   /** Local terminal events not yet confirmed present on the online copy. */
   pendingPublication?: number;
   /** Latest local event includes pending; latest published reads tracked SoT only. */
@@ -729,7 +730,8 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       r.status !== "conflict" &&
       r.status !== "error" &&
       r.status !== "access-lost" &&
-      r.status !== "origin-mismatch",
+      r.status !== "origin-mismatch" &&
+      r.status !== "pushed-verification-pending",
   );
   return { reports, ok, frictionHints: deriveFrictionHints(reports) };
 }
@@ -770,6 +772,19 @@ function isSuccessfulEligibleStatus(status: VaultSyncStatus): boolean {
     status === "pulled" ||
     status === "diverged-synced"
   );
+}
+
+function parseGitObjectId(stdout: string): string | null {
+  const objectId = stdout.trim().toLowerCase();
+  return /^[a-f0-9]{40,64}$/.test(objectId) ? objectId : null;
+}
+
+function parseRemoteObjectId(stdout: string, expectedRef: string): string | null {
+  for (const line of stdout.split(/\r?\n/)) {
+    const [objectId = "", ref = ""] = line.trim().split(/\s+/, 2);
+    if (ref === expectedRef) return parseGitObjectId(objectId);
+  }
+  return null;
 }
 
 function syncReachedPublication(
@@ -1034,6 +1049,8 @@ async function syncOneVault(
 
   let pushTarget: PushTarget | null = null;
   let pullTarget: PullTarget | null = null;
+  let destinationRef = "";
+  let branchRemoteName = "";
   let validatedFetchUrl = "";
   let canonicalOriginMissing = false;
   if (expectedOrigin !== undefined) {
@@ -1138,8 +1155,8 @@ async function syncOneVault(
             allowFailure: true,
           })
         : { code: 1, stdout: "", stderr: "" };
-    const destinationRef = mergeRef.stdout.trim();
-    const branchRemoteName = branchRemote.stdout.trim();
+    destinationRef = mergeRef.stdout.trim();
+    branchRemoteName = branchRemote.stdout.trim();
     const expectedUpstream = `${branchRemoteName}/${destinationRef.replace(/^refs\/heads\//, "")}`;
     if (
       branchRemote.code !== 0 ||
@@ -1725,7 +1742,8 @@ async function syncOneVault(
               `You and your online copy changed the same note(s) at the same time: ` +
               `${conflictPaths.join(", ") || "(unknown)"}. Lyt kept BOTH — your version is right ` +
               `here on this machine and the online version is safe online, so nothing was ` +
-              `overwritten. Re-run \`lyt sync\` when you're ready to combine them.`,
+              `overwritten. Re-run \`lyt sync --vault "${vault.name}" --resolve-conflict mine\`, ` +
+              `\`--resolve-conflict online\`, or \`--resolve-conflict both\` when ready.`,
             ahead,
             behind,
             dirtyCount,
@@ -1749,8 +1767,9 @@ async function syncOneVault(
             message:
               `You and your online copy changed the same note(s) in different ways, so Lyt ` +
               `couldn't combine them automatically: ${conflictPaths.join(", ") || "(unknown)"}. ` +
-              `Your notes are safe and unchanged — nothing was overwritten. Re-run \`lyt sync\` ` +
-              `to try again, or copy your version into another vault to keep it.`,
+              `Your notes are safe and unchanged — nothing was overwritten. Re-run ` +
+              `\`lyt sync --vault "${vault.name}" --resolve-conflict mine\`, ` +
+              `\`--resolve-conflict online\`, or \`--resolve-conflict both\`.`,
             ahead,
             behind,
             dirtyCount,
@@ -1784,7 +1803,7 @@ async function syncOneVault(
         // branch is the no-resolver / mesh-context path.
         const recipe = isMeshContextOnly
           ? `Your vault's shared settings changed here and online at the same time. Re-run \`lyt sync --resolve-mesh-context\` and Lyt will sort it out for you.`
-          : `You and your online copy changed the same note(s) in different ways, so Lyt couldn't combine them automatically: ${conflictPaths.join(", ") || "(unknown)"}. Your notes are safe and unchanged — nothing was overwritten. Re-run \`lyt sync\` to try again, or copy your version into another vault to keep it.`;
+          : `You and your online copy changed the same note(s) in different ways, so Lyt couldn't combine them automatically: ${conflictPaths.join(", ") || "(unknown)"}. Your notes are safe and unchanged — nothing was overwritten. Re-run \`lyt sync --vault "${vault.name}" --resolve-conflict mine\`, \`--resolve-conflict online\`, or \`--resolve-conflict both\`.`;
         return {
           ...base,
           status: "conflict",
@@ -1891,6 +1910,55 @@ async function syncOneVault(
         ...(syncOp !== null ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class } : {}),
       };
     }
+
+    const localHead = await runGit(["rev-parse", "HEAD"], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    const onlineHead = await runGit(
+      ["ls-remote", "--exit-code", pushTarget.url, destinationRef],
+      { cwd: vault.path, allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 1024 },
+    );
+    const localObject = parseGitObjectId(localHead.stdout);
+    const onlineObject = parseRemoteObjectId(onlineHead.stdout, destinationRef);
+    if (
+      localHead.code !== 0 ||
+      onlineHead.code !== 0 ||
+      localObject === null ||
+      onlineObject === null ||
+      localObject !== onlineObject
+    ) {
+      return {
+        ...base,
+        status: "pushed-verification-pending",
+        message:
+          `Lyt sent ${ahead} change(s), but could not yet verify that the exact online copy matches. ` +
+          `Run \`lyt sync --check --vault "${vault.name}" --json\` when online access is stable.`,
+        ahead,
+        behind,
+        dirtyCount,
+        ...(syncOp !== null ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class } : {}),
+      };
+    }
+    const trackingRef = `refs/remotes/${branchRemoteName}/${destinationRef.replace(/^refs\/heads\//, "")}`;
+    const refreshedTracking = await runGit(["update-ref", trackingRef, localObject], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    if (refreshedTracking.code !== 0) {
+      return {
+        ...base,
+        status: "error",
+        message:
+          "The exact online copy is saved, but Lyt could not refresh its local online pointer. " +
+          `Run \`lyt sync --check --vault "${vault.name}" --json\` before the next sync.`,
+        ahead,
+        behind,
+        dirtyCount,
+        errorOutput: refreshedTracking.stderr,
+        ...(syncOp !== null ? { horizon: syncOp.horizon, reversible: syncOp.inverse().class } : {}),
+      };
+    }
   }
 
   // firewall-C1 fix-pass — plain success wording (no git noun): "Brought in" for
@@ -1933,7 +2001,9 @@ async function syncOneVault(
     behind,
     dirtyCount,
     meshContextResolved,
-    ...(conflictChoice !== undefined ? { conflictResolution: conflictChoice } : {}),
+    ...(conflictChoice !== undefined
+      ? { conflictResolution: conflictChoice === "theirs" ? "online" : conflictChoice }
+      : {}),
     // Increment 1 · Phase A.4 — attach the honest horizon + reversibility class
     // when a push was attempted (ahead > 0). Read back from the SyncOperation's
     // actual push result; absent on pull-only / up-to-date / no-push syncs.

@@ -21,10 +21,9 @@ import type { Client } from "@libsql/client";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { listVaults } from "../registry/repo.js";
-import { destinationPolicyKey } from "../registry/destination-policy.js";
 import {
+  assessCanonicalOwnedVaultDestination,
   loadDestinationPolicyContext,
-  resolveCanonicalOwnedVaultDestination,
 } from "./federation/destination-policy-service.js";
 import { vaultRepoName } from "../util/federation-paths.js";
 import { isValidGhHandle } from "../util/identity.js";
@@ -119,29 +118,18 @@ export async function repairVaultOriginOwnerFlow(
 
     for (const vault of ownVaults) {
       const homeMesh = meshByRid(vault.homeMeshRid);
-      const hasCanonicalAuthority =
-        policyContext.winners.has(destinationPolicyKey("vault", vault.ridHex)) ||
-        (homeMesh !== null &&
-          policyContext.winners.has(destinationPolicyKey("mesh", homeMesh.ridHex)));
-      if (!hasCanonicalAuthority) {
-        skipped.push({ name: vault.name, reason: "missing-canonical-policy" });
-        continue;
-      }
-      const destination = resolveCanonicalOwnedVaultDestination(vault, homeMesh, policyContext);
-      if (destination.kind !== "github") continue;
-      const derivedOwner = destination.owner;
-      // C1 (release review, defense-in-depth) — `derivedOwner` (the org push_target
-      // from an [lyt.untrusted] joined mesh.yon) feeds resolveRemoteUrl → a
-      // `git remote set-url origin <url>` spawn. Refuse a non-handle owner before
-      // it can reach that spawn (parity with vault-publish.ts / mesh-join.ts).
-      if (!isValidGhHandle(derivedOwner)) {
-        skipped.push({ name: vault.name, reason: "invalid-derived-owner" });
-        continue;
-      }
-      scanned += 1;
-
       if (!existsSync(vault.path)) {
         skipped.push({ name: vault.name, reason: "vault-dir-missing" });
+        continue;
+      }
+
+      const assessment = assessCanonicalOwnedVaultDestination(vault, homeMesh, policyContext);
+      if (assessment.status === "refused") {
+        skipped.push({ name: vault.name, reason: assessment.reason });
+        continue;
+      }
+      if (assessment.destination.kind !== "github") {
+        skipped.push({ name: vault.name, reason: "missing-policy" });
         continue;
       }
 
@@ -169,9 +157,35 @@ export async function repairVaultOriginOwnerFlow(
         skipped.push({ name: vault.name, reason: "custom-remote-repo" });
         continue;
       }
+      // The fresh origin is supplied explicitly as observation for this repair
+      // caller. The authority assessment never derives policy from it.
+      const observedAssessment = assessCanonicalOwnedVaultDestination(
+        vault,
+        homeMesh,
+        policyContext,
+        currentUrl,
+      );
+      if (observedAssessment.status === "refused") {
+        skipped.push({ name: vault.name, reason: observedAssessment.reason });
+        continue;
+      }
+      if (observedAssessment.destination.kind !== "github") {
+        skipped.push({ name: vault.name, reason: "missing-policy" });
+        continue;
+      }
+      const derivedOwner = observedAssessment.destination.owner;
+      // C1 (release review, defense-in-depth) — `derivedOwner` (the org push_target
+      // from an [lyt.untrusted] joined mesh.yon) feeds resolveRemoteUrl → a
+      // `git remote set-url origin <url>` spawn. Refuse a non-handle owner before
+      // it can reach that spawn (parity with vault-publish.ts / mesh-join.ts).
+      if (!isValidGhHandle(derivedOwner)) {
+        skipped.push({ name: vault.name, reason: "invalid-derived-owner" });
+        continue;
+      }
+      scanned += 1;
       if (parsed.owner.toLowerCase() === derivedOwner.toLowerCase()) {
         // Already correct — idempotent no-op.
-        skipped.push({ name: vault.name, reason: "already-correct" });
+        skipped.push({ name: vault.name, reason: "already-correct-live-origin" });
         continue;
       }
 

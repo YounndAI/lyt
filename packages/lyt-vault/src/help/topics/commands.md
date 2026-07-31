@@ -11,20 +11,32 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   without writing (`--dry-run` is valid only with `--wizard`). See `lyt help getting-started`.
 - `lyt capture "<text>"` — save a Figment under the 8-field frontmatter contract
   and index it immediately. Mandatory `purpose` + `topic`.
-- `lyt search "<query>" [--vault <n>] [--mesh <m>] [--all] [--no-semantic] [--limit <n>] [--json]`
-  — tiered-cascade search (arcs → lanes → FTS5 → edges), confidence-ranked,
-  with optional on-device semantic fusion. Default scope is the whole pod.
+- `lyt search "<query>" [--vault <n>] [--mesh <m>] [--all] [--no-semantic] [--limit <n>] [--meaning-limit <n>] [--fields <key,...>] [--json]`
+  — tiered-cascade search (arcs → lanes → FTS5 → edges) with independent
+  direct and meaning allowances (defaults 20 + 10, maximum 30). Human and
+  machine receipts keep the settled rank while separating direct text matches
+  from metadata-only meaning candidates, which are similarity suggestions rather
+  than confirmed matches. `--fields` requests bounded extra frontmatter keys.
+  Default scope is the whole pod.
 - `lyt primer --scope vault|mesh|federation [--target <name>] [--json]` — generate
   a deterministic agent-priming digest (top keywords, active arcs, recent activity).
 - `lyt reindex [--all|--mesh <m>|--vault <n>]` — rebuild the libSQL search caches
   from the markdown source of truth. On an interactive terminal this is also where
   the optional one-time local semantic-search model is fetched (with a prompt first).
-- `lyt sync [--vault <name>] [--check] [--watch] [--no-publish] [--json] [--message <msg>]` — reconcile
+- `lyt sync [--vault <name>] [--check] [--watch] [--no-publish] [--resolve-conflict mine|online|both] [--json] [--message <msg>]` — reconcile
   every registered active vault with its remote (commit named paths, pull
   `--rebase`, push) under the writable gate, then publish Your Pod. `--check`
   reports freshness without writing. Normal scoped `--json` includes the
   scoped-publication receipt; `--no-publish` holds both scoped and pod-wide
   publication. See `lyt help sync`.
+  Summary JSON uses `dirtyVaultCount`, `aheadVaultCount`, and
+  `behindVaultCount`; each vault keeps `dirtyFileCount`, `aheadCommitCount`,
+  and `behindCommitCount` explicit. The deprecated summary fields `dirty`, `ahead`,
+  and `behind` remain as a one-release compatibility projection; per-vault compatibility
+  fields remain `dirtyCount`, `ahead`, and `behind`. A push
+  without conclusive live remote readback reports `pushed-verification-pending`.
+  Resume a preserved conflict with the same scoped command plus
+  `--resolve-conflict mine|online|both`.
 - `lyt sync --check --vault <qualified-vault> --json` — inspect exactly one
   vault without filesystem, registry, index, Git, repository, or sibling-vault
   mutation.
@@ -100,16 +112,29 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   current edge state. Idempotent.
 - `lyt vault rebuild-index <name>` — regenerate the libSQL caches for one vault
   from the markdown source of truth (`--ledger <name>` scopes to one ledger cache).
-- `lyt vault backfill <name> [--dry-run] [--push] [--json]` — fill missing
-  frontmatter across a vault's figments with deterministic defaults (real git/fs
-  dates; `purpose`/`topic` left blank + flagged; provenance-stamped). Never
-  overwrites existing values; idempotent. `--dry-run` previews (read-only, writes
-  nothing); writes locally by default, `--push` also commits + pushes. Not `lyt
-repair` (repair stays registry/mesh-only).
-- `lyt vault reconcile <name> [--apply] [--push] [--json]` — detect drift between a
-  vault's markdown on disk and its search index: figments with missing frontmatter
-  and figments not yet indexed. Detect-only by default; `--apply` backfills then
-  reindexes (local only; `--push` also commits + pushes).
+- `lyt vault files <name> [--path <subtree>] [--json]` — read-only inventory of
+  Markdown inclusion, search-index state, frontmatter mutation candidates, and
+  pending cache removals. A root `.lytignore` applies a versioned gitignore-style
+  subset (`#`, `!`, `*`, `**`, `?`, `/`); malformed or conflicting policy refuses
+  closed, and `.lyt`, `.obsidian`, and `.git` remain excluded regardless of policy.
+- `lyt vault backfill <name> [--path <subtree>] [--dry-run] [--push] [--json]` —
+  create a sealed, read-only preview of only the missing frontmatter fields that
+  would be added; authored fields and body bytes are preserved. `--dry-run` is a
+  deprecated compatibility alias for this default preview and emits a warning.
+  `--push` during preview binds the receipt but also warns that nothing has changed.
+  Apply the exact preview with
+  `--apply --receipt <uuidv7>`; non-interactive apply also requires `--yes`.
+- `lyt vault reconcile <name> [--path <subtree>] [--dry-run] [--push] [--json]` —
+  create the same sealed preview while also detecting unindexed Markdown and stale
+  FTS/dense cache rows. Apply with `--apply --receipt <uuidv7>`; non-interactive
+  apply also requires `--yes`. Receipts expire after 30 minutes, are single-use,
+  and refuse changed policy, scope, candidates, or file preimages. A failed apply
+  reports whether it refused before writing or stopped after a partial mutation.
+  A subtree receipt names its candidate scope separately from the vault-wide
+  derived-cache rebuild. Machine-field provenance is recorded in the ledger.
+  Direct `lyt automator run metadata-filler` is refused: broad writes use only this
+  sealed preview/apply rail. Not `lyt repair` (repair
+  stays registry/mesh-only). `--push` binds preview and apply to commit-and-push.
 - `lyt vault sync-metadata --vault|--vaults [--apply] [--no-confirm] [--audit-log <file>]`
   — push vault.yon metadata (description + topics) to GitHub. Dry-run is the
   default; `--apply` is required to write. See `lyt help metadata`.
@@ -132,16 +157,14 @@ See `lyt help mesh` and `lyt help federation`. In brief:
 
 - `lyt mesh init|join|list|info|subscribe|add-edge|validate|adopt|rebuild-registry`
 - `lyt mesh status|clone-all|rebuild-rollup`
-- `lyt mesh prune <name> --yes` — destructive. Remove an EMPTY / ORPHAN mesh (no
+- `lyt mesh prune <name> --yes` — destructive. Retract and remove an EMPTY / ORPHAN mesh (no
   homed vaults) from the registry — the lingering empty rows a junction-safe pod
-  cleanup leaves behind. Registry-row-only: no files or directories are touched.
-  Refuses a mesh that still has homed vaults (naming them). Prunes ONLY a pure
-  cache-orphan mesh — one with NO durable ledger backing. A mesh still backed by
-  the ledger is refused (it would reappear on the next sync/rebuild): a bucket
-  mesh (`subscriptions/…`, `shared/…`) backed by a live subscription needs its
-  source removed first (unsubscribe), and an own mesh with a live federation
-  (`@FED_MESH`) entry needs a durable ledger retraction (a mesh tombstone —
-  deferred to a later 0.12.x lane). Pruning an orphan mesh clears its `doctor`
+  cleanup leaves behind. No files or directories are touched. Refuses a mesh
+  that still has homed vaults (naming them). For an owned mesh backed by a live
+  `@FED_MESH` relationship, prune appends the durable retraction before removing
+  the registry cache row, so rebuild does not resurrect it. A bucket mesh
+  (`subscriptions/…`, `shared/…`) backed by a live subscription still requires
+  its source relationship to be removed first. Pruning clears its `doctor`
   structural-invariant warn. Prune acts on your locally-synced view; run `lyt
 sync` first for an authoritative decision (a peer's un-synced backing can
   otherwise resurrect a pruned mesh).

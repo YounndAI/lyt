@@ -355,7 +355,10 @@ export function validateFrontmatterBlock(raw: string): FrontmatterValidationErro
   const errors: FrontmatterValidationError[] = [];
   const block = extractFrontmatterBlock(raw);
   if (block === null) {
-    return [{ field: "title", message: "no frontmatter block found (missing --- delimiters)" }];
+    return FRONTMATTER_FIELDS.filter((field) => field !== "meta").map((field) => ({
+      field: field as FrontmatterField,
+      message: `missing field: ${field} (no frontmatter block found)`,
+    }));
   }
 
   // Check each field in the canonical order is present. FRONTMATTER_FIELDS is

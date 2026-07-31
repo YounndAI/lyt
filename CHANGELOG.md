@@ -7,6 +7,29 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.16] — 2026-07-31
+
+### Added
+
+- Added `lyt vault files` for read-only Markdown inclusion, index, frontmatter, and stale-cache inventory.
+- Added sealed preview/apply receipts for `lyt vault backfill` and `lyt vault reconcile`, with explicit drift refusal and partial-mutation reporting.
+- Added durable mesh and subscription retraction so a local rebuild does not resurrect a retired relationship.
+- Added independent direct-result and meaning-candidate budgets, labelled result groups, retrieval-method provenance, bounded frontmatter projection, and exact-title retrieval.
+
+### Changed
+
+- Made the untagged `latest` channel the normal install; `@alpha` remains the opt-in preview channel while Lyt retains its public-alpha maturity label.
+- Raised the default search maximum from 20 to 30: 20 lexical/structural results plus up to 10 additional meaning-only candidates.
+- Corrected the prior sparse-result behavior: 0.20.15 could run meaning retrieval silently, without a separate cap or label, when keyword results were scarce. 0.20.16 labels and bounds those candidates instead of describing meaning search as simply off.
+- Hardened scoped sync truth, resumable conflict handling, post-push readback, and first-publication planning. The `creation-plan.ts` correction is a separate creation-path change, not part of search.
+
+### Verification and known limits
+
+- The packed MCP entrypoint will be covered by release dogfood before publication, but its source-suite unit/typecheck command was not executed because this worktree's nested dependency remained stale; that dependency was not mutated inside the unbanked release tree.
+- Meaning candidates do not use an absolute score floor. Live populated-pod evidence showed relevant and irrelevant cosine scores interleaving, so the Handler-approved contract uses a bounded, separately labelled, metadata-only candidate group with a standing not-confirmed-match caveat instead of an unreliable threshold.
+- Five search follow-ups remain carried to 0.20.17: compatibility-result re-merge caveats, truthful direct-result labelling for structural rows, `meaningLimit: 0` corroboration semantics, stricter metadata-projection enforcement, and test hygiene.
+- Vault public/private transition is not part of 0.20.16 and is not claimed here. It remains deferred to 0.20.17 for a dedicated disposable-account rig and explicit Handler readback.
+
 ## [0.20.15] — 2026-07-24
 
 ### Changed

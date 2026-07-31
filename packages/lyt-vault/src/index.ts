@@ -279,6 +279,7 @@ export type {
 export {
   AGENT_MANUAL_MAX_WORDS,
   composeManagedManualMarker,
+  inspectManagedManualMarker,
   countGuidanceWords,
 } from "./flows/agent-guidance.js";
 export type { ManagedMarkerComposition } from "./flows/agent-guidance.js";
@@ -348,7 +349,10 @@ export { regenContextFlow } from "./flows/regen-context.js";
 export type { RegenContextResult } from "./flows/regen-context.js";
 export { rebuildVaultIndexFlow } from "./flows/rebuild-index.js";
 export type { RebuildIndexArgs, RebuildIndexResult } from "./flows/rebuild-index.js";
-export { migrateVaultGitignoreIndexRule, ensureSyncProvenancePendingIgnored } from "./flows/migrate-gitignore.js";
+export {
+  migrateVaultGitignoreIndexRule,
+  ensureSyncProvenancePendingIgnored,
+} from "./flows/migrate-gitignore.js";
 export type { MigrateGitignoreResult } from "./flows/migrate-gitignore.js";
 export {
   rebuildLanesFlow,
@@ -437,6 +441,7 @@ export {
   isScaffoldNote,
   toVaultRelPosix,
 } from "./flows/upsert-fts-cache.js";
+export { parseFigmentTitle } from "./util/figment-title.js";
 export type {
   UpsertFtsCacheResult,
   UpsertFtsCacheOpts,
@@ -451,8 +456,10 @@ export {
   upsertFtsDocByPath,
   countFtsDocs,
   searchFts,
+  searchTitleFts,
+  normalizeTitle,
 } from "./registry/fts-repo.js";
-export type { FtsHitRow, InsertFtsDocArgs } from "./registry/fts-repo.js";
+export type { FtsHitRow, InsertFtsDocArgs, TitleFtsHitRow } from "./registry/fts-repo.js";
 // Lane V Phase 0 (0.3) — figment_edges cache repo (parsed wikilink/embed
 // targets pulled out of the FTS body; foundation for the A5 graph arm).
 export {
@@ -746,6 +753,7 @@ export type {
 // `isPureSubscriberVault` remains exported as a (now legacy) helper.
 export {
   deriveVaultWritable,
+  deriveLocalWritable,
   deriveWriteGate,
   hasSubscriptionSignal,
   isPureSubscriberVault,
@@ -754,6 +762,7 @@ export {
 } from "./flows/writability.js";
 export type {
   WritabilityVerdict,
+  LocalWritability,
   WriteGate,
   DeriveVaultWritableOpts,
   RoleSummary,
@@ -798,6 +807,7 @@ export {
   FUSION_BLEND_MID,
   FUSION_KEEP_N_FALLBACK,
   FUSION_ADAPTIVE,
+  MEANING_CANDIDATE_CAVEAT,
 } from "./flows/search-cascade.js";
 // feat/microrag-semantic — OPTIONAL local dense-embedding retrieval arm.
 export {
@@ -1534,7 +1544,11 @@ export type { SpawnInvocation } from "./util/gh-federation.js";
 // federation flows use it internally; the meta CLI now needs it too.
 export { getHandleFromIdentity } from "./util/identity.js";
 export { validateMeshName, validateVaultName } from "./util/identity.js";
-export { getFederationRepoDir, getFederationRoot, getFederationYonPath } from "./util/federation-paths.js";
+export {
+  getFederationRepoDir,
+  getFederationRoot,
+  getFederationYonPath,
+} from "./util/federation-paths.js";
 // Brief B (§3-§6) — minimal config seam (publish/visibility/conflict
 // defaults). The full config.yon layer is deferred (flagged for oversight).
 export {
@@ -1690,6 +1704,20 @@ export type {
 // through the SAME funnel as every in-package index tier. Public-export
 // addition only: no behavior change to lyt-vault.
 export { isIndexablePath, isIndexable, walkVaultMarkdownFiles } from "./util/indexable.js";
+export type { IgnoreMatcher, IndexExclusion, IndexVerdict } from "./util/indexable.js";
+export {
+  loadLytIgnorePolicy,
+  parseLytIgnore,
+  LytIgnorePolicyError,
+  LYT_IGNORE_FILENAME,
+} from "./util/lytignore.js";
+export type { LytIgnorePolicy, LytIgnorePattern } from "./util/lytignore.js";
+export { inventoryVaultFiles, normalizeVaultSubtree } from "./flows/vault-files.js";
+export type {
+  VaultFileClassification,
+  VaultFileInventoryEntry,
+  VaultFilesInventory,
+} from "./flows/vault-files.js";
 
 export { renderVaultYon } from "./yon/vault.js";
 export type { VaultDoc, VaultRecord, VaultHomeMeshRecord } from "./yon/vault.js";
@@ -1745,7 +1773,12 @@ export {
   foldSyncObserved,
   readAllSyncObservedRecords,
 } from "./yon/machine-ledger.js";
-export type { MachineLedgerRecord, PublishedMachineSnapshot, RegisterCurrentMachineArgs, SyncObservedRecord } from "./yon/machine-ledger.js";
+export type {
+  MachineLedgerRecord,
+  PublishedMachineSnapshot,
+  RegisterCurrentMachineArgs,
+  SyncObservedRecord,
+} from "./yon/machine-ledger.js";
 export {
   appendSubscriptionRecord,
   appendSubscriptionActive,
@@ -1760,6 +1793,7 @@ export type {
 export {
   foldSubscriptions,
   liveSubscriptions,
+  observedMaxSubscriptionHlc,
   readAllSubscriptionRecords,
   listSubscriptionShards,
 } from "./yon/subscription-ledger-read.js";

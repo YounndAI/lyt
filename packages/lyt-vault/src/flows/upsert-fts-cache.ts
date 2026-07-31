@@ -48,6 +48,7 @@ import { posix, relative, sep } from "node:path";
 import type { Client } from "@libsql/client";
 
 import { isIndexable, walkVaultMarkdownFiles } from "../util/indexable.js";
+import { parseFigmentTitle } from "../util/figment-title.js";
 import { closeVaultDb, openLytDb } from "../registry/vault-db.js";
 import { deleteAllFts, insertFtsDoc } from "../registry/fts-repo.js";
 import {
@@ -132,8 +133,9 @@ export async function upsertFtsCache(
       // Lane V 0.3 hygiene: strip frontmatter + code fences, and pull
       // [[wikilink]] targets out of the FTS body (recorded as edges instead).
       const { body, links } = extractFtsBody(content);
+      const title = parseFigmentTitle(content);
       const relPath = toVaultRelPosix(abs, vaultPath);
-      await insertFtsDoc(db, { figmentPath: relPath, body });
+      await insertFtsDoc(db, { figmentPath: relPath, body, title });
       if (opts.ftsOnly !== true) {
         // Lane V 0.4 temporal truth: index the figment's frontmatter authored time.
         const { createdIso, modifiedIso } = parseFigmentDates(content);

@@ -38,13 +38,49 @@ lyt reindex --all              # the whole pod
 A human `lyt search` self-heals: on zero results it reindexes any stale in-scope
 vault (content edited outside Lyt) and re-queries before reporting "no matches".
 
-## Semantic search isn't kicking in
+## Meaning search did not run
 
-Semantic search needs its one-time local embedding model. It is only downloaded
+Meaning search needs its one-time local embedding model. It is only downloaded
 on an interactive terminal, with a prompt — run `lyt reindex` and accept. In
-non-interactive, scripted, or MCP contexts Lyt never downloads it and uses lexical
-search. Disable semantic fusion entirely with `LYT_EMBEDDINGS=0` or
-`lyt search --no-semantic`.
+non-interactive, scripted, or MCP contexts Lyt never downloads it and reports
+direct text matches only. When available, meaning-only candidates appear in a
+separate labelled block, carry a similarity caveat, and have their own bounded
+allowance (`--meaning-limit`, default 10). Disable meaning fusion entirely with
+`LYT_EMBEDDINGS=0` or `lyt search --no-semantic`.
+
+## Backfill or reconcile needs a receipt
+
+Both verbs are read-only previews by default. Run the preview first, then apply
+only those sealed candidates with its exact Receipt V1 identifier:
+
+```bash
+lyt vault backfill <name> --json
+lyt vault backfill <name> --apply --receipt <id> --yes --json
+```
+
+The same rail applies to `lyt vault reconcile`. Receipts expire after 30 minutes,
+are single-use, and refuse policy, scope, candidate, or file drift. Run a new
+preview instead of bypassing a refusal. Use `lyt vault files <name>` to inspect
+inclusion, index state, missing frontmatter, and pending cache removals without
+mutation.
+
+## Sync preserved a conflict or could not verify the push
+
+A scoped conflict keeps both sides and returns one resumable next action. Resume
+the same vault explicitly:
+
+```bash
+lyt sync --vault <qualified-vault> --resolve-conflict mine|online|both --json
+```
+
+Summary counts are vault counts: `dirtyVaultCount`, `aheadVaultCount`, and
+`behindVaultCount`. Per-vault rows use file or commit counts:
+`dirtyFileCount`, `aheadCommitCount`, and `behindCommitCount`. The old summary
+fields `dirty`, `ahead`, and `behind` remain as a one-release compatibility projection;
+per-vault compatibility fields remain `dirtyCount`, `ahead`, and `behind`. If a push succeeded but
+live remote equality could not be confirmed, Lyt reports
+`pushed-verification-pending` rather than claiming success or failure; run the
+returned scoped check action when remote observation is available.
 
 ## `lyt vault verify` says my vault is `missing`
 

@@ -22,7 +22,6 @@ import { getVaultByRid, listVaults, type VaultRow, type VaultSource } from "../.
 import {
   MINIMUM_DESTINATION_POLICY_WRITER_VERSION,
   destinationPolicyKey,
-  resolveEffectiveOwnedDestination,
   resolveEffectiveOwnedMeshDestination,
   type DestinationPolicyRecordV1,
   type DestinationPolicyState,
@@ -50,9 +49,12 @@ import {
   type DestinationPolicyLockLease,
 } from "./destination-policy-lock.js";
 import { uuid7BytesToHex } from "../../util/uuid7.js";
+import { vaultRepoName } from "../../util/federation-paths.js";
+import { isValidGhHandle } from "../../util/identity.js";
 
 export interface DestinationPolicyContext {
   podRid: string | null;
+  podIdentityStatus?: "resolved" | "missing" | "ambiguous";
   podRoot?: string;
   winners: ReadonlyMap<string, DestinationPolicyRecordV1>;
 }
@@ -72,6 +74,18 @@ export interface CanonicalVaultPublicationAuthority {
   guardedSubjects: readonly DestinationPolicySubjectRef[];
 }
 
+export type CanonicalVaultDestinationAssessment =
+  | Readonly<{
+      status: "resolved";
+      destination: EffectiveOwnedDestination;
+      source: "vault-policy" | "mesh-policy";
+    }>
+  | Readonly<{
+      status: "refused";
+      reason: "missing-policy" | "contradictory-policy" | "ambiguous-authority";
+      policySource: string | null;
+    }>;
+
 export interface LoadDestinationPolicyContextOptions {
   podRid?: string;
   podRoot?: string;
@@ -82,9 +96,16 @@ export async function loadDestinationPolicyContext(
   options: LoadDestinationPolicyContextOptions = {},
 ): Promise<DestinationPolicyContext> {
   let podRid = options.podRid ?? null;
+  let podIdentityStatus: "resolved" | "missing" | "ambiguous" =
+    options.podRid === undefined ? "missing" : "resolved";
   if (podRid === null) {
     const states = await listFederationStates(db);
-    if (states.length === 1) podRid = states[0]!.fedRidHex;
+    if (states.length === 1) {
+      podRid = states[0]!.fedRidHex;
+      podIdentityStatus = "resolved";
+    } else if (states.length > 1) {
+      podIdentityStatus = "ambiguous";
+    }
   }
   const winners =
     podRid === null
@@ -92,6 +113,7 @@ export async function loadDestinationPolicyContext(
       : readVerifiedDestinationPolicyWinners(podRid, options.podRoot);
   return {
     podRid,
+    podIdentityStatus,
     ...(options.podRoot === undefined ? {} : { podRoot: options.podRoot }),
     winners,
   };
@@ -103,19 +125,22 @@ export function resolveCanonicalOwnedVaultDestination(
   mesh: MeshRow | null | undefined,
   context: DestinationPolicyContext,
 ): EffectiveOwnedDestination {
-  return (
-    resolveCanonicalOwnedVaultPublicationAuthority(vault, mesh, context)?.destination ??
-    resolveCanonicalOwnedVaultNonGithubDestination(vault, mesh, context)
-  );
+  const assessment = assessCanonicalOwnedVaultDestination(vault, mesh, context);
+  return assessment.status === "resolved"
+    ? assessment.destination
+    : { kind: "unconfigured", reason: "missing-policy" };
 }
 
 /** Resolve the canonical coordinate plus the epoch/subjects that authorize it. */
 export function resolveCanonicalOwnedVaultPublicationAuthority(
   vault: VaultRow,
-  _mesh: MeshRow | null | undefined,
+  mesh: MeshRow | null | undefined,
   context: DestinationPolicyContext,
 ): CanonicalVaultPublicationAuthority | null {
   if (vault.source !== "own") return null;
+
+  const assessment = assessCanonicalOwnedVaultDestination(vault, mesh, context);
+  if (assessment.status !== "resolved" || assessment.source !== "vault-policy") return null;
 
   const vaultWinner = context.winners.get(destinationPolicyKey("vault", vault.ridHex));
   if (vaultWinner !== undefined) {
@@ -135,25 +160,103 @@ export function resolveCanonicalOwnedVaultPublicationAuthority(
   return null;
 }
 
-function resolveCanonicalOwnedVaultNonGithubDestination(
+/**
+ * Resolve repair/presentation authority without allowing a stale registry
+ * projection or a poisoned vault override to outrank conservative home-mesh
+ * owner evidence. A repair caller may supply a fresh live origin for its own
+ * operational comparison, but that observed effect is never policy authority.
+ */
+export function assessCanonicalOwnedVaultDestination(
   vault: VaultRow,
   mesh: MeshRow | null | undefined,
   context: DestinationPolicyContext,
-): EffectiveOwnedDestination {
-  if (vault.source !== "own") return { kind: "unconfigured", reason: "foreign" };
+  _observedOriginUrl: string | null = null,
+): CanonicalVaultDestinationAssessment {
+  const podIdentityStatus =
+    context.podIdentityStatus ?? (context.podRid === null ? "missing" : "resolved");
+  if (podIdentityStatus === "ambiguous") {
+    return Object.freeze({
+      status: "refused",
+      reason: "ambiguous-authority",
+      policySource: null,
+    });
+  }
+  if (vault.source !== "own") {
+    return Object.freeze({ status: "refused", reason: "missing-policy", policySource: null });
+  }
+
   const vaultWinner = context.winners.get(destinationPolicyKey("vault", vault.ridHex));
+  const vaultDestination =
+    vaultWinner?.state === "active" ? effectiveRecord(vaultWinner) : null;
+  if (vaultDestination !== null && vaultDestination.kind === "unconfigured") {
+    return Object.freeze({
+      status: "refused",
+      reason: "ambiguous-authority",
+      policySource: vaultWinner?.source ?? null,
+    });
+  }
+
+  const meshDestination = resolveCanonicalOwnedMeshDestination(mesh, context);
+  const meshOwnerEvidence = resolveMeshOwnerEvidence(mesh, context);
+  const repositoryName = vaultRepoName(vault.name);
+
+  if (vaultDestination?.kind === "github") {
+    if (mesh === null || mesh === undefined || meshOwnerEvidence === null) {
+      return Object.freeze({
+        status: "refused",
+        reason: "ambiguous-authority",
+        policySource: vaultDestination.source,
+      });
+    }
+    if (vaultDestination.owner.toLowerCase() !== meshOwnerEvidence.toLowerCase()) {
+      return Object.freeze({
+        status: "refused",
+        reason: "contradictory-policy",
+        policySource: vaultDestination.source,
+      });
+    }
+    return Object.freeze({
+      status: "resolved",
+      destination: vaultDestination,
+      source: "vault-policy",
+    });
+  }
+  if (vaultDestination?.kind === "local") {
+    return Object.freeze({
+      status: "resolved",
+      destination: vaultDestination,
+      source: "vault-policy",
+    });
+  }
   if (vaultWinner !== undefined) {
-    return vaultWinner.state === "active"
-      ? effectiveRecord(vaultWinner)
-      : { kind: "unconfigured", reason: "missing-policy" };
+    return Object.freeze({
+      status: "refused",
+      reason: "missing-policy",
+      policySource: vaultWinner.source,
+    });
   }
-  if (vault.destinationSource === "vault-override") {
-    return resolveEffectiveOwnedDestination(vault, undefined);
+  if (mesh === null || mesh === undefined || mesh.ownCreated !== true) {
+    return Object.freeze({
+      status: "refused",
+      reason: "ambiguous-authority",
+      policySource: null,
+    });
   }
-  if (vault.destinationSource === "legacy-derived") {
-    return { kind: "unconfigured", reason: "quarantined-policy" };
+  if (meshDestination.kind === "github" || meshDestination.kind === "local") {
+    return Object.freeze({
+      status: "resolved",
+      destination:
+        meshDestination.kind === "github"
+          ? { ...meshDestination, repositoryName }
+          : meshDestination,
+      source: "mesh-policy",
+    });
   }
-  return resolveCanonicalOwnedMeshDestination(mesh, context);
+  return Object.freeze({
+    status: "refused",
+    reason: "missing-policy",
+    policySource: null,
+  });
 }
 
 export function resolveCanonicalOwnedMeshDestination(
@@ -168,6 +271,28 @@ export function resolveCanonicalOwnedMeshDestination(
       : { kind: "unconfigured", reason: "missing-policy" };
   }
   return resolveEffectiveOwnedMeshDestination(mesh);
+}
+
+/**
+ * Compatibility mesh fields are conservative conflict evidence only. They may
+ * veto a conflicting exact vault winner but never authorize publication or
+ * promote an unowned mesh by themselves.
+ */
+function resolveMeshOwnerEvidence(
+  mesh: MeshRow | null | undefined,
+  context: DestinationPolicyContext,
+): string | null {
+  if (mesh === null || mesh === undefined) return null;
+  const winner = context.winners.get(destinationPolicyKey("mesh", mesh.ridHex));
+  if (winner?.state === "active") {
+    const effective = effectiveRecord(winner);
+    if (effective.kind === "github") return effective.owner;
+  }
+  const projectedOwner = mesh.destinationTarget;
+  if (typeof projectedOwner === "string" && isValidGhHandle(projectedOwner)) return projectedOwner;
+  return typeof mesh.pushTarget === "string" && isValidGhHandle(mesh.pushTarget)
+    ? mesh.pushTarget
+    : null;
 }
 
 export interface SetCanonicalDestinationPolicyArgs extends DestinationPolicyValue {

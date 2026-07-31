@@ -16,11 +16,11 @@
   <a href="https://linkyourthink.com">Website</a> · <a href="https://github.com/YounndAI/lyt">Repository</a> · <a href="./LICENSE">Apache 2.0</a> · <a href="https://github.com/YounndAI/lyt/blob/main/TRADEMARK.md">Trademark Policy</a> · <a href="https://github.com/YounndAI/lyt/blob/main/CONTRIBUTING.md">Contributing</a>
 </p>
 
-[![npm](https://img.shields.io/npm/v/@younndai/lyt/alpha)](https://www.npmjs.com/package/@younndai/lyt)
+[![npm](https://img.shields.io/npm/v/@younndai/lyt)](https://www.npmjs.com/package/@younndai/lyt)
 [![license](https://img.shields.io/npm/l/@younndai/lyt)](./LICENSE)
 [![status](https://img.shields.io/badge/status-public%20alpha-orange)](https://github.com/YounndAI/lyt#status)
 
-> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. Install only via the `alpha` dist-tag. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
+> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but surfaces change between releases and docs are still growing. The normal install follows `latest`; `@alpha` is the opt-in preview channel. Your vaults are plain markdown in plain git repos — your data is never locked in, and Lyt never phones home.
 
 ## What is this?
 
@@ -35,11 +35,11 @@ Installing this one package pulls in the whole core toolchain and ships the sing
 ## Install
 
 ```bash
-npm install -g @younndai/lyt@alpha
+npm install -g @younndai/lyt
 lyt init                       # interactive setup wizard
 ```
 
-The `alpha` tag is the recommended channel while compatibility testing continues.
+The untagged install follows the tested `latest` channel. To evaluate a preview candidate instead, install `@younndai/lyt@alpha` explicitly.
 
 ## Quick start
 
@@ -47,7 +47,7 @@ The `alpha` tag is the recommended channel while compatibility testing continues
 lyt init                       # create or adopt your first vault
 lyt mesh init research --target github:org/YounndAI # name and owner are independent
 lyt capture "an idea worth keeping"
-lyt search "idea"              # full-text across your pod
+lyt search "idea"              # labelled direct + meaning retrieval across your pod
 lyt sync --vault personal/main # publish only this vault when ready
 lyt sync --check --vault personal/main --json # exact one-vault, zero-mutation check
 lyt mesh status                # the federation graph
@@ -86,12 +86,16 @@ Every note carries an 8-field frontmatter contract — title, real dates, tags, 
 
 ```bash
 lyt capture "an idea" --dir projects/notes   # choose where it lands; sets a topic interactively
-lyt vault backfill <name>                     # fill missing frontmatter on an existing vault, in place
-lyt vault reconcile <name> --apply            # heal notes that are unindexed or missing metadata
+lyt vault files <name>                         # explain inclusion, index, and frontmatter state
+lyt vault backfill <name>                      # sealed read-only preview of missing frontmatter
+lyt vault backfill <name> --apply --receipt <id> # apply only that exact preview
+lyt vault reconcile <name>                     # preview metadata and index/cache reconciliation
 lyt doctor                                    # count notes with missing or invalid frontmatter
 ```
 
-Backfill fills titles, genuine created/modified dates (from git history), and keyword tags **with no model required** — on any vault, including one you just imported. `purpose` is left blank and flagged, never guessed; anything you authored is never overwritten. When a local embedding model is present, `topic:` is enriched too — capture _suggests_ one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure. Topics are ranked against your vault's current on-disk labels and computed on-device — nothing is sent anywhere. Every machine-filled field is provenance-stamped, so it stays distinguishable from your own writing.
+Backfill fills titles, genuine created/modified dates (from git history), and keyword tags **with no model required** — on any vault, including one you just imported. `purpose` is left blank and flagged, never guessed; anything you authored is preserved byte-for-byte. The deprecated `--dry-run` spelling warns because preview is already the default, and preview-time `--push` warns that it only binds the future apply. Direct `lyt automator run metadata-filler` is refused so every broad write passes through the sealed receipt rail. When a local embedding model is present, `topic:` is enriched too — capture _suggests_ one for you to confirm (never auto-selected), and backfill assigns a confident match from your vault's existing labels, leaving it blank when unsure. Topics are ranked against your vault's current on-disk labels and computed on-device — nothing is sent anywhere. Machine-filled field provenance is recorded in the ledger.
+
+Backfill and reconcile are sealed preview/apply workflows: previews are read-only, and mutation requires the exact `--receipt <id>` (`--yes` is also required outside an interactive terminal). Receipts expire after 30 minutes, cannot be reused, and refuse policy, scope, candidate, or file drift. A root `.lytignore` controls content admission for inventory and search caches; malformed or conflicting policy refuses closed, and Lyt's own `.lyt`, `.obsidian`, and `.git` exclusions cannot be overridden.
 
 ## The Lyt toolchain
 

@@ -43,6 +43,7 @@ import {
 } from "@younndai/lyt-vault";
 
 import { resolveAutomatorBody, type AutomatorBodyFn } from "./automator-bodies/index.js";
+import type { MetadataFillerScope } from "./automator-bodies/metadata-filler.js";
 
 export interface RunAutomatorArgs {
   // Automator name (e.g. "metadata-filler") OR its full rid
@@ -55,6 +56,8 @@ export interface RunAutomatorArgs {
   vaultPathOverride?: string;
   dryRun?: boolean;
   noPush?: boolean;
+  skipSync?: boolean;
+  metadataFillerScope?: MetadataFillerScope;
   // Test seam — override machineId for deterministic assertions. Production
   // callers omit; the runtime uses the canonical per-installation machine id.
   machineId?: string;
@@ -92,6 +95,11 @@ export async function runAutomator(args: RunAutomatorArgs): Promise<RunAutomator
     ...(args.vaultPathOverride !== undefined ? { vaultPathOverride: args.vaultPathOverride } : {}),
   });
   try {
+    if (plan.automatorName === "metadata-filler" && args.metadataFillerScope === undefined) {
+      throw new Error(
+        "metadata-filler requires a sealed preview scope; use 'lyt vault backfill' or 'lyt vault reconcile'",
+      );
+    }
     const body = resolveAutomatorBody(plan.automatorName);
     if (body === null) {
       throw new Error(
@@ -134,9 +142,13 @@ export async function runAutomator(args: RunAutomatorArgs): Promise<RunAutomator
             auditDb: plan.auditDb,
             provenanceDb: plan.provenanceDb,
           },
+          ...(args.metadataFillerScope !== undefined
+            ? { metadataFillerScope: args.metadataFillerScope }
+            : {}),
         }),
       ...(args.dryRun === true ? { dryRun: true } : {}),
       ...(args.noPush === true ? { noPush: true } : {}),
+      ...(args.skipSync === true ? { skipSync: true } : {}),
     });
 
     // cli.invoked event is logged AFTER runFiveStep returns so the

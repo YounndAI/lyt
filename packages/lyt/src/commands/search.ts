@@ -47,6 +47,7 @@ import { Command } from "commander";
 import {
   closeRegistry,
   markAsked,
+  MEANING_CANDIDATE_CAVEAT,
   openRegistry,
   searchCascadeFlow,
   withSpinner,
@@ -60,6 +61,8 @@ interface SearchCliOpts {
   mesh?: string;
   all?: boolean;
   limit?: string;
+  meaningLimit?: string;
+  fields?: string;
   json?: boolean;
   // commander negatable flag: `selfHeal` defaults true; `--no-self-heal` → false.
   selfHeal?: boolean;
@@ -71,6 +74,7 @@ interface SearchCliOpts {
 }
 
 const DEFAULT_LIMIT = 20;
+const DEFAULT_MEANING_LIMIT = 10;
 const MAX_LIMIT = 1000;
 
 export function buildSearchCommand(): Command {
@@ -82,7 +86,18 @@ export function buildSearchCommand(): Command {
     .option("--vault <name>", "Search only the named vault (skips Tier 3)")
     .option("--mesh <name>", "Search only vaults home-to OR referenced-by the named mesh")
     .option("--all", "Explicit alias for federation scope (default behavior)")
-    .option("--limit <n>", `Max results (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`)
+    .option(
+      "--limit <n>",
+      `Lexical/structural result allowance (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`,
+    )
+    .option(
+      "--meaning-limit <n>",
+      `Additional dense-only result allowance (default ${DEFAULT_MEANING_LIMIT}, max ${MAX_LIMIT}; 0 keeps reranking but adds no meaning-only hits)`,
+    )
+    .option(
+      "--fields <list>",
+      "Comma-separated additional frontmatter fields to project, for example meta.lifecycle",
+    )
     .option("--json", "Emit deterministic JSON instead of human-readable lines")
     .option(
       "--no-self-heal",
@@ -135,6 +150,34 @@ export function buildSearchCommand(): Command {
         }
         limit = Math.min(parsed, MAX_LIMIT);
       }
+      let meaningLimit = DEFAULT_MEANING_LIMIT;
+      if (opts.meaningLimit !== undefined) {
+        const parsed = Number.parseInt(opts.meaningLimit, 10);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          emitError(opts.json === true, {
+            error: "invalid-meaning-limit",
+            value: opts.meaningLimit,
+            message: `--meaning-limit must be a non-negative integer (got: ${JSON.stringify(opts.meaningLimit)}).`,
+          });
+          process.exitCode = 1;
+          return;
+        }
+        meaningLimit = Math.min(parsed, MAX_LIMIT);
+      }
+      const fields = (opts.fields ?? "")
+        .split(",")
+        .map((field) => field.trim())
+        .filter(Boolean);
+      if (fields.some((field) => !/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/.test(field))) {
+        emitError(opts.json === true, {
+          error: "invalid-fields",
+          value: opts.fields,
+          message:
+            "--fields accepts comma-separated frontmatter keys with optional dotted segments.",
+        });
+        process.exitCode = 1;
+        return;
+      }
 
       // Scope resolution.
       let scope: SearchCascadeScope;
@@ -162,6 +205,9 @@ export function buildSearchCommand(): Command {
           query: trimmed,
           scope,
           limit,
+          meaningLimit,
+          ...(opts.limit !== undefined ? { totalLimit: limit } : {}),
+          ...(fields.length > 0 ? { fields } : {}),
           // Phase D Slice 2b — the `lyt search` CLI is the discovery-nudge
           // surface: turn the nudge ON for BOTH human and --json runs (the flow
           // increments the pod-global cadence counter + computes trace.nudge).
@@ -245,7 +291,31 @@ export const NUDGE_AMBIENT_HINT =
   "tip: concept search can find this by meaning, not just keywords — set it up " +
   "once with 'lyt model fetch' (one-time local, nothing leaves your machine).";
 
+function partitionResults(res: SearchCascadeResult): {
+  directTextMatches: SearchCascadeResult["results"];
+  meaningCandidates: SearchCascadeResult["results"];
+} {
+  return {
+    directTextMatches: res.results.filter((result) => result.foundBy.includes("keyword")),
+    meaningCandidates: res.results.filter(
+      (result) => !result.foundBy.includes("keyword") && result.foundBy.includes("meaning"),
+    ),
+  };
+}
+
 export function emitJsonResult(res: SearchCascadeResult): void {
+  const projectResult = (r: SearchCascadeResult["results"][number]) => ({
+    confidence: r.confidence,
+    tier: r.tier,
+    foundBy: r.foundBy,
+    ...(r.blendedScore !== undefined ? { blendedScore: r.blendedScore } : {}),
+    vault_name: r.vault_name,
+    mesh_name: r.mesh_name,
+    figment_path: r.figment_path,
+    snippet: r.snippet,
+    ...(r.metadata !== undefined ? { metadata: r.metadata } : {}),
+  });
+  const { directTextMatches, meaningCandidates } = partitionResults(res);
   // Stable-key-ordered output per Lock 0.3 — Object construction order
   // determines JSON.stringify key order in Node.
   const stable = {
@@ -253,15 +323,17 @@ export function emitJsonResult(res: SearchCascadeResult): void {
     scope: res.scope,
     scopeTarget: res.scopeTarget,
     limit: res.limit,
-    results: res.results.map((r) => ({
-      confidence: r.confidence,
-      tier: r.tier,
-      ...(r.blendedScore !== undefined ? { blendedScore: r.blendedScore } : {}),
-      vault_name: r.vault_name,
-      mesh_name: r.mesh_name,
-      figment_path: r.figment_path,
-      snippet: r.snippet,
-    })),
+    lexicalLimit: res.lexicalLimit,
+    meaningLimit: res.meaningLimit,
+    maxResults: res.maxResults,
+    groups: {
+      directTextMatches: directTextMatches.map(projectResult),
+      meaningCandidates: meaningCandidates.map(projectResult),
+      meaningCaveat: MEANING_CANDIDATE_CAVEAT,
+    },
+    // Compatibility projection for existing JSON consumers. New agents consume
+    // `groups`; the fused list remains available during the contract transition.
+    results: res.results.map(projectResult),
     trace: {
       tiersRun: res.trace.tiersRun,
       perTierHitCount: res.trace.perTierHitCount,
@@ -303,14 +375,37 @@ export function emitHumanResult(res: SearchCascadeResult): void {
   }
   // eslint-disable-next-line no-console
   console.log(
-    `${res.results.length} match(es) for ${JSON.stringify(res.query)} (scope=${res.scope}, ${res.durationMs}ms):`,
+    `${res.results.length} match(es) for ${JSON.stringify(res.query)} (scope=${res.scope}, bound=${res.lexicalLimit}+${res.meaningLimit}=${res.maxResults}, ${res.durationMs}ms):`,
   );
-  for (const r of res.results) {
+  const { directTextMatches, meaningCandidates } = partitionResults(res);
+  // eslint-disable-next-line no-console
+  console.log(`Direct text matches (${directTextMatches.length}):`);
+  for (const r of directTextMatches) {
     // eslint-disable-next-line no-console
-    console.log(` [${r.tier}.${r.confidence.toFixed(2)}] ${r.vault_name}/${r.figment_path}`);
+    console.log(
+      ` [${r.foundBy.join("+")} · ${r.tier}.${r.confidence.toFixed(2)}] ${r.vault_name}/${r.figment_path}`,
+    );
+    if (r.metadata !== undefined) {
+      // eslint-disable-next-line no-console
+      console.log(`         metadata=${JSON.stringify(r.metadata)}`);
+    }
     if (r.snippet.length > 0) {
       // eslint-disable-next-line no-console
       console.log(`         ${r.snippet}`);
+    }
+  }
+  // eslint-disable-next-line no-console
+  console.log(`Meaning candidates (${meaningCandidates.length}):`);
+  // eslint-disable-next-line no-console
+  console.log(` ${MEANING_CANDIDATE_CAVEAT}`);
+  for (const r of meaningCandidates) {
+    // eslint-disable-next-line no-console
+    console.log(
+      ` [${r.foundBy.join("+")} · ${r.tier}.${r.confidence.toFixed(2)}] ${r.vault_name}/${r.figment_path}`,
+    );
+    if (r.metadata !== undefined) {
+      // eslint-disable-next-line no-console
+      console.log(`         metadata=${JSON.stringify(r.metadata)}`);
     }
   }
   maybeEmitNudgeHint(res);

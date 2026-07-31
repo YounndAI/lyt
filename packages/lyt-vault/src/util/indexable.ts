@@ -23,7 +23,7 @@
 // …) was completely unsearchable. `notes/` was a write-router conflated with a
 // read-filter. B-4 decouples the two: `notes/` stays a capture write-default
 // only; the indexer scans ALL markdown under the vault root EXCEPT a system
-// floor, via this one predicate.
+// floor plus the user-owned `.lytignore` policy, via this one predicate.
 //
 // `isIndexable` is the documented SUPERSET of the Phase-0 walker-semantics audit
 // (2026-06-24-result-b4-phase0-seam-audit.md §2). The audit found the pre-B-4
@@ -48,10 +48,16 @@
 // no writable/subscriber gate; before it is wired to live on-sync events, add one
 // so a whole-vault walk cannot rewrite a shared/subscribed vault's files.
 
-import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readdirSync, readSync } from "node:fs";
 import { join } from "node:path";
 
 import { isScaffoldNote } from "../flows/upsert-fts-cache.js";
+import {
+  loadLytIgnorePolicy,
+  type IgnoreMatcher,
+} from "./lytignore.js";
+
+export type { IgnoreMatcher } from "./lytignore.js";
 
 // ---------------------------------------------------------------------------
 // The immutable system floor (g2). Directory names whose subtree is NEVER
@@ -75,12 +81,18 @@ export const BINARY_SNIFF_BYTES = 8192;
 // pre-B-4 walkers (which matched `.md` only) — named explicitly in the plan.
 const INDEXABLE_EXTENSIONS: readonly string[] = [".md", ".markdown"];
 
-// Optional ignore-matcher hook (g5). INERT this lane — wired as a no-op so the
-// future `.lytignore` fast-follow is a one-line activation. When supplied, a
-// `true` return excludes the path (after the floor, which always wins).
-export type IgnoreMatcher = (relPath: string) => boolean;
+export type IndexExclusion =
+  | "ignored"
+  | "system-floor"
+  | "scaffold"
+  | "oversize"
+  | "binary"
+  | "unreadable"
+  | "not-markdown";
 
-export type IndexVerdict = { include: true } | { include: false; reason: string };
+export type IndexVerdict =
+  | { include: true }
+  | { include: false; category: IndexExclusion; reason: string };
 
 // Normalize a vault-relative path to lowercase POSIX segments for case- and
 // separator-insensitive matching (Windows `\`, mixed case).
@@ -108,21 +120,18 @@ function isUnderFloor(segments: readonly string[]): boolean {
 }
 
 // g4 — binary sniff: scan the first BINARY_SNIFF_BYTES for a NUL byte.
-function looksBinary(absPath: string): boolean {
+function sniffBinary(absPath: string): "binary" | "text" | "unreadable" {
   let fd: number | null = null;
   try {
     fd = openSync(absPath, "r");
     const buf = Buffer.alloc(BINARY_SNIFF_BYTES);
     const bytesRead = readSync(fd, buf, 0, BINARY_SNIFF_BYTES, 0);
     for (let i = 0; i < bytesRead; i++) {
-      if (buf[i] === 0) return true;
+      if (buf[i] === 0) return "binary";
     }
-    return false;
+    return "text";
   } catch {
-    // Unreadable → treat as non-binary here; the walker's own statSync/read
-    // guards drop genuinely unreadable files. (A skip with no signal is worse
-    // than letting the downstream read fail-soft.)
-    return false;
+    return "unreadable";
   } finally {
     if (fd !== null) {
       try {
@@ -202,49 +211,72 @@ export function isIndexable(
 
   // g1 — extension
   if (!hasIndexableExtension(relPath)) {
-    return { include: false, reason: `not a markdown file: ${relPath}` };
+    return { include: false, category: "not-markdown", reason: `not a markdown file: ${relPath}` };
   }
   // g2 — immutable floor (wins over g5)
   if (isUnderFloor(segments)) {
-    return { include: false, reason: `under system floor: ${relPath}` };
+    return { include: false, category: "system-floor", reason: `under system floor: ${relPath}` };
   }
   // scaffold gate (named, load-bearing FTS-noise exclusion — preserved from the
   // pre-B-4 FTS/doctor/reconcile walkers, now applied UNIFORMLY to all READ tiers;
   // Phase A: extended to also exclude README.md by basename — see isScaffoldNote)
   if (isScaffoldNote(relPath)) {
-    return { include: false, reason: `scaffold file (index.md / README.md): ${relPath}` };
+    return {
+      include: false,
+      category: "scaffold",
+      reason: `scaffold file (index.md / README.md): ${relPath}`,
+    };
   }
-  // g5 — optional ignore matcher (INERT this lane)
+  // g5 — user-owned vault-root `.lytignore` matcher. The immutable floor above
+  // wins first, so a negated pattern can never re-enable system paths.
   if (ignoreMatcher !== undefined && ignoreMatcher(relPath)) {
-    return { include: false, reason: `ignored by matcher: ${relPath}` };
+    return { include: false, category: "ignored", reason: `ignored by .lytignore: ${relPath}` };
   }
 
   // Content gates only when we can resolve the absolute file.
   if (vaultRoot !== undefined) {
     const abs = join(vaultRoot, relPath);
-    let sizeBytes: number;
+    let stat: ReturnType<typeof lstatSync>;
     try {
-      sizeBytes = statSync(abs).size;
+      stat = lstatSync(abs);
     } catch {
-      // Can't stat → let the walker's own guards decide; path gates passed.
-      return { include: true };
+      return { include: false, category: "unreadable", reason: `unreadable: ${relPath}` };
+    }
+    if (stat.isSymbolicLink()) {
+      return { include: false, category: "unreadable", reason: `reparse-point: ${relPath}` };
+    }
+    if (!stat.isFile()) {
+      return { include: false, category: "unreadable", reason: `not a regular file: ${relPath}` };
     }
     // g3 — size cap
-    if (sizeBytes > MAX_INDEXABLE_BYTES) {
+    if (stat.size > MAX_INDEXABLE_BYTES) {
       return {
         include: false,
-        reason: `exceeds size cap (${sizeBytes} > ${MAX_INDEXABLE_BYTES} bytes): ${relPath}`,
+        category: "oversize",
+        reason: `exceeds size cap (${stat.size} > ${MAX_INDEXABLE_BYTES} bytes): ${relPath}`,
       };
     }
     // g4 — binary sniff
-    if (looksBinary(abs)) {
-      return { include: false, reason: `binary content (NUL byte in first 8KB): ${relPath}` };
+    const sniff = sniffBinary(abs);
+    if (sniff === "binary") {
+      return {
+        include: false,
+        category: "binary",
+        reason: `binary content (NUL byte in first 8KB): ${relPath}`,
+      };
+    }
+    if (sniff === "unreadable") {
+      return { include: false, category: "unreadable", reason: `unreadable: ${relPath}` };
     }
     // g6 — lyt-scaffold sentinel (Phase A). A Figment with `lyt-scaffold: true`
     // in its frontmatter is a LYT-authored seed Figment and MUST NOT be indexed.
     // Content gate: only reachable when we have the file on disk (vaultRoot supplied).
     if (hasScaffoldSentinel(abs)) {
-      return { include: false, reason: `lyt-scaffold sentinel (excluded from index): ${relPath}` };
+      return {
+        include: false,
+        category: "scaffold",
+        reason: `lyt-scaffold sentinel (excluded from index): ${relPath}`,
+      };
     }
   }
 
@@ -263,7 +295,9 @@ export function isIndexablePath(
   ignoreMatcher?: IgnoreMatcher,
   vaultRoot?: string,
 ): boolean {
-  return isIndexable(relPath, ignoreMatcher, vaultRoot).include;
+  const effectiveMatcher =
+    ignoreMatcher ?? (vaultRoot === undefined ? undefined : loadLytIgnorePolicy(vaultRoot).matcher);
+  return isIndexable(relPath, effectiveMatcher, vaultRoot).include;
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +305,7 @@ export function isIndexablePath(
 // VAULT ROOT (not `notes/`), returning absolute paths of every indexable
 // markdown file, applying `predicate` per file. Deterministic sort applied
 // UNIFORMLY at every directory level (resolves the Phase-0 sort divergence).
-// `statSync` follows symlinks (matches the pre-B-4 read walkers; the
-// symlink-floor decision is a deferred fast-follow).
+// `lstatSync` refuses symlink/reparse-point entries before traversal.
 //
 // Walk continues past unreadable/permission-denied directories and stat
 // failures (skip-and-continue — a single bad dir never aborts a reindex).
@@ -292,6 +325,7 @@ export function walkVaultMarkdownFiles(
   options: WalkOptions = {},
 ): string[] {
   const out: string[] = [];
+  const ignoreMatcher = options.ignoreMatcher ?? loadLytIgnorePolicy(vaultRoot).matcher;
 
   const walk = (dirAbs: string, dirRelSegments: string[]): void => {
     let names: string[];
@@ -307,10 +341,14 @@ export function walkVaultMarkdownFiles(
       const childAbs = join(dirAbs, name);
       const childRelSegments = [...dirRelSegments, name];
       const childRel = childRelSegments.join("/");
-      let stat: ReturnType<typeof statSync>;
+      let stat: ReturnType<typeof lstatSync>;
       try {
-        stat = statSync(childAbs);
+        stat = lstatSync(childAbs);
       } catch {
+        continue;
+      }
+      if (stat.isSymbolicLink()) {
+        options.onSkip?.(childRel, `reparse-point: ${childRel}`);
         continue;
       }
       if (stat.isDirectory()) {
@@ -318,7 +356,7 @@ export function walkVaultMarkdownFiles(
         if (INDEX_FLOOR.some((f) => f.toLowerCase() === name.toLowerCase())) continue;
         walk(childAbs, childRelSegments);
       } else if (stat.isFile()) {
-        const verdict = predicate(childRel, options.ignoreMatcher, vaultRoot);
+        const verdict = predicate(childRel, ignoreMatcher, vaultRoot);
         if (verdict.include) {
           out.push(childAbs);
         } else if (

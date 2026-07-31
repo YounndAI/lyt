@@ -71,20 +71,34 @@ export interface FtsHitRow {
 export interface InsertFtsDocArgs {
   figmentPath: string;
   body: string;
+  /** Normalized frontmatter title; blank when absent or malformed. */
+  title?: string;
 }
 
 export async function insertFtsDoc(db: Client, args: InsertFtsDocArgs): Promise<void> {
-  await db.execute({
-    sql: "INSERT INTO figment_fts (figment_rid, body) VALUES (?, ?)",
-    args: [args.figmentPath, args.body],
-  });
+  await db.batch(
+    [
+      {
+        sql: "INSERT INTO figment_fts (figment_rid, body) VALUES (?, ?)",
+        args: [args.figmentPath, args.body],
+      },
+      {
+        sql: "INSERT INTO figment_title_fts (figment_rid, title) VALUES (?, ?)",
+        args: [args.figmentPath, args.title ?? ""],
+      },
+    ],
+    "write",
+  );
 }
 
 // Whole-table truncate — invoked by `upsertFtsCache` and the manual
 // `lyt vault rebuild-fts` verb. FTS5 supports DELETE without WHERE.
 export async function deleteAllFts(db: Client): Promise<number> {
-  const res = await db.execute("DELETE FROM figment_fts");
-  return Number(res.rowsAffected);
+  const [body] = await db.batch(
+    ["DELETE FROM figment_fts", "DELETE FROM figment_title_fts"],
+    "write",
+  );
+  return Number(body?.rowsAffected ?? 0);
 }
 
 // Lane M Wave 0 (P0-a) — delete-by-path primitive. The per-write
@@ -95,11 +109,14 @@ export async function deleteAllFts(db: Client): Promise<number> {
 // path was never indexed; >1 only if a pre-Lane-M bare-INSERT duplicated
 // the path — this delete heals those duplicates).
 export async function deleteFtsByPath(db: Client, figmentPath: string): Promise<number> {
-  const res = await db.execute({
-    sql: "DELETE FROM figment_fts WHERE figment_rid = ?",
-    args: [figmentPath],
-  });
-  return Number(res.rowsAffected);
+  const [body] = await db.batch(
+    [
+      { sql: "DELETE FROM figment_fts WHERE figment_rid = ?", args: [figmentPath] },
+      { sql: "DELETE FROM figment_title_fts WHERE figment_rid = ?", args: [figmentPath] },
+    ],
+    "write",
+  );
+  return Number(body?.rowsAffected ?? 0);
 }
 
 // Lane M Wave 0 (P0-a) — idempotent upsert-by-path. FTS5 has no native
@@ -129,12 +146,88 @@ export async function upsertFtsDocByPath(db: Client, args: InsertFtsDocArgs): Pr
         args: [args.figmentPath],
       },
       {
+        sql: "DELETE FROM figment_title_fts WHERE figment_rid = ?",
+        args: [args.figmentPath],
+      },
+      {
         sql: "INSERT INTO figment_fts (figment_rid, body) VALUES (?, ?)",
         args: [args.figmentPath, args.body],
+      },
+      {
+        sql: "INSERT INTO figment_title_fts (figment_rid, title) VALUES (?, ?)",
+        args: [args.figmentPath, args.title ?? ""],
       },
     ],
     "write",
   );
+}
+
+export interface TitleFtsHitRow {
+  figmentPath: string;
+  normalizedTitle: string;
+  exactNormalizedMatch: boolean;
+  rawHits: number;
+}
+
+export async function searchTitleFts(
+  db: Client,
+  query: string,
+  limit: number,
+): Promise<TitleFtsHitRow[]> {
+  const normalizedQuery = normalizeTitle(query);
+  if (normalizedQuery.length === 0 || limit <= 0) return [];
+  const res = await db.execute({
+    sql:
+      "SELECT figment_rid, title, rank AS rk FROM figment_title_fts " +
+      "WHERE figment_title_fts MATCH ? ORDER BY rank LIMIT ?",
+    args: [buildFtsMatchExpr(normalizedQuery), Math.max(1, Math.floor(limit))],
+  });
+  return res.rows.map((row) => {
+    const normalizedTitle = normalizeTitle(String(row["title"] ?? ""));
+    return {
+      figmentPath: String(row["figment_rid"]),
+      normalizedTitle,
+      exactNormalizedMatch: normalizedTitle === normalizedQuery,
+      rawHits: rankToRawHits(row["rk"] as number | null),
+    };
+  });
+}
+
+export function normalizeTitle(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export async function countTitleFtsDocs(db: Client): Promise<number> {
+  const res = await db.execute("SELECT COUNT(*) AS n FROM figment_title_fts");
+  const row = res.rows[0];
+  return row === undefined ? 0 : Number(row["n"] as number | bigint);
+}
+
+export async function listFtsDocPaths(db: Client): Promise<string[]> {
+  const res = await db.execute("SELECT figment_rid FROM figment_fts ORDER BY figment_rid ASC");
+  return res.rows.map((row) => String(row["figment_rid"]));
+}
+
+export async function replaceAllTitleFts(
+  db: Client,
+  docs: readonly { figmentPath: string; title: string }[],
+): Promise<void> {
+  await db.execute("DELETE FROM figment_title_fts");
+  const batchSize = 200;
+  for (let start = 0; start < docs.length; start += batchSize) {
+    await db.batch(
+      docs.slice(start, start + batchSize).map((doc) => ({
+        sql: "INSERT INTO figment_title_fts (figment_rid, title) VALUES (?, ?)",
+        args: [doc.figmentPath, doc.title],
+      })),
+      "write",
+    );
+  }
 }
 
 export async function countFtsDocs(db: Client): Promise<number> {
