@@ -50,7 +50,7 @@ export function composeManagedManualMarker(
     const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
     return {
       status: "composed",
-      result: `${existing}${separator}${managedBlock}`,
+      result: `${existing}${separator}${managedBlock.replace(/\n$/, "")}\n`,
       replaced: false,
     };
   }

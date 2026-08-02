@@ -25,7 +25,7 @@ for (const runtime of ["agents", "claude", "codex"]) {
   objects.push({
     kind: "marker-file",
     runtime,
-    content: generated.content,
+    content: marker.block,
     expected_digest: marker.digest,
     marker_begin: marker.markerBegin,
     marker_end: marker.markerEnd,

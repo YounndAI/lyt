@@ -56,7 +56,7 @@ export async function buildVaultInstallProviderObjectsV1(options: {
         provider_package: "@younndai/lyt-vault",
         provider_version: options.version,
         target_path: target,
-        content: generated.content,
+        content: marker.block,
         expected_digest: marker.digest,
         marker_begin: marker.markerBegin,
         marker_end: marker.markerEnd,

@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.21] — 2026-08-03
+
+### Changed
+
+- Corrected managed agent-manual provider payloads to bind their digest to the exact marker block and preserve one terminal newline when composing a fresh file, allowing `lyt update` reconciliation to apply the sealed manual safely.
+
+---
+
 ## [0.20.20] — 2026-08-02
 
 ### Changed
