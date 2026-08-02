@@ -30,6 +30,13 @@ import type { AccessProvider } from "../access/access-provider.js";
 import { GhAccessProvider } from "../access/gh-access-provider.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 import {
+  appendPendingOp,
+  closeOpLog,
+  markOpAborted,
+  markOpApplied,
+  openOpLog,
+} from "../op/operation-log.js";
+import {
   MANDATORY_FRONTMATTER_TOKENS,
   DEFAULT_MESH_VISIBILITY,
   DEFAULT_WEIGHT,
@@ -89,6 +96,11 @@ export interface PatternRunArgs {
   // different provider. Behavior-preserving: the default exactly mirrors the
   // prior direct `deriveWriteGate(row, db, { gh })` call.
   accessProvider?: AccessProvider | undefined;
+  // The CaptureOperation owns the reversible history row for `lyt capture` and
+  // disables this generic barrier. Every other direct pattern write records a
+  // non-undoable latest-action row so `lyt undo` can never reach through it and
+  // silently delete an older capture.
+  recordOperation?: boolean | undefined;
 }
 
 export interface PatternRunResult {
@@ -212,8 +224,58 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
   validateMandatoryFrontmatterTokens(templateBody, tokens, args.patternName, args.verbId);
   const rendered = renderTemplate(templateBody, tokens);
 
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, rendered, "utf8");
+  const relPath = relative(vaultPath, filePath).split(sep).join(posix.sep);
+  const recordOperation = args.recordOperation !== false;
+  const opLogDb = recordOperation ? await openOpLog() : null;
+  let opId: Uint8Array | null = null;
+  try {
+    if (opLogDb !== null) {
+      const reason = `The newer pattern write (${relPath}) can't be undone automatically.`;
+      opId = await appendPendingOp(
+        opLogDb,
+        {
+          kind: `pattern:${args.patternName}/${args.verbId}`,
+          horizon: "local",
+          fileSet: [relPath],
+          inverse: { class: "none", reason },
+        },
+        new Date().toISOString(),
+      );
+    }
+
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, rendered, "utf8");
+
+    if (opLogDb !== null && opId !== null) {
+      const reason = `The newer pattern write (${relPath}) can't be undone automatically.`;
+      await markOpApplied(
+        opLogDb,
+        opId,
+        {
+          horizon: "local",
+          inverse: { class: "none", reason },
+          fileSet: [relPath],
+        },
+        new Date().toISOString(),
+      );
+    }
+  } catch (error) {
+    if (opLogDb !== null && opId !== null && !existsSync(filePath)) {
+      try {
+        await markOpAborted(
+          opLogDb,
+          opId,
+          "The pattern write was not completed.",
+          new Date().toISOString(),
+        );
+      } catch {
+        // Preserve the original write failure.
+      }
+    }
+    throw error;
+  } finally {
+    if (opLogDb !== null) await closeOpLog(opLogDb);
+  }
 
   // V-C-1 (L1 index-on-write) — the figment is now on disk; index it so a
   // subsequent `lyt search` / `recall` / `primer` hits with NO manual reindex
@@ -222,7 +284,6 @@ export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunRe
   // write anywhere under the vault root indexes consistently with the full
   // rebuild. captureIndexFlow NEVER throws — a failure returns `deferred` (the
   // markdown is already saved) which we surface as a soft note.
-  const relPath = relative(vaultPath, filePath).split(sep).join(posix.sep);
   let indexDeferred: boolean | undefined;
   let indexNote: string | undefined;
   // PATH-ONLY here by design: this is a cheap pre-filter to skip the flow call

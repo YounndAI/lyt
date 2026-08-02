@@ -24,6 +24,7 @@ import {
   isGitRepo,
   listBranchesWithPrefix,
   runGit,
+  runGitCommitWithIdentityFallback,
 } from "../util/git-run.js";
 import { SNAPSHOT_BRANCH_PREFIX } from "./snapshot.js";
 
@@ -107,7 +108,11 @@ export async function restoreVaultFlow(args: RestoreFlowArgs): Promise<RestoreFl
         commitSha: null,
       };
     }
-    await runGit(["commit", "-m", `lyt restore: from ${resolvedBranch}`], { cwd: vault.path });
+    await runGitCommitWithIdentityFallback(
+      runGit,
+      ["-m", `lyt restore: from ${resolvedBranch}`],
+      { cwd: vault.path },
+    );
     const shaRes = await runGit(["rev-parse", "--short", "HEAD"], { cwd: vault.path });
     return {
       vault,

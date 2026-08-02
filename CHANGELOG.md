@@ -7,6 +7,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.19] — 2026-08-02
+
+### Changed
+
+- Prevented `lyt undo` from reaching through a newer pattern write and silently deleting an older captured Figment.
+- Made sync and restore establish a per-command Git identity fallback when a fresh machine has no configured author, while preserving configured identity and reporting commit failures instead of claiming a false save.
+- Corrected the generated agent manual so one-vault recall routes through `/lyt-recall` and its real `lyt search --vault` implementation.
+
+### Known limitation
+
+- `lyt mesh init` can fail before mutation with an over-generic diagnostic on current installations. This release does not claim to repair mesh creation; the diagnostic and root-cause repair are the immediate fix-forward.
+
+---
+
 ## [0.20.18] — 2026-08-02
 
 ### Changed

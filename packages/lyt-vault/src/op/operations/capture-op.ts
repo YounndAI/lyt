@@ -33,7 +33,11 @@ import { relative, sep } from "node:path";
 
 import type { Client } from "@libsql/client";
 
-import { patternRunFlow, type PatternRunArgs, type PatternRunResult } from "../../flows/pattern-run.js";
+import {
+  patternRunFlow,
+  type PatternRunArgs,
+  type PatternRunResult,
+} from "../../flows/pattern-run.js";
 import { appendPendingOp, markOpAborted, markOpApplied } from "../operation-log.js";
 import {
   assertFigmentIndexed,
@@ -71,7 +75,11 @@ export interface CaptureOperationDeps {
    * a capture never fails on an audit hiccup. Omitted → no op-level audit entry
    * (e.g. the `already-existed` no-op path never calls it). Injected in unit tests.
    */
-  audit?: (op: Operation, receipt: Receipt, ctx: { vaultPath: string; relPath: string }) => Promise<void>;
+  audit?: (
+    op: Operation,
+    receipt: Receipt,
+    ctx: { vaultPath: string; relPath: string },
+  ) => Promise<void>;
 }
 
 export class CaptureOperation implements Operation {
@@ -127,6 +135,10 @@ export class CaptureOperation implements Operation {
         patternName: "knowledge-capture",
         verbId: "capture",
         vaultName: this.input.vaultName,
+        // This operation already enqueued the reversible capture row above.
+        // Suppress patternRunFlow's generic non-undoable barrier so the capture
+        // itself remains the latest applied action.
+        recordOperation: false,
         ...(this.input.slug !== undefined ? { slug: this.input.slug } : {}),
         ...(this.input.dir !== undefined ? { dir: this.input.dir } : {}),
         vars: this.input.vars ?? {},
@@ -138,7 +150,12 @@ export class CaptureOperation implements Operation {
       // lingers as a phantom `pending` the recovery path would try to recover
       // (release review R2). Best-effort — never mask the original write error.
       try {
-        await markOpAborted(this.deps.opLogDb, opId, `The capture was not completed: ${errMsg(err)}`, now());
+        await markOpAborted(
+          this.deps.opLogDb,
+          opId,
+          `The capture was not completed: ${errMsg(err)}`,
+          now(),
+        );
       } catch {
         /* keep the original write error as the thrown one */
       }
@@ -154,7 +171,12 @@ export class CaptureOperation implements Operation {
     // the real undoable op beneath it (release review). `this.applied` stays
     // null so inverse() reflects the no-op.
     if (r.alreadyExisted) {
-      await markOpAborted(this.deps.opLogDb, opId, "That note already existed, so there's nothing new to undo.", now());
+      await markOpAborted(
+        this.deps.opLogDb,
+        opId,
+        "That note already existed, so there's nothing new to undo.",
+        now(),
+      );
       return makeReceipt({
         applied: false,
         verified: assertFileBytes(r.vaultPath, relPath).verified,
@@ -178,7 +200,12 @@ export class CaptureOperation implements Operation {
       class: "clean-undo",
       action: { type: "delete-figment", vaultPath: r.vaultPath, relPath },
     };
-    await markOpApplied(this.deps.opLogDb, opId, { horizon: this.horizon, inverse, fileSet: [relPath] }, now());
+    await markOpApplied(
+      this.deps.opLogDb,
+      opId,
+      { horizon: this.horizon, inverse, fileSet: [relPath] },
+      now(),
+    );
 
     const receipt = makeReceipt({
       applied: true,
@@ -187,7 +214,8 @@ export class CaptureOperation implements Operation {
       horizon: this.horizon,
       envelope: { relPath, vault: r.vaultName },
     });
-    if (this.deps.audit !== undefined) await this.deps.audit(this, receipt, { vaultPath: r.vaultPath, relPath });
+    if (this.deps.audit !== undefined)
+      await this.deps.audit(this, receipt, { vaultPath: r.vaultPath, relPath });
     return receipt;
   }
 
@@ -198,7 +226,11 @@ export class CaptureOperation implements Operation {
     if (this.applied === null) return { class: "clean-undo" };
     return {
       class: "clean-undo",
-      action: { type: "delete-figment", vaultPath: this.applied.vaultPath, relPath: this.applied.relPath },
+      action: {
+        type: "delete-figment",
+        vaultPath: this.applied.vaultPath,
+        relPath: this.applied.relPath,
+      },
     };
   }
 

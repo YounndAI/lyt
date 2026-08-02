@@ -19,6 +19,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { LYT_FALLBACK_GIT_EMAIL } from "../util/git-run.js";
+
 export interface LocalCheckpointResult {
   status: "committed" | "deferred" | "skipped" | "failed" | "partial";
   commitSha?: string;
@@ -132,9 +134,11 @@ export function createLocalCheckpoint(
     runGit(
       [
         "-c",
+        // Intentionally different from util/git-run.ts: this identifies the
+        // narrower scaffold checkpoint rather than a general Lyt save.
         "user.name=Lyt Local Checkpoint",
         "-c",
-        "user.email=noreply@linkyourthink.com",
+        `user.email=${LYT_FALLBACK_GIT_EMAIL}`,
         "--literal-pathspecs",
         "commit",
         "--only",

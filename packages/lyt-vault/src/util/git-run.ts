@@ -143,6 +143,40 @@ export interface GitRunOptions {
   policy?: GitRunPolicy;
 }
 
+type GitCommitRunner = (
+  args: readonly string[],
+  opts: GitRunOptions,
+) => Promise<GitRunResult>;
+
+// Intentionally different from scaffold/local-checkpoint.ts: generic saves use
+// the product name, while scaffold checkpoints identify their narrower role.
+const LYT_FALLBACK_GIT_NAME = "Lyt";
+export const LYT_FALLBACK_GIT_EMAIL = "noreply@linkyourthink.com";
+
+/**
+ * Commit without requiring machine-global Git identity configuration.
+ * Existing user.name/user.email values remain authoritative; Lyt supplies only
+ * whichever field is absent, for this command alone, and never mutates config.
+ */
+export async function runGitCommitWithIdentityFallback(
+  runner: GitCommitRunner,
+  commitArgs: readonly string[],
+  opts: GitRunOptions,
+): Promise<GitRunResult> {
+  const [name, email] = await Promise.all([
+    runner(["config", "--get", "user.name"], { ...opts, allowFailure: true }),
+    runner(["config", "--get", "user.email"], { ...opts, allowFailure: true }),
+  ]);
+  const identityArgs: string[] = [];
+  if (name.code !== 0 || name.stdout.trim().length === 0) {
+    identityArgs.push("-c", `user.name=${LYT_FALLBACK_GIT_NAME}`);
+  }
+  if (email.code !== 0 || email.stdout.trim().length === 0) {
+    identityArgs.push("-c", `user.email=${LYT_FALLBACK_GIT_EMAIL}`);
+  }
+  return runner([...identityArgs, "commit", ...commitArgs], opts);
+}
+
 /**
  * Hard ceiling for Git children, including outward fetch/pull/push work. The
  * gh-federation wrappers import the same bound, so every production child held

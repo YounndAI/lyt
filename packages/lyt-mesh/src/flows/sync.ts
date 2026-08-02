@@ -49,6 +49,7 @@ import {
   realIdentityRunner,
   regenContextFlow,
   runGit as defaultRunGit,
+  runGitCommitWithIdentityFallback,
   updateVaultStatus,
   upsertArcsCache,
   upsertFtsCache,
@@ -1028,11 +1029,20 @@ async function syncOneVault(
         return stagingRefusalReport(base, dirtyCount, staging.pathRefusal);
       }
       const commitMsg = messageOverride ?? buildSyncCommitMessage(vault, statusRecords, now);
-      const commitRes = await runGit(["commit", "-m", commitMsg], {
+      const commitRes = await runGitCommitWithIdentityFallback(runGit, ["-m", commitMsg], {
         cwd: vault.path,
         allowFailure: true,
       });
-      committed = commitRes.code === 0;
+      if (commitRes.code !== 0) {
+        return {
+          ...base,
+          status: "error",
+          dirtyCount,
+          message: "Lyt could not save these changes locally. They remain on this machine.",
+          errorOutput: commitRes.stderr || commitRes.stdout,
+        };
+      }
+      committed = true;
     }
     await reconcileVaultCaches(vault.path, vault.name);
     return {
@@ -1585,7 +1595,7 @@ async function syncOneVault(
       // supplied an explicit `message` override (e.g. an agent's semantic
       // summary). The deterministic path NEVER calls an LLM.
       const commitMsg = messageOverride ?? buildSyncCommitMessage(vault, statusRecords, now);
-      const commitRes = await runGit(["commit", "-m", commitMsg], {
+      const commitRes = await runGitCommitWithIdentityFallback(runGit, ["-m", commitMsg], {
         cwd: vault.path,
         allowFailure: true,
       });
@@ -1604,6 +1614,16 @@ async function syncOneVault(
           await reconcileVaultCaches(vault.path, vault.name);
           reconciled = true;
         }
+      } else {
+        return {
+          ...base,
+          status: "error",
+          ahead,
+          behind,
+          dirtyCount,
+          message: "Lyt could not save these changes locally, so nothing was sent online.",
+          errorOutput: commitRes.stderr || commitRes.stdout,
+        };
       }
     }
   }

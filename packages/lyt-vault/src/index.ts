@@ -2027,6 +2027,7 @@ export {
   isGitRepo,
   listBranchesWithPrefix,
   runGit,
+  runGitCommitWithIdentityFallback,
   runGitLocalMutation,
   runGitReadOnly,
   runGitRemoteObservation,
