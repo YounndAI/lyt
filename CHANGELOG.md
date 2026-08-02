@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.20] — 2026-08-02
+
+### Changed
+
+- Corrected the install-provider manual digests so existing Lyt installations can validate and apply the sealed update through `lyt update`.
+
+---
+
 ## [0.20.19] — 2026-08-02
 
 ### Changed

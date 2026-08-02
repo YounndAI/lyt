@@ -1,9 +1,9 @@
 /* Copyright 2026 MARLINK TRADING SRL (YounndAI). Licensed under Apache-2.0. */
-import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { generateAgentManual } from "../dist/flows/agent-manual.js";
+import { inspectManagedManualMarker } from "../dist/flows/agent-guidance.js";
 
 const root = new URL("../", import.meta.url);
 const packageJson = JSON.parse(readFileSync(new URL("package.json", root), "utf8"));
@@ -18,13 +18,17 @@ for (const runtime of ["agents", "claude", "codex"]) {
     homedirOverride: fileURLToPath(new URL("../.provider-manifest-home/", root)),
     skillsDirOverride: skillsDir,
   });
+  const marker = inspectManagedManualMarker(generated.content);
+  if (marker.status !== "exact") {
+    throw new Error("install-provider-generated-manual-marker-invalid");
+  }
   objects.push({
     kind: "marker-file",
     runtime,
     content: generated.content,
-    expected_digest: createHash("sha256").update(generated.content).digest("hex"),
-    marker_begin: `<!-- lyt-manual v${generated.markerVersion} BEGIN -->`,
-    marker_end: `<!-- lyt-manual v${generated.markerVersion} END -->`,
+    expected_digest: marker.digest,
+    marker_begin: marker.markerBegin,
+    marker_end: marker.markerEnd,
   });
 }
 writeFileSync(

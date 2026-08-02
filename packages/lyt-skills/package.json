@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-skills",
-  "version": "0.20.19",
+  "version": "0.20.20",
   "description": "Lyt harness skills — 12 skills (/lyt-create, /lyt-capture, /lyt-recall, /lyt-pattern, /lyt-pod, /lyt-mesh-explore, /lyt-primer-context, /lyt-search, /lyt-sync, /lyt-alias, /lyt-adopt, /lyt-update) symlinked tri-runtime into ~/.claude/skills/, ~/.codex/skills/, ~/.agents/skills/. Composed into the `lyt skills install` and `lyt skills list` meta-CLI verbs.",
   "homepage": "https://linkyourthink.com",
   "repository": {
@@ -85,7 +85,7 @@
     "clean": "rimraf --glob dist .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "@younndai/lyt-vault": "0.20.19",
+    "@younndai/lyt-vault": "0.20.20",
     "commander": "^12.1.0",
     "semver": "^7.7.1"
   },
