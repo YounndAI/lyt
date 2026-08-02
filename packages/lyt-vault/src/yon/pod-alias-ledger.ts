@@ -22,7 +22,7 @@ import { appendLedgerRecord } from "./ledger-write.js";
 import { walkLedger, type LedgerRecord } from "./ledger-read.js";
 
 const UUID7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const RID7 = /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/u;
+const RID7_OR_8 = /^[0-9a-f]{12}[78][0-9a-f]{3}[89ab][0-9a-f]{15}$/u;
 
 export interface PodAliasRecord {
   podRid: string;
@@ -163,7 +163,7 @@ function parsePodAlias(raw: LedgerRecord, writerId: string): PodAliasRecord | nu
   const hlc = parseHlc(raw.fields.get("hlc") ?? "");
   const seq = Number(raw.fields.get("seq"));
   if (
-    !RID7.test(podRid) ||
+    !RID7_OR_8.test(podRid) ||
     sanitizePodAlias(alias) !== alias ||
     !Number.isFinite(Date.parse(changedAt)) ||
     hlc === null ||
@@ -175,5 +175,5 @@ function parsePodAlias(raw: LedgerRecord, writerId: string): PodAliasRecord | nu
 }
 
 function assertPodRid(value: string): void {
-  if (!RID7.test(value)) throw new Error("Pod RID must be canonical UUIDv7 hex.");
+  if (!RID7_OR_8.test(value)) throw new Error("Pod RID must be canonical UUIDv7 or UUIDv8 hex.");
 }

@@ -26,7 +26,11 @@ export const POD_GENERATED_LEDGER_NAMESPACES = [
   "vaults",
 ] as const;
 
-const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// SEE ALSO: pod-transformation-proof-ledger.ts, op/receipt-v1.ts — proof,
+// operation, pod, and derived record identities accept historical v7 and new
+// deterministic v8. Writer/attempt identities remain strict v7 elsewhere.
+const UUID_V7_OR_V8 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const GIT_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const GENERATOR_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
@@ -39,7 +43,9 @@ const MAX_GENERATOR_TEXT = 96;
 
 const digestSchema = z.string().regex(SHA256, "must be a lowercase SHA-256 digest");
 const commitSchema = z.string().regex(GIT_COMMIT, "must be a lowercase 40- or 64-hex commit");
-const uuidV7Schema = z.string().regex(UUID_V7, "must be a canonical lowercase UUIDv7");
+const uuidV7OrV8Schema = z
+  .string()
+  .regex(UUID_V7_OR_V8, "must be a canonical lowercase UUIDv7 or UUIDv8");
 const generatedPathSchema = z
   .string()
   .min(1)
@@ -59,8 +65,8 @@ const proofSchema = z
     schema_version: z.literal(POD_TRANSFORMATION_PROOF_SCHEMA_VERSION),
     generator_id: z.string().min(1).max(MAX_GENERATOR_TEXT).regex(GENERATOR_ID),
     generator_version: z.string().min(1).max(MAX_GENERATOR_TEXT).regex(GENERATOR_VERSION),
-    pod_rid: uuidV7Schema,
-    operation_id: uuidV7Schema,
+    pod_rid: uuidV7OrV8Schema,
+    operation_id: uuidV7OrV8Schema,
     replay_key_digest: digestSchema,
     before_commit: commitSchema,
     after_commit: commitSchema,
@@ -83,10 +89,10 @@ const proofSchema = z
 export type PodTransformationProofV1 = z.output<typeof proofSchema>;
 
 const corroborationBinding = {
-  record_id: uuidV7Schema,
+  record_id: uuidV7OrV8Schema,
   record_digest: digestSchema,
-  pod_rid: uuidV7Schema,
-  operation_id: uuidV7Schema,
+  pod_rid: uuidV7OrV8Schema,
+  operation_id: uuidV7OrV8Schema,
   replay_key_digest: digestSchema,
   proof_digest: digestSchema,
 } as const;
@@ -178,7 +184,7 @@ export function digestPodTransformationProofV1(input: unknown): string {
     .digest("hex");
 }
 
-/** Stable, distinct UUIDv7 identities owned by the logical operation. */
+/** Stable, distinct identities matching the logical operation's UUID version. */
 export function derivePodTransformationRecordIds(operationId: string): PodTransformationRecordIds {
   return {
     ledger_record_id: dashedPlannedRid(operationId, "pod-transformation:ledger"),
@@ -189,9 +195,9 @@ export function derivePodTransformationRecordIds(operationId: string): PodTransf
 /** Canonical digest for one strict evidence record; stored digests are never trusted. */
 export function digestPodTransformationEvidenceRecordV1(input: unknown): string {
   const common = {
-    record_id: uuidV7Schema,
-    pod_rid: uuidV7Schema,
-    operation_id: uuidV7Schema,
+    record_id: uuidV7OrV8Schema,
+    pod_rid: uuidV7OrV8Schema,
+    operation_id: uuidV7OrV8Schema,
     replay_key_digest: digestSchema,
     proof_digest: digestSchema,
   } as const;

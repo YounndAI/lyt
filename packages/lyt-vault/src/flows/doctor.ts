@@ -87,6 +87,14 @@ import { createClient } from "@libsql/client";
 import { readGitRemoteOriginUrl } from "../util/git.js";
 import { readMachineState } from "./machine-state.js";
 import type { LytLifecycleHooks } from "../hooks.js";
+import {
+  getAuditLedgerPath,
+  listAuditShards,
+} from "../registry/audit-write.js";
+import {
+  getProvenanceLedgerPath,
+  listProvenanceShards,
+} from "../registry/provenance-write.js";
 
 export type CheckStatus = "pass" | "warn" | "fail" | "info";
 
@@ -1423,14 +1431,15 @@ export async function checkMeshYonParses(db: Client): Promise<CheckResult[]> {
 }
 
 // v1.B.5 — ledger YON ↔ DB pair sanity probe. Fast sanity probe
-// reading only the most-recent month's ledger. Cross-month integrity (every
-// archived YON has matching DB rows) is a slower probe deferred to v1.B.6d.
+// checking whether the current sharded/legacy YON source and its DB cache are
+// present. Cross-record integrity (every archived YON record has a matching DB
+// row) is a slower probe deferred to v1.B.6d.
 //
 // Per active vault, the check verifies the current open ledger and its DB
 // cache are both present + agreeing. If only one side exists → warn with
-// remediation `lyt vault rebuild-index <name>`. The actual on-disk layout
-// is `<vault>/.lyt/ledgers/<name>.yon` (the SoT) + `<vault>/.lyt/indexes/
-// <name>.db` (the cache) per the v1.A.2c DB SPLIT.
+// remediation `lyt vault rebuild-index <name>`. New writes use
+// `<vault>/.lyt/ledgers/<name>/<writerId>.yon`; legacy flat files remain valid
+// read sources. The cache is `<vault>/.lyt/indexes/<name>.db`.
 export async function checkLedgersYonDbPairs(
   db: Client,
   opts: { sampleLimit: number; full: boolean },
@@ -1473,16 +1482,17 @@ export async function checkLedgersYonDbPairs(
     // is a never-written ledger — both sides empty = IN SYNC, not drift. Only
     // flag the cache-has-rows-but-SoT-missing case (the SoT actually went away).
     const issues: { ledger: string; reason: string; dir: "cache-lost" | "sot-lost" }[] = [];
+    const observedLedgers: string[] = [];
     for (const ledger of LEDGERS) {
-      const yonPath = join(v.path, ".lyt", "ledgers", `${ledger}.yon`);
       const dbPath = join(v.path, ".lyt", "indexes", `${ledger}.db`);
-      const yon = existsSync(yonPath);
+      const yon = hasLedgerYonSource(v.path, ledger);
       const dbf = existsSync(dbPath);
+      const rows = dbf ? await countLedgerRows(v.path, ledger) : 0;
+      if (yon || rows > 0) observedLedgers.push(ledger);
       if (yon && !dbf) {
         // SoT present, cache gone → re-injectable from YON (non-destructive).
         issues.push({ ledger, reason: "YON SoT present but DB cache missing", dir: "cache-lost" });
       } else if (!yon && dbf) {
-        const rows = await countLedgerRows(v.path, ledger);
         if (rows > 0) {
           // Cache holds rows the (deleted) SoT can't back — a real SoT loss.
           issues.push({
@@ -1500,7 +1510,10 @@ export async function checkLedgersYonDbPairs(
         group: "vaults",
         label,
         status: "pass",
-        message: `${v.name}: audit + provenance YON/DB pairs in sync`,
+        message:
+          observedLedgers.length > 0
+            ? `${v.name}: ${observedLedgers.join(" + ")} YON/DB pair(s) in sync`
+            : `${v.name}: no ledger records yet`,
       });
     } else {
       out.push({
@@ -1523,6 +1536,15 @@ export async function checkLedgersYonDbPairs(
     }
   }
   return out;
+}
+
+function hasLedgerYonSource(vaultPath: string, ledger: "audit" | "provenance"): boolean {
+  if (ledger === "audit") {
+    return listAuditShards(vaultPath).length > 0 || existsSync(getAuditLedgerPath(vaultPath));
+  }
+  return (
+    listProvenanceShards(vaultPath).length > 0 || existsSync(getProvenanceLedgerPath(vaultPath))
+  );
 }
 
 // V-C-1 Phase D (L4) — count rows in a per-vault ledger cache so doctor can tell

@@ -421,7 +421,7 @@ export interface ResolveCreationPlanV1Input {
 }
 
 /**
- * Stable UUIDv7-shaped logical operation identity.  It deliberately derives
+ * Stable UUIDv8 logical operation identity. It deliberately derives
  * from normalized intent, never from an invocation attempt, clock, or random
  * UUID.  The attempt id remains fresh evidence on CreationPlanV1.attempt.
  */
@@ -894,11 +894,11 @@ function refusal(
   };
 }
 
-/** Stable UUIDv7-shaped RID allocation owned by the logical operation, not an invocation. */
+/** Stable version-matched RID allocation owned by the logical operation, not an invocation. */
 export function derivePlannedCreationRid(operationId: string, label: string): string {
   const operationHex = operationId.replaceAll("-", "").toLowerCase();
   if (!isValidMeshRid(operationHex) || label.trim().length === 0) {
-    throw new Error("Planned creation RIDs require a UUIDv7 operation id and non-empty label.");
+    throw new Error("Planned creation RIDs require a UUIDv7 or UUIDv8 operation id and non-empty label.");
   }
   const entropy = createHash("sha256").update(`${operationHex}\0${label}`).digest("hex");
   const variant = (8 + (Number.parseInt(entropy[3]!, 16) & 3)).toString(16);
@@ -919,14 +919,15 @@ function normalizeIntendedEffects(
   | Extract<ResolveCreationPlanV1Result, { kind: "refusal" }> {
   try {
     const operationHex = value.operation_id.replaceAll("-", "").toLowerCase();
-    if (!isValidMeshRid(operationHex)) throw new Error("operation_id must be UUIDv7");
+    if (!isValidMeshRid(operationHex)) throw new Error("operation_id must be UUIDv7 or UUIDv8");
     for (const rid of [
       value.identity.rid,
       ...(value.mesh.kind === "none" ? [] : [value.mesh.rid]),
       value.primary_vault_rid,
       ...value.vaults.flatMap((vault) => [vault.rid, vault.memscope_rid]),
     ]) {
-      if (!isValidMeshRid(rid)) throw new Error("planned identities must be lowercase UUIDv7 hex");
+      if (!isValidMeshRid(rid))
+        throw new Error("planned identities must be lowercase UUIDv7 or UUIDv8 hex");
     }
     if (
       value.identity.kind === "create" &&

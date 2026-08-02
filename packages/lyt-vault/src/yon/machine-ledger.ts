@@ -34,6 +34,7 @@ import { appendLedgerRecord } from "./ledger-write.js";
 import { parseLedgerText, walkLedger, type LedgerRecord } from "./ledger-read.js";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const COMPACT_ENTITY_RID = /^[0-9a-f]{12}[78][0-9a-f]{3}[89ab][0-9a-f]{15}$/u;
 const MACHINE_OPERATION_LOCK_ACQUIRE_TIMEOUT_MS = 1_000;
 const MACHINE_OPERATION_LOCK_LEASE_MS = 30_000;
 
@@ -240,8 +241,8 @@ function appendSyncObservedCore(
 ): SyncObservedRecord | null {
   assertMachineId(observer);
   assertMachineId(args.sourceMachineId);
-  if (!/^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/u.test(args.vaultRid))
-    throw new Error("Vault RID must be canonical UUIDv7 hex.");
+  if (!COMPACT_ENTITY_RID.test(args.vaultRid))
+    throw new Error("Vault RID must be canonical UUIDv7 or UUIDv8 hex.");
   const current = foldSyncObserved(readAllSyncObservedRecords(args.podRoot)).get(
     `${observer}\0${args.vaultRid}\0${args.sourceMachineId}`,
   );
@@ -479,7 +480,7 @@ function parseSyncObserved(raw: LedgerRecord, writerId: string): SyncObservedRec
     observerMachineId !== writerId ||
     !UUID_V7.test(observerMachineId) ||
     !UUID_V7.test(sourceMachineId) ||
-    !/^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/u.test(vaultRid) ||
+    !COMPACT_ENTITY_RID.test(vaultRid) ||
     throughHlc === null ||
     !Number.isSafeInteger(throughSeq) ||
     throughSeq < 1 ||

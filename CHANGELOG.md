@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.18] — 2026-08-02
+
+### Changed
+
+- Accepted deterministic UUIDv8 operation and entity identities at their persisted read boundaries while keeping genuinely clock-derived attempt, machine, writer, and release identities strict UUIDv7.
+- Corrected `lyt doctor` to recognize current per-writer audit and provenance ledger shards, preserving legacy flat-ledger compatibility and real source-loss warnings without falsely reporting healthy vaults as damaged.
+
+---
+
 ## [0.20.17] — 2026-08-02
 
 ### Changed

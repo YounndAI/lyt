@@ -23,6 +23,11 @@ export const RECEIPT_V1_MINOR = 0;
 export const RECEIPT_V1_TIMESTAMP_MAX_LENGTH = 64;
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// SEE ALSO: receipt-repository.ts, commands/receipt.ts,
+// flows/federation/pod-transformation-proof.ts — deterministic creation
+// identities are UUIDv8; historical persisted identities remain UUIDv7.
+const UUID_V7_OR_V8 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SLUG = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const SHA256 = /^[a-f0-9]{64}$/i;
 const FORBIDDEN_KEY =
@@ -38,6 +43,7 @@ const MAX_RECEIPT_DIAGNOSTIC_DEPTH = 8;
 const MAX_RECEIPT_DIAGNOSTIC_COUNT = 1_000_000;
 
 const uuidV7 = z.string().regex(UUID_V7, "must be a UUIDv7");
+const uuidV7OrV8 = z.string().regex(UUID_V7_OR_V8, "must be a UUIDv7 or UUIDv8");
 const slug = z.string().min(1).max(96).regex(SLUG, "must be a lowercase slug");
 const aliasName = z
   .string()
@@ -96,9 +102,9 @@ function scopeShape(
   object: <T extends z.ZodRawShape>(shape: T) => z.ZodObject<T, "strict" | "strip">,
 ) {
   return z.discriminatedUnion("kind", [
-    object({ kind: z.literal("pod"), pod_id: uuidV7 }),
-    object({ kind: z.literal("mesh"), mesh_id: uuidV7 }),
-    object({ kind: z.literal("vault"), vault_id: uuidV7 }),
+    object({ kind: z.literal("pod"), pod_id: uuidV7OrV8 }),
+    object({ kind: z.literal("mesh"), mesh_id: uuidV7OrV8 }),
+    object({ kind: z.literal("vault"), vault_id: uuidV7OrV8 }),
     object({ kind: z.literal("release"), release_id: uuidV7 }),
     object({ kind: z.literal("system") }),
   ]);
@@ -123,7 +129,7 @@ function aliasRecommendationShape(
     action: z.enum(["create", "already-available"]),
     alias: aliasName,
     canonical_target: recommendationTarget,
-    vault_rid: uuidV7,
+    vault_rid: uuidV7OrV8,
     reason: z.enum(["bare-leaf-collision", "long-qualified-address"]),
     argv: z.array(recommendationTarget).max(4),
   }).superRefine((recommendation, ctx) => {
@@ -264,7 +270,7 @@ function receiptShape(
   const AliasRecommendation = aliasRecommendationShape(object);
   return object({
     ...schemaVersionShape(object, major, minor),
-    operation_id: uuidV7,
+    operation_id: uuidV7OrV8,
     attempt_id: uuidV7,
     operation: slug,
     scope: scopeShape(object),

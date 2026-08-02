@@ -57,6 +57,12 @@ const receiptWriteCoordinators = new Map<string, ReceiptWriteCoordinator>();
 
 const UUID_V7_DASHED = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_V7_HEX = /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/i;
+// SEE ALSO: receipt-v1.ts, commands/receipt.ts — operation identifiers are
+// persisted UUIDv7 (historical) or UUIDv8 (deterministic creation); attempt
+// identifiers remain clock-derived UUIDv7.
+const UUID_V7_OR_V8_DASHED =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_V7_OR_V8_HEX = /^[0-9a-f]{12}[78][0-9a-f]{3}[89ab][0-9a-f]{15}$/i;
 
 export interface ReceiptQueryClient {
   execute(statement: InStatement | string, args?: InArgs): Promise<ResultSet>;
@@ -357,7 +363,7 @@ export async function findPendingReceiptAttemptForOperation(
   db: ReceiptQueryClient,
   operationId: string,
 ): Promise<Readonly<{ attemptId: string; startedAt: string }> | null> {
-  const canonicalOperationId = canonicalUuid7(operationId);
+  const canonicalOperationId = canonicalUuid7OrV8(operationId);
   if (canonicalOperationId === null) return null;
   const result = await db.execute({
     sql: `SELECT a.attempt_id, a.started_at
@@ -804,6 +810,15 @@ function canonicalUuid7(value: string): Uint8Array | null {
   }
 }
 
+function canonicalUuid7OrV8(value: string): Uint8Array | null {
+  if (!UUID_V7_OR_V8_DASHED.test(value) && !UUID_V7_OR_V8_HEX.test(value)) return null;
+  try {
+    return hexToUuid7Bytes(value);
+  } catch {
+    return null;
+  }
+}
+
 function storedReceiptFromJson(value: unknown): StoredReceiptV1 {
   if (
     typeof value !== "string" ||
@@ -839,7 +854,7 @@ export async function queryReceiptAttempts(
   db: ReceiptQueryClient,
   query: ReceiptAttemptQuery,
 ): Promise<{ operationKnown: boolean; attempts: StoredReceiptV1[] }> {
-  const operationId = canonicalUuid7(query.operationId);
+  const operationId = canonicalUuid7OrV8(query.operationId);
   if (operationId === null) return { operationKnown: false, attempts: [] };
   const attemptId = query.attemptId === undefined ? undefined : canonicalUuid7(query.attemptId);
   if (query.attemptId !== undefined && attemptId === null)

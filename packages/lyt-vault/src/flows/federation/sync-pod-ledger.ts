@@ -29,12 +29,21 @@ import {
   reopenReceiptAttempt,
   type ReceiptAttemptSession,
 } from "../../op/receipt-attempt.js";
+import { openOpLogReadOnly } from "../../op/operation-log.js";
+import {
+  findPendingReceiptAttemptForOperation,
+  queryReceiptAttempts,
+} from "../../op/receipt-repository.js";
 import { parseReceiptV1ForEmission, type ReceiptV1 } from "../../op/receipt-v1.js";
 import { getFederationRepoDir } from "../../util/federation-paths.js";
 import { narrate } from "../../util/git-error-firewall.js";
 import { runGit as defaultRunGit } from "../../util/git-run.js";
 import { derivePlannedCreationRid } from "../creation-plan.js";
-import { hexToUuid7Bytes, uuid7BytesToDashedString } from "../../util/uuid7.js";
+import {
+  hexToUuid7Bytes,
+  newUuidv7Bytes,
+  uuid7BytesToDashedString,
+} from "../../util/uuid7.js";
 import {
   appendPodTransformationProof,
   readAuthenticatedPodTransformationEvidence,
@@ -254,8 +263,12 @@ export interface SyncPodLedgerArgs {
 export interface SyncPodLedgerDependencies {
   /** Tests only; production derives stable operation identity from pod facts. */
   newOperationId?: () => string;
-  /** Tests only; production derives stable attempt identity from the operation. */
+  /** Tests only; production mints a genuine time-ordered UUIDv7 attempt. */
   newAttemptId?: () => string;
+  findPendingAttempt?: (
+    operationId: string,
+  ) => Promise<Readonly<{ attemptId: string; startedAt: string }> | null>;
+  findSuccessfulAttempt?: (operationId: string) => Promise<ReceiptV1 | null>;
   now?: () => Date;
   openReceiptAttempt?: typeof openReceiptAttempt;
   reopenReceiptAttempt?: typeof reopenReceiptAttempt;
@@ -554,6 +567,34 @@ interface ReplayReceipt {
   alreadySucceeded: boolean;
 }
 
+async function findPendingPodSyncAttempt(
+  operationId: string,
+): Promise<Readonly<{ attemptId: string; startedAt: string }> | null> {
+  const opened = await openOpLogReadOnly();
+  if (opened.kind === "missing") return null;
+  try {
+    return await findPendingReceiptAttemptForOperation(opened.client, operationId);
+  } finally {
+    opened.close();
+  }
+}
+
+async function findSuccessfulPodSyncAttempt(operationId: string): Promise<ReceiptV1 | null> {
+  const opened = await openOpLogReadOnly();
+  if (opened.kind === "missing") return null;
+  try {
+    const found = await queryReceiptAttempts(opened.client, {
+      operationId,
+      operation: "pod-ledger-sync",
+      status: "success",
+      limit: 1,
+    });
+    return found.attempts[0] ?? null;
+  } finally {
+    opened.close();
+  }
+}
+
 async function openReplayReceipt(
   dependencies: SyncPodLedgerDependencies,
   base: Omit<
@@ -565,11 +606,27 @@ async function openReplayReceipt(
   const inspect = dependencies.inspectReceiptAttempt ?? inspectReceiptAttempt;
   const open = dependencies.openReceiptAttempt ?? openReceiptAttempt;
   const reopen = dependencies.reopenReceiptAttempt ?? reopenReceiptAttempt;
+  const findPending = dependencies.findPendingAttempt ?? findPendingPodSyncAttempt;
+  const findSuccessful = dependencies.findSuccessfulAttempt ?? findSuccessfulPodSyncAttempt;
+  const successful = await findSuccessful(base.operationId);
+  if (successful !== null) {
+    return {
+      session: null,
+      operationId: base.operationId,
+      attemptId: successful.attempt_id,
+      startedAt: successful.timestamps.started_at,
+      replayDisposition: "resumed",
+      alreadySucceeded: true,
+    };
+  }
+  const pendingAttempt = await findPending(base.operationId);
   for (let ordinal = 0; ordinal < 32; ordinal += 1) {
     const attemptId =
-      ordinal === 0 && dependencies.newAttemptId !== undefined
-        ? dependencies.newAttemptId()
-        : deterministicUuid(base.operationId, `pod-ledger-sync-attempt:${ordinal}`);
+      ordinal === 0 && pendingAttempt !== null
+        ? pendingAttempt.attemptId
+        : ordinal === 0 && dependencies.newAttemptId !== undefined
+          ? dependencies.newAttemptId()
+          : uuid7BytesToDashedString(newUuidv7Bytes());
     const state = await inspect(attemptId);
     if (state.kind === "terminal") {
       if (state.receipt.status === "success") {
@@ -578,13 +635,14 @@ async function openReplayReceipt(
           operationId: base.operationId,
           attemptId,
           startedAt: state.receipt.timestamps.started_at,
-          replayDisposition: ordinal === 0 ? "new" : "resumed",
+          replayDisposition: "resumed",
           alreadySucceeded: true,
         };
       }
       continue;
     }
     const startedAt = state.kind === "pending" ? state.startedAt : now().toISOString();
+    const replayDisposition = state.kind === "pending" ? "resumed" : "new";
     const pending = makePodSyncReceipt({
       ...base,
       attemptId,
@@ -592,7 +650,7 @@ async function openReplayReceipt(
       finishedAt: startedAt,
       status: "no-op",
       localMutations: 0,
-      replayDisposition: ordinal === 0 ? "new" : "resumed",
+      replayDisposition,
     });
     const opened = state.kind === "pending" ? await reopen(pending) : await open(pending);
     if (opened.kind !== "ready") return null;
@@ -601,7 +659,7 @@ async function openReplayReceipt(
       operationId: base.operationId,
       attemptId,
       startedAt: opened.session.startedAt ?? startedAt,
-      replayDisposition: ordinal === 0 ? "new" : "resumed",
+      replayDisposition,
       alreadySucceeded: false,
     };
   }

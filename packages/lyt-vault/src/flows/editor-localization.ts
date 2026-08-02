@@ -73,7 +73,8 @@ import {
 import { withDestinationPolicyLock } from "./federation/destination-policy-lock.js";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
-const UUIDV7 = /^[a-f0-9]{8}-?[a-f0-9]{4}-?7[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}$/u;
+const UUIDV7_OR_V8 =
+  /^[a-f0-9]{8}-?[a-f0-9]{4}-?[78][a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}$/u;
 const MAX_DECLARED_MACHINES = 128;
 const MAX_MACHINE_ID_LENGTH = 128;
 const MAX_MACHINE_RECEIPT_COUNT = 1_000_000;
@@ -2150,7 +2151,7 @@ function digest(value: unknown, label: string): void {
   if (typeof value !== "string" || !SHA256.test(value)) throw new Error(`${label} invalid`);
 }
 function uuid(value: unknown, label: string): void {
-  if (typeof value !== "string" || !UUIDV7.test(value)) throw new Error(`${label} invalid`);
+  if (typeof value !== "string" || !UUIDV7_OR_V8.test(value)) throw new Error(`${label} invalid`);
 }
 
 function digestPlan(plan: EditorLocalizationPlanV1): string {
@@ -2197,7 +2198,8 @@ function localizationLockPath(vaultId: string): string {
 }
 function dashedUuid(value: string): string {
   const hex = value.replaceAll("-", "").toLowerCase();
-  if (!/^[a-f0-9]{32}$/u.test(hex) || hex[12] !== "7") throw new Error("value is not UUIDv7");
+  if (!/^[a-f0-9]{32}$/u.test(hex) || !["7", "8"].includes(hex[12]!))
+    throw new Error("value is not UUIDv7 or UUIDv8");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 

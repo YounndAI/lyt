@@ -21,7 +21,7 @@ import { appendLedgerRecord } from "./ledger-write.js";
 import { walkLedger, type LedgerRecord } from "./ledger-read.js";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const RID = /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/u;
+const RID = /^[0-9a-f]{12}[78][0-9a-f]{3}[89ab][0-9a-f]{15}$/u;
 const MAX_DETAILS_LENGTH = 2048;
 
 export interface SyncProvenanceEvent {
@@ -325,7 +325,8 @@ function assertMachineId(value: string): void {
 }
 
 function assertIdentity(value: string, label: string): void {
-  if (!RID.test(value)) throw new Error(`${label} must be a canonical UUIDv7 hex identity.`);
+  if (!RID.test(value))
+    throw new Error(`${label} must be a canonical UUIDv7 or UUIDv8 hex identity.`);
 }
 
 function safeDirectory(path: string): boolean {

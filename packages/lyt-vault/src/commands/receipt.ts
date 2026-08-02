@@ -29,6 +29,10 @@ import {
 import type { ReceiptV1 } from "../op/receipt-v1.js";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// SEE ALSO: op/receipt-v1.ts, op/receipt-repository.ts — operation ids accept
+// historical UUIDv7 and deterministic UUIDv8; attempt ids stay UUIDv7.
+const UUID_V7_OR_V8 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OPERATION_SLUG = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const RECEIPT_STATUSES = new Set<ReceiptV1["status"]>([
   "success",
@@ -98,6 +102,10 @@ function isUuid7(value: string): boolean {
   return UUID_V7.test(value);
 }
 
+function isUuid7OrV8(value: string): boolean {
+  return UUID_V7_OR_V8.test(value);
+}
+
 function parseLimit(value: string | undefined): number | null {
   if (value === undefined) return DEFAULT_LIMIT;
   if (!/^[1-9][0-9]*$/.test(value)) return null;
@@ -165,16 +173,16 @@ export function buildReceiptCommand(): Command {
   command
     .command("show")
     .description("Show terminal receipts for one operation, optionally one attempt.")
-    .argument("<operation-id>", "Operation UUIDv7")
+    .argument("<operation-id>", "Operation UUIDv7 or UUIDv8")
     .option("--attempt <attempt-id>", "Restrict to one attempt UUIDv7")
     .option("--json", "Emit Receipt V1 evidence as JSON")
     .action(async (operationId: string, opts: ReceiptShowOpts) => {
-      if (!isUuid7(operationId)) {
+      if (!isUuid7OrV8(operationId)) {
         emit(
           inspectionError(
             "invalid-operation-id",
-            "The operation identifier must be a UUIDv7.",
-            "Provide an operation UUIDv7 from a prior Receipt V1.",
+            "The operation identifier must be a UUIDv7 or UUIDv8.",
+            "Provide an operation UUIDv7 or UUIDv8 from a prior Receipt V1.",
           ),
           opts.json,
         );

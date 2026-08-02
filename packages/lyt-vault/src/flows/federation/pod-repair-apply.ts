@@ -741,7 +741,7 @@ async function operationJournalRows(
   db: Awaited<ReturnType<typeof openOpLog>>,
   operationId: string,
 ): Promise<readonly { kind: string; fileSet: string[] }[]> {
-  if (!isUuidV7(operationId)) throw coded("pod-repair-operation-id-invalid");
+  if (!isUuidV7OrV8(operationId)) throw coded("pod-repair-operation-id-invalid");
   const maximumRows = 32;
   const found = await db.execute({
     sql: `SELECT kind, file_set
@@ -774,7 +774,7 @@ function parseJournal(value: string): PodRepairJournalRecord | null {
       !(v.prior_record_digest === null || isSha256(v.prior_record_digest)) ||
       !isSha256(v.record_digest) ||
       !isUuidV7(v.attempt_id) ||
-      !isUuidV7(v.operation_id) ||
+      !isUuidV7OrV8(v.operation_id) ||
       !isSha256(v.receipt_replay_digest) ||
       !isSha256(v.plan_digest) ||
       !POD_REPAIR_PHASES.includes(v.phase as PodRepairPhase)
@@ -816,8 +816,8 @@ function parseJournal(value: string): PodRepairJournalRecord | null {
       const replay = v.replay as Partial<NonNullable<PodRepairJournalRecord["replay"]>>;
       if (
         !isSha256(replay.proof_digest) ||
-        !isUuidV7(replay.pod_rid) ||
-        !isUuidV7(replay.operation_id) ||
+        !isUuidV7OrV8(replay.pod_rid) ||
+        !isUuidV7OrV8(replay.operation_id) ||
         !isSha256(replay.replay_key_digest) ||
         !isGitObjectId(replay.before_commit) ||
         !isGitObjectId(replay.after_commit) ||
@@ -920,6 +920,15 @@ function isUuidV7(value: unknown): value is string {
   return (
     typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value)
+  );
+}
+
+function isUuidV7OrV8(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      value,
+    )
   );
 }
 

@@ -39,6 +39,11 @@ import {
 } from "./pod-transformation-proof.js";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+// SEE ALSO: pod-transformation-proof.ts, op/receipt-v1.ts — persisted proof
+// identities accept historical UUIDv7 and deterministic UUIDv8. Ledger writer
+// ids below remain clock-derived UUIDv7.
+const UUID_V7_OR_V8 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const LEDGER_TAG = "POD_TRANSFORMATION";
 const SUBJECT_TAG = "POD_TRANSFORMATION_SUBJECT";
@@ -557,9 +562,9 @@ function evidenceCore(
   };
   if (
     (kind !== "pod-ledger-receipt-v1" && kind !== "pod-transformation-subject-v1") ||
-    !UUID_V7.test(value.record_id ?? "") ||
-    !UUID_V7.test(value.pod_rid ?? "") ||
-    !UUID_V7.test(value.operation_id ?? "") ||
+    !UUID_V7_OR_V8.test(value.record_id ?? "") ||
+    !UUID_V7_OR_V8.test(value.pod_rid ?? "") ||
+    !UUID_V7_OR_V8.test(value.operation_id ?? "") ||
     !SHA256.test(value.replay_key_digest ?? "") ||
     !SHA256.test(value.proof_digest ?? "")
   ) {
