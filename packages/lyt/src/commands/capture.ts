@@ -79,7 +79,10 @@ export function buildCaptureCommand(): Command {
     .description(
       "Capture a Figment — true alias for `pattern run knowledge-capture capture` (full v1 ceremony: mandatory purpose+topic, 8-field frontmatter). Indexes on write so it's searchable immediately.",
     )
-    .argument("[text]", "The thought to capture (becomes the Figment title; slug derived from it)")
+    .argument(
+      "[text]",
+      "The thought to capture. Stored as the Figment BODY; also seeds the title and slug unless --title/--slug are given.",
+    )
     .option("--vault <name>", "Target vault (default: the single user vault, else required)")
     .option("--title <title>", "Explicit title (overrides the positional text)")
     .option("--purpose <p>", "Why keep this? (author-supplied; prompted on a TTY if omitted)")
@@ -204,8 +207,25 @@ async function runCapture(text: string | undefined, opts: CaptureCliOpts): Promi
   // stays the primary path; `--tags` is the bare-quick-path affordance that
   // seeds both the primer keyword fallback AND (at ≥2 shared) a real lane.
   const tags = parseTagsOpt(opts.tags);
+  // B2 (0.20.17) — the positional text is the user's THOUGHT, so it must reach
+  // the body, not only the title.
+  //
+  // `lyt capture "my thought"` previously set `title` alone; `content` was never
+  // populated, so pattern-run rendered its empty-state stub and the thought was
+  // discarded. The init box instructs exactly this invocation, and no flag in
+  // `--help` supplied a body — a CLI-only user had no route from the advertised
+  // command to a Figment containing their thought. Reproduced independently by
+  // two operators on different machines.
+  //
+  // Deliberately narrow: `text` seeds `content` ONLY when the user supplied
+  // positional text and did not set content themselves. A BARE capture (no
+  // text) still renders the stub, so the coupled empty-state constant in
+  // flows/pattern-run.ts and its bare-capture regression test are unaffected.
+  // `--vars content=...` still wins, via the explicit-vars spread below.
+  const positionalBody = (text ?? "").trim();
   const vars: Record<string, string> = {
     title,
+    ...(positionalBody.length > 0 ? { content: positionalBody } : {}),
     ...(purpose !== undefined ? { purpose } : {}),
     ...(topic !== undefined ? { topic } : {}),
     ...(tags !== undefined ? { tags } : {}),

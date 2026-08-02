@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
 
 // v1.A.1 — mesh_vaults table is shipped empty. v1.B.1 populates via
 // `lyt mesh init` (home rows) and `lyt vault clone --to-mesh` (subscribed
@@ -35,7 +35,7 @@ export interface MeshVaultRow {
 }
 
 function bytesOrThrow(raw: unknown, column: string): Uint8Array {
-  if (!isUuidv7Bytes(raw)) {
+  if (!isPersistedEntityRidBytes(raw)) {
     throw new Error(`mesh_vaults.${column} is not a valid UUIDv7 blob.`);
   }
   return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);

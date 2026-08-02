@@ -18,12 +18,13 @@ import { Command } from "commander";
 
 import { cloneVaultFlow, CloneTargetMeshNotFoundError } from "../flows/clone.js";
 import { VaultHomeMeshNotRegisteredError } from "../flows/register.js";
+import { VaultRelocationNotAuthorizedError } from "../registry/repo.js";
 
 export function buildCloneCommand(): Command {
   const cmd = new Command("clone");
   cmd
     .description(
-      "Git-clone a Lyt vault from a URL and register it. Pass --to-mesh <name> to assign the clone to a mesh (fresh rid; source untouched).",
+      "Git-clone a Lyt vault from a URL and register it. Pass --to-mesh <name> to assign the clone to a mesh. Whether the clone mints a fresh rid or preserves the source's is decided by the route taken and is reported in the output — do not assume a fresh rid.",
     )
     .argument("<url>", "Git URL of the vault repository")
     .option(
@@ -87,10 +88,42 @@ export function buildCloneCommand(): Command {
         // eslint-disable-next-line no-console
         console.log(`  rid:  ${result.ridHex}`);
         if (result.meshAssignment !== null) {
+          // A2 (0.20.17) — narrate the identity decision that ACTUALLY ran.
+          //
+          // This line previously printed "(fresh rid; source untouched)" gated
+          // only on `meshAssignment !== null` — i.e. on whether a mesh was
+          // assigned — while `freshRidApplied` sat unread in the very object
+          // being printed. On the preserve-rid path both halves misled: the rid
+          // is the source's, and although the source directory IS immediately
+          // unmodified, the registry now resolves that identity to THIS clone,
+          // so the source is no longer operationally protected by correct
+          // identity resolution.
+          const mesh = result.meshAssignment;
           // eslint-disable-next-line no-console
           console.log(
-            `  mesh: assigned to '${result.meshAssignment.meshName}' (fresh rid; source untouched)`,
+            `  mesh: assigned to '${mesh.meshName}' (${
+              mesh.freshRidApplied ? "fresh rid minted" : "PRESERVED the source vault's rid"
+            })`,
           );
+          if (!mesh.freshRidApplied) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `  note: this clone kept the source vault's identity, so the registry now resolves ` +
+                `that vault to THIS path.`,
+            );
+            // eslint-disable-next-line no-console
+            console.log(
+              `        The source directory is intact on disk but is no longer the registered ` +
+                `vault — re-register it with 'lyt vault join <path>'.`,
+            );
+            if (result.originDetached !== true) {
+              // eslint-disable-next-line no-console
+              console.log(
+                `        Its git origin still points at the SOURCE repository; check ` +
+                  `'git remote -v' before any push from here.`,
+              );
+            }
+          }
         }
         // F8 — a fresh-rid clone starts remote-less (its origin pointed at
         // the SOURCE vault's repo); first publish/sync creates its own.
@@ -130,6 +163,35 @@ export function buildCloneCommand(): Command {
                   error: err.errorCode,
                   mesh_name: err.meshName,
                   vault_name: err.vaultName,
+                  message: err.message,
+                },
+                null,
+                2,
+              ),
+            );
+          } else {
+            // eslint-disable-next-line no-console
+            console.error(err.message);
+          }
+          process.exitCode = 2;
+          return;
+        }
+        // A1 (0.20.17) — the clone would have displaced an already-registered
+        // vault's identity. Same actionable exit-2 contract as the refusals
+        // above; without this arm the human message still reads correctly but
+        // `--json` falls through to the generic parse-error receipt and the
+        // product error code is lost to any consumer.
+        if (err instanceof VaultRelocationNotAuthorizedError) {
+          if (opts.json === true) {
+            // eslint-disable-next-line no-console
+            console.error(
+              JSON.stringify(
+                {
+                  error: err.errorCode,
+                  vault_name: err.vaultName,
+                  rid_hex: err.ridHex,
+                  registered_path: err.registeredPath,
+                  incoming_path: err.incomingPath,
                   message: err.message,
                 },
                 null,

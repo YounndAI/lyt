@@ -445,7 +445,17 @@ export function deriveCreationOperationIdV1(input: {
     )
     .digest("hex");
   const variant = (8 + (Number.parseInt(digest[15]!, 16) & 3)).toString(16);
-  return `${digest.slice(0, 12)}7${digest.slice(12, 15)}${variant}${digest.slice(16, 31)}`;
+  // B1 (0.20.17) - emit UUID v8, not v7. The first 48 bits here are SHA-256
+  // digest material, not Unix-millisecond time. Stamping version 7 on it made
+  // identifiers that pass every validator while carrying NONE of v7's ordering
+  // semantics. RFC 9562 defines v8 for exactly this: an application-defined
+  // layout wanting UUID shape without UUID time semantics.
+  //
+  // The determinism is deliberate and load-bearing (same intent -> same id ->
+  // replayable creation plans), so the fix is the honest LABEL, not a
+  // different generator. Calling uuid.v7() here would restore ordering by
+  // destroying idempotence.
+  return `${digest.slice(0, 12)}8${digest.slice(12, 15)}${variant}${digest.slice(16, 31)}`;
 }
 
 export type CreationPlanDestinationSource =
@@ -861,7 +871,11 @@ function explicitPolicySource(subject: CreationSubjectFacts): "explicit" | "vaul
 function isValidMeshRid(value: string): boolean {
   // Phase A registry identity is uuid7BytesToHex: exactly 32 lowercase hex
   // digits, not a display UUID with hyphens.
-  return /^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(value);
+  // B1 (0.20.17) - accept version 7 OR 8. Deterministic creation identities are
+  // now minted as v8; identities minted before that are v7 and stay valid as
+  // opaque keys. No migration - this is a READ boundary for already-persisted
+  // ids and must keep accepting the historical shape forever.
+  return /^[0-9a-f]{12}[78][0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(value);
 }
 
 function canonicalRepositoryName(value: string): string | null {
@@ -888,7 +902,13 @@ export function derivePlannedCreationRid(operationId: string, label: string): st
   }
   const entropy = createHash("sha256").update(`${operationHex}\0${label}`).digest("hex");
   const variant = (8 + (Number.parseInt(entropy[3]!, 16) & 3)).toString(16);
-  return `${operationHex.slice(0, 12)}7${entropy.slice(0, 3)}${variant}${entropy.slice(3, 18)}`;
+  // B1 (0.20.17) - VERSION-SENSITIVE: a child takes its version from the
+  // operation that owns it rather than hardcoding one. This is what keeps
+  // replay stable: re-resolving a HISTORICAL v7 plan must reproduce
+  // byte-identical v7 children, or normalizeIntendedEffects would refuse a
+  // plan it previously accepted. A new v8 operation yields v8 children.
+  const version = operationHex[12]!;
+  return `${operationHex.slice(0, 12)}${version}${entropy.slice(0, 3)}${variant}${entropy.slice(3, 18)}`;
 }
 
 function normalizeIntendedEffects(

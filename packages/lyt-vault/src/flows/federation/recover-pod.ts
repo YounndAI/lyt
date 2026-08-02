@@ -26,6 +26,7 @@ import {
   updateMeshOwnership,
 } from "../../registry/meshes-repo.js";
 import { getVaultByRid } from "../../registry/repo.js";
+import { inspectCheckoutCompleteness } from "../../util/checkout-complete.js";
 import { initVaultDbs } from "../../registry/vault-db.js";
 import {
   federationRepoFullName,
@@ -632,15 +633,56 @@ export async function recoverVaultsFromPodManifest(
       // registration operate on an external tree without ever cloning.
       assertNoSymlinkOnWritePath(getDefaultVaultsRoot(), targetPath);
       const vaultYonPath = join(targetPath, ".lyt", "vault.yon");
-      if (!existsSync(vaultYonPath)) {
+      // 0.20.17 — the marker file is NOT proof the clone landed. This branch
+      // used to skip the clone whenever `.lyt/vault.yon` existed, so a retry
+      // after a PART-WAY checkout walked straight past cloning and registered
+      // the incomplete worktree ("16 vaults registered, content missing").
+      // Require a proven-complete checkout to skip. An incomplete pre-existing
+      // tree is ambiguous: it may be failed clone residue, or it may contain
+      // legitimate local edits. Recovery therefore leaves it untouched and
+      // reports a drop instead of deleting or overwriting user data.
+      const targetAlreadyExisted = existsSync(targetPath);
+      const preexisting = targetAlreadyExisted
+        ? existsSync(vaultYonPath)
+          ? inspectCheckoutCompleteness(targetPath)
+          : ({ complete: false, reason: "the pre-existing directory has no .lyt/vault.yon" } as const)
+        : ({ complete: false, reason: "not cloned yet" } as const);
+      if (targetAlreadyExisted && !preexisting.complete) {
+        // A tracked deletion is NOT exclusive proof of a failed checkout: it
+        // can be a legitimate local edit. Likewise, an existing directory with
+        // no vault marker can contain unrelated or not-yet-adopted user data.
+        // Recovery has no authority to decide either tree is disposable. Keep
+        // it byte-for-byte and fail closed; an explicit later repair may
+        // quarantine or remove it with the Handler-visible evidence required
+        // for that destructive boundary.
+        const reason = `pre-existing vault path was left untouched because recovery could not prove it complete: ${preexisting.reason}`;
+        skipped.push({ vaultName: v.vaultName, reason });
+        drops.push({
+          vaultName: v.vaultName,
+          repo,
+          owner,
+          classification: classifyRecoverDrop(manifestRole, homeMesh, owner),
+          reason,
+        });
+        continue;
+      }
+      if (!targetAlreadyExisted) {
         await cloneFn({ handle: owner, repo, targetPath });
       }
       // A clone can introduce links below the target root after the first
       // guard. Re-check the exact metadata and index paths before read/write.
       assertNoSymlinkOnWritePath(targetPath, vaultYonPath);
       assertNoSymlinkOnWritePath(targetPath, join(targetPath, ".lyt", "indexes"));
-      if (!existsSync(vaultYonPath)) {
-        const reason = "clone produced no .lyt/vault.yon";
+      // 0.20.17 — post-clone the same rule applies: prove the CONTENT arrived,
+      // not just the marker. An incomplete checkout is a DROP with an honest
+      // reason, never a registration. A vault registered off a partial tree
+      // presents as installed while its content is silently absent, which is
+      // strictly worse than a refusal the user can act on.
+      const landed = existsSync(vaultYonPath)
+        ? inspectCheckoutCompleteness(targetPath)
+        : ({ complete: false, reason: "clone produced no .lyt/vault.yon" } as const);
+      if (!landed.complete) {
+        const reason = landed.reason;
         skipped.push({ vaultName: v.vaultName, reason });
         // G1 — a clone that produced nothing is a DROP, not a silent skip.
         drops.push({
@@ -682,9 +724,9 @@ export async function recoverVaultsFromPodManifest(
       // clone whose vault.yon asserts a DIFFERENT-named local victim's rid is
       // still refused here (the impersonation defense the rid-keyed idempotency
       // probe above cannot catch — that probe keys off the pod.yon MANIFEST rid,
-      // not the cloned vault.yon rid). NOTE: trustedReconstruction is a no-op
-      // today (upsertVault :267 `void`s it); pre-wired for the P5 same-name-arm
-      // gate.
+      // not the cloned vault.yon rid). A1 (0.20.17): trustedReconstruction is
+      // now LOAD-BEARING -- upsertVault enforces it on the same-name/path-change
+      // arm, so recovery keeps working precisely because it passes it.
       const reg = await registerVaultFromYon(db, {
         vaultPath: targetPath,
         trustedReconstruction: true,

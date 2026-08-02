@@ -50,10 +50,23 @@ export async function joinVaultFlow(
   // registerVaultFromYon's fresh-INSERT arm. The foreign clone-on-subscribe /
   // mesh-adopt member paths pass 'subscribed'; omitted everywhere else →
   // fail-closed 'own'.
+  // A1 (0.20.17) — `trustedReconstruction` is RELOCATION AUTHORITY: permission to
+  // re-point an ALREADY-REGISTERED identity at a new on-disk path. upsertVault
+  // now enforces it; without it, a same-rid/same-name registration at a
+  // different path fails closed (VaultRelocationNotAuthorizedError).
+  //
+  // IT MUST NEVER BE DEFAULTED OR INFERRED HERE. This helper is shared by the
+  // explicit `lyt vault join` command AND by three clone rails; defaulting it
+  // would launder the authority straight back to clone and the A1 defect would
+  // survive behind a flag. Only an explicit command rail that means "this is a
+  // restore/relocation of a vault I already have" may pass true — today that is
+  // `commands/join.ts` alone. Clone, subscribe/member receive, mesh join, adopt
+  // and init all omit it and therefore fail closed.
   opts?: {
     homeMeshRidOverride?: Uint8Array | undefined;
     skipPatternRelink?: boolean | undefined;
     source?: VaultSource | undefined;
+    trustedReconstruction?: boolean | undefined;
   },
 ): Promise<JoinResult> {
   const abs = resolve(vaultPath);
@@ -87,6 +100,10 @@ export async function joinVaultFlow(
           ? { homeMeshRidOverride: opts.homeMeshRidOverride }
           : {}),
         ...(opts?.source !== undefined ? { source: opts.source } : {}),
+        // A1 — forwarded ONLY when the caller passed it explicitly. Never
+        // defaulted: absence means "no relocation authority", which is the
+        // correct answer for every clone rail sharing this helper.
+        ...(opts?.trustedReconstruction === true ? { trustedReconstruction: true } : {}),
       });
     }
   } finally {

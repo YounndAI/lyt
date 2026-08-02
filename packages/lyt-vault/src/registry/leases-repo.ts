@@ -33,7 +33,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { newUuidv7Bytes, isUuidv7Bytes } from "../util/uuid7.js";
+import { newUuidv7Bytes, isUuidv7Bytes, isPersistedEntityRidBytes } from "../util/uuid7.js";
 
 export type LeaseStatus = "active" | "released" | "expired";
 
@@ -164,8 +164,12 @@ export async function acquireLease(db: Client, args: AcquireLeaseArgs): Promise<
   if (!isUuidv7Bytes(args.automatorRid)) {
     throw new Error("acquireLease: automatorRid must be a 16-byte UUIDv7");
   }
-  if (!isUuidv7Bytes(args.vaultRid)) {
-    throw new Error("acquireLease: vaultRid must be a 16-byte UUIDv7");
+  // B1 (0.20.17) — the automator rid above stays strictly v7 (clock-derived),
+  // but vaultRid is an ENTITY rid allocated by the deterministic planner, which
+  // now mints v8. Accept v7 or v8 here or leases break on every newly created
+  // vault while still working for pre-existing ones.
+  if (!isPersistedEntityRidBytes(args.vaultRid)) {
+    throw new Error("acquireLease: vaultRid must be a 16-byte UUID (v7 or v8)");
   }
   const now = args.now ?? Date.now();
   const ttl = args.ttlMs ?? DEFAULT_TTL_MS;

@@ -29,7 +29,18 @@ export function buildJoinCommand(): Command {
     .action(async (path: string) => {
       let result;
       try {
-        result = await joinVaultFlow(path);
+        // A1 (0.20.17) — THE relocation-authority rail. `lyt vault join <path>`
+        // is the handler explicitly saying "this directory is a vault I already
+        // have; register it here" — a restore, a recovered machine, a moved
+        // directory, or recovery from a clone that displaced the original. That
+        // is exactly the reconstruction case upsertVault's gate permits, so this
+        // command passes the capability POSITIVELY.
+        //
+        // It is passed HERE, at the explicit user-invoked command, and nowhere
+        // else. The shared joinVaultFlow helper must never default it: clone,
+        // subscribe/member receive, mesh join and adopt all route through the
+        // same helper and must keep failing closed.
+        result = await joinVaultFlow(path, { trustedReconstruction: true });
       } catch (err) {
         // joining a clone whose vault.yon declares a foreign home
         // mesh refuses actionably (FK guarded at the register chokepoint;

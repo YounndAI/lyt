@@ -30,6 +30,7 @@
 // Run: `npm run smoke:dist` (wired into prepack so a clean-built-but-broken dist
 // cannot pack/publish).
 
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -42,10 +43,11 @@ import {
   mergeCreationIntendedEffectsV1,
   plannedSingleVaultEffectsV1,
   resolveCreationPlanV1,
+  withCreationRepositoryEffectsV1,
 } from "../dist/flows/creation-plan.js";
 import { openRegistry, closeRegistry } from "../dist/registry/client.js";
 import { upsertFederationState } from "../dist/registry/federation-state.js";
-import { vaultRepoName } from "../dist/util/federation-paths.js";
+import { getFederationRepoDir, vaultRepoName } from "../dist/util/federation-paths.js";
 import { hexToUuid7Bytes } from "../dist/util/uuid7.js";
 // UNIT 3 (dist parity) — deep-import the BUILT render loader. This is the
 // dist-parity hazard the smoke exists for: the scaffold bodies now live in
@@ -69,6 +71,9 @@ const TOKEN = "zqxsmoketoken4291"; // distinctive — no collision with scaffold
 const SEMANTIC_REL = "identity/identity.md"; // a B-4 semantic folder, NOT notes/
 const SMOKE_ATTEMPT_ID = "dist-smoke:vault:lyt-vault-smoke:local";
 const SMOKE_OPERATION_ID = "019f720b-cb8a-77e1-9bc7-1f2e0820a093";
+// The pod handle seeded below AND used to resolve the pod repository checkpoint.
+// One constant so the two can never drift apart.
+const SMOKE_POD_HANDLE = "dist-smoke";
 
 function writeNote(vaultPath, rel, frontmatter, body) {
   const full = join(vaultPath, rel);
@@ -77,13 +82,27 @@ function writeNote(vaultPath, rel, frontmatter, body) {
 }
 
 function smokeCreationPlans(home, destinationRequest, actor) {
-  const meshEffects = plannedSingleVaultEffectsV1({
-    operationId: SMOKE_OPERATION_ID,
-    pod: { kind: "existing", rid: "019f6141e1c077218153c462825a1421" },
-    mesh: { kind: "create", name: "personal" },
-    vaultName: "personal/main",
-    vaultRoot: join(home, "vaults", "personal", "main"),
-  });
+  // 0.20.17 -- the smoke declares an EXISTING pod, so the creation plan must
+  // carry a checkpoint covering the pod repository ("pod.yon"). Without it
+  // capturePodCheckpointBoundary cannot resolve podRoot and mesh creation fails
+  // with "Mesh creation plan is missing its pod repository." -- surfacing as the
+  // opaque "Vault creation stopped after its local apply phase began" once the
+  // mutation journal wraps it. plannedSingleVaultEffectsV1 alone does not add
+  // that checkpoint; the production-shaped test helper wraps it in
+  // withCreationRepositoryEffectsV1, and this gate had drifted from that shape.
+  const podRepositoryEffects = [
+    { repositoryRoot: getFederationRepoDir(SMOKE_POD_HANDLE), exactPaths: ["pod.yon"] },
+  ];
+  const meshEffects = withCreationRepositoryEffectsV1(
+    plannedSingleVaultEffectsV1({
+      operationId: SMOKE_OPERATION_ID,
+      pod: { kind: "existing", rid: "019f6141e1c077218153c462825a1421" },
+      mesh: { kind: "create", name: "personal" },
+      vaultName: "personal/main",
+      vaultRoot: join(home, "vaults", "personal", "main"),
+    }),
+    podRepositoryEffects,
+  );
   const mesh = resolveCreationPlanV1({
     request: destinationRequest,
     subject: { kind: "mesh", repositoryName: vaultRepoName("personal/main") },
@@ -91,14 +110,17 @@ function smokeCreationPlans(home, destinationRequest, actor) {
     intendedEffects: meshEffects,
   });
   if (mesh.kind !== "plan") return mesh;
-  const vaultEffects = plannedSingleVaultEffectsV1({
-    operationId: SMOKE_OPERATION_ID,
-    pod: { kind: "existing", rid: "019f6141e1c077218153c462825a1421" },
-    mesh: { kind: "create", name: "personal" },
-    vaultName: "personal/smoke",
-    vaultRoot: join(home, "vaults", "personal", "smoke"),
-    starterFigment: true,
-  });
+  const vaultEffects = withCreationRepositoryEffectsV1(
+    plannedSingleVaultEffectsV1({
+      operationId: SMOKE_OPERATION_ID,
+      pod: { kind: "existing", rid: "019f6141e1c077218153c462825a1421" },
+      mesh: { kind: "create", name: "personal" },
+      vaultName: "personal/smoke",
+      vaultRoot: join(home, "vaults", "personal", "smoke"),
+      starterFigment: true,
+    }),
+    podRepositoryEffects,
+  );
   const vault = resolveCreationPlanV1({
     request: destinationRequest,
     subject: { kind: "vault", repositoryName: vaultRepoName("personal/smoke") },
@@ -124,13 +146,31 @@ async function main() {
     const registry = await openRegistry();
     try {
       await upsertFederationState(registry, {
-        handle: "dist-smoke",
+        handle: SMOKE_POD_HANDLE,
         fedRidBytes: hexToUuid7Bytes("019f6141e1c077218153c462825a1421"),
         lastSyncedAt: "2026-07-18T00:00:00.000Z",
       });
     } finally {
       await closeRegistry(registry);
     }
+    // 0.20.17 -- the registry seed above declares the pod EXISTS, so the
+    // creation plan carries a pod checkpoint and the flow commits `pod.yon` in
+    // the pod repository. Seeding registry state alone left that repository
+    // absent on disk, so the checkpoint could never reach "committed" and the
+    // whole init failed with the opaque "stopped after its local apply phase
+    // began". Materialize the pod repo the seed claims exists.
+    const smokePodRoot = getFederationRepoDir(SMOKE_POD_HANDLE);
+    mkdirSync(smokePodRoot, { recursive: true });
+    writeFileSync(
+      join(smokePodRoot, "pod.yon"),
+      "@DOC|id=019f6141-e1c0-7721-8153-c462825a1421|kind=pod" + String.fromCharCode(10),
+      "utf8",
+    );
+    execFileSync("git", ["init", "--quiet"], { cwd: smokePodRoot, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "smoke@example.com"], { cwd: smokePodRoot });
+    execFileSync("git", ["config", "user.name", "dist smoke"], { cwd: smokePodRoot });
+    execFileSync("git", ["add", "-A"], { cwd: smokePodRoot });
+    execFileSync("git", ["commit", "--quiet", "-m", "smoke: seed pod"], { cwd: smokePodRoot });
     const destinationRequest = { kind: "local" };
     const actor = {
       attempt_id: SMOKE_ATTEMPT_ID,

@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes } from "../util/uuid7.js";
 
 // federation-v2 Layer-1 D1a — the names→rid INDEX repo. This is the indexed
 // query layer that replaces the resolver chokepoint's per-row O(N) scan
@@ -39,7 +39,7 @@ import { isUuidv7Bytes } from "../util/uuid7.js";
 // some Windows build paths; normalize at this boundary).
 
 function toRidBytes(raw: unknown): Uint8Array | null {
-  if (!isUuidv7Bytes(raw)) return null;
+  if (!isPersistedEntityRidBytes(raw)) return null;
   return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);
 }
 

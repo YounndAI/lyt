@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
 
 // v1.A.1 — mesh_subscriptions table is shipped empty. v1.C.2 populates via
 // `lyt mesh subscribe` (the v1.A.1 stub originally pointed at v1.C.1, which
@@ -44,7 +44,7 @@ export interface AddSubscriptionArgs {
 }
 
 function bytesOrThrow(raw: unknown, column: string): Uint8Array {
-  if (!isUuidv7Bytes(raw)) {
+  if (!isPersistedEntityRidBytes(raw)) {
     throw new Error(`mesh_subscriptions.${column} is not a valid UUIDv7 blob.`);
   }
   return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);

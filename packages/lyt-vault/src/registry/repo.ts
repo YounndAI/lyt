@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
 import { canonicalizeVaultPath } from "../util/paths.js";
 import type {
   DestinationKind,
@@ -153,6 +153,44 @@ export class VaultRidImpersonationError extends Error {
   }
 }
 
+// A1 (0.20.17) — raised when a registration would move an ALREADY-REGISTERED
+// identity to a new on-disk path without explicit relocation authority.
+//
+// Distinct from VaultRidImpersonationError, which guards a rid arriving under a
+// DIFFERENT name (an impersonation hazard) and remains an unconditional refusal.
+// This one guards the same rid under the SAME name at a DIFFERENT path — which
+// is legitimate for rebuild/recover-pod reconstruction and is NOT legitimate for
+// a clone. Without the gate, `lyt vault clone` silently repointed the source
+// vault's registry row at the clone.
+export class VaultRelocationNotAuthorizedError extends Error {
+  readonly errorCode = "vault-relocation-not-authorized";
+  readonly ridHex: string;
+  readonly vaultName: string;
+  readonly registeredPath: string;
+  readonly incomingPath: string;
+  constructor(ridHex: string, vaultName: string, registeredPath: string, incomingPath: string) {
+    super(
+      `Refusing to re-point vault '${vaultName}' (rid ${ridHex}) from its registered location to a ` +
+        `new one without explicit reconstruction authority.\n` +
+        `  registered: ${registeredPath}\n` +
+        `  incoming:   ${incomingPath}\n` +
+        `Both directories carry the same vault identity, so registering the incoming one would ` +
+        `make the registered vault stop being the vault Lyt resolves — while leaving it intact ` +
+        `but invisible on disk.\n` +
+        `  If the incoming directory is a COPY, give it its own identity: ` +
+        `'lyt vault clone <url> --to-mesh <mesh>' mints a fresh rid.\n` +
+        `  If you are genuinely restoring or relocating '${vaultName}' (a rebuilt pod, a ` +
+        `recovered machine, a moved directory), use 'lyt vault join ${incomingPath}', which ` +
+        `carries that authority explicitly.`,
+    );
+    this.name = "VaultRelocationNotAuthorizedError";
+    this.ridHex = ridHex;
+    this.vaultName = vaultName;
+    this.registeredPath = registeredPath;
+    this.incomingPath = incomingPath;
+  }
+}
+
 export interface UpsertVaultOptions {
   // fed-v2 Layer-2 P1 — INERT today; pre-wired for the future P5
   // same-name-arm gate. The ONLY gate in the current discriminator
@@ -183,14 +221,14 @@ export interface InsertMeshEdgeArgs {
 
 function toBytesOrNull(raw: unknown, column: string, contextName: string): Uint8Array | null {
   if (raw == null) return null;
-  if (!isUuidv7Bytes(raw)) {
+  if (!isPersistedEntityRidBytes(raw)) {
     throw new Error(`vaults.${column} for ${contextName} is not a valid UUIDv7 blob.`);
   }
   return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);
 }
 
 function bytesOrThrow(raw: unknown, column: string, contextName: string): Uint8Array {
-  if (!isUuidv7Bytes(raw)) {
+  if (!isPersistedEntityRidBytes(raw)) {
     throw new Error(`mesh_edges.${column} for ${contextName} is not a valid UUIDv7 blob.`);
   }
   return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);
@@ -199,7 +237,7 @@ function bytesOrThrow(raw: unknown, column: string, contextName: string): Uint8A
 function rowToVault(row: Record<string, unknown>): VaultRow {
   const ridRaw = row["rid"];
   const nameStr = row["name"] == null ? "<unknown>" : String(row["name"]);
-  if (!isUuidv7Bytes(ridRaw)) {
+  if (!isPersistedEntityRidBytes(ridRaw)) {
     throw new Error(`vaults.rid for name ${JSON.stringify(nameStr)} is not a valid UUIDv7 blob.`);
   }
   const rid = ridRaw instanceof Uint8Array ? ridRaw : new Uint8Array(ridRaw as ArrayBuffer);
@@ -289,7 +327,7 @@ function rowToMeshEdge(row: Record<string, unknown>): MeshEdgeRow {
 }
 
 export async function insertVault(db: Client, args: InsertVaultArgs): Promise<void> {
-  if (!isUuidv7Bytes(args.rid)) {
+  if (!isPersistedEntityRidBytes(args.rid)) {
     throw new Error("insertVault: rid must be a 16-byte UUIDv7 BLOB.");
   }
   await db.execute({
@@ -318,7 +356,7 @@ export async function upsertVault(
   args: InsertVaultArgs,
   opts: UpsertVaultOptions = {},
 ): Promise<void> {
-  if (!isUuidv7Bytes(args.rid)) {
+  if (!isPersistedEntityRidBytes(args.rid)) {
     throw new Error("upsertVault: rid must be a 16-byte UUIDv7 BLOB.");
   }
 
@@ -332,30 +370,76 @@ export async function upsertVault(
   // victim's name, so the hardening pass hostile clone
   //                                    — ext/attacker asserting personal/victim's
   //                                    rid — is refused here regardless of flag).
-  //   (rid live, same name, path ≠) → ALLOW. A legitimate cross-machine
-  //                                    reconstitution / move re-homes the SAME
-  //                                    vault (same identity + name) to a new
-  //                                    on-disk path; the default URL-clone path
-  //                                    (which preserves the source rid) also
-  //                                    lands here when the same source is
-  //                                    re-registered at a new path.
+  //   (rid live, same name, path ≠) → A1 (0.20.17): REQUIRES
+  //                                    `opts.trustedReconstruction`. A genuine
+  //                                    cross-machine reconstitution / move
+  //                                    re-homes the SAME vault to a new on-disk
+  //                                    path and passes it (rebuild, recover-pod,
+  //                                    and the explicit `lyt vault join` rail).
+  //                                    The default URL-clone path ALSO lands
+  //                                    here — it preserves the source rid — and
+  //                                    does NOT pass it, which is the whole
+  //                                    point: allowing it unconditionally is
+  //                                    what let a clone displace the source
+  //                                    vault's registration.
   //   (rid live, same name + path)  → idempotent no-op (ON CONFLICT re-writes
   //                                    identical values harmlessly).
   // A brand-new rid (no live row) always proceeds.
   //
   // `opts.trustedReconstruction` marks the genuine identity-PRESERVING restore
-  // axis (recover-pod / rebuild). In the current discriminator the name-mismatch
-  // refusal is the sole gate, so the flag does NOT relax any refusal — it is
-  // threaded so the restore axis is explicit and so a future tightening (e.g.
-  // gating the same-name path-change arm on the untrusted ingest axis) has the
-  // capability already wired. The name-mismatch refusal stays unconditional.
+  // axis (recover-pod / rebuild / the explicit `lyt vault join` command). A1
+  // (0.20.17) made it LOAD-BEARING: it is now the sole authority for the
+  // same-name/path-change arm above — the "future tightening" this flag was
+  // pre-wired for is the code below. It still relaxes NOTHING else; the
+  // name-mismatch refusal remains unconditional and is not reachable by any
+  // flag.
   const existing = await getVaultByRid(db, args.rid);
   if (existing !== null) {
     const incomingName = args.name;
     if (existing.name !== incomingName) {
       throw new VaultRidImpersonationError(existing.ridHex, existing.name, incomingName);
     }
-    void opts.trustedReconstruction;
+    // A1 (0.20.17) — RELOCATION AUTHORITY, now ENFORCED rather than voided.
+    //
+    // The same-rid/same-name/different-path arm used to be unconditionally
+    // ALLOWED, on the reasoning that it is "a legitimate cross-machine
+    // reconstitution / move". It is — for rebuild and recover-pod. It is NOT for
+    // `lyt vault clone`, which reached the same arm because the default URL-clone
+    // route preserves the source rid. The ON CONFLICT DO UPDATE then repointed
+    // the EXISTING row at the clone, so the source vault silently stopped being
+    // the registered vault while remaining intact on disk — and, because the
+    // clone keeps the source's git origin by default, a later push from it can
+    // target the SOURCE repository.
+    //
+    // The missing state variable was never the verb label ("clone" vs "move") —
+    // it is AUTHORITY TO RELOCATE AN EXISTING IDENTITY. That capability was
+    // already threaded here (register.ts passes it) and then discarded by
+    // `void opts.trustedReconstruction`. It is now load-bearing.
+    //
+    // The capability must be passed POSITIVELY by an explicit command rail and
+    // never defaulted or inferred inside a shared helper: `commands/join.ts` and
+    // three clone rails share `joinVaultFlow`, so defaulting it there would
+    // launder authority straight back to clone and the defect would survive
+    // behind a flag.
+    //
+    // Scope of this gate, deliberately narrow:
+    //   - same-rid + DIFFERENT name  -> unchanged, UNCONDITIONAL refusal above.
+    //     This gate sits BENEATH the impersonation guard and never relaxes it.
+    //   - same-rid + same name + same path -> untouched (idempotent re-register).
+    //   - same-rid + same name + PATH CHANGE -> requires the capability.
+    //   - brand-new rid -> untouched (ordinary first registration).
+    if (
+      opts.trustedReconstruction !== true &&
+      existing.status !== "tombstoned" &&
+      canonicalizeVaultPath(existing.path) !== canonicalizeVaultPath(args.path)
+    ) {
+      throw new VaultRelocationNotAuthorizedError(
+        existing.ridHex,
+        existing.name,
+        existing.path,
+        args.path,
+      );
+    }
   }
 
   // Inc-2 Phase B / →`source` is set on the fresh INSERT arm ONLY and
@@ -635,16 +719,16 @@ export async function deleteAllMeshEdges(db: Client): Promise<void> {
 }
 
 export async function insertMeshEdge(db: Client, edge: InsertMeshEdgeArgs): Promise<void> {
-  if (!isUuidv7Bytes(edge.refMeshRid)) {
+  if (!isPersistedEntityRidBytes(edge.refMeshRid)) {
     throw new Error("insertMeshEdge: refMeshRid must be a 16-byte UUIDv7 BLOB.");
   }
-  if (!isUuidv7Bytes(edge.refVaultRid)) {
+  if (!isPersistedEntityRidBytes(edge.refVaultRid)) {
     throw new Error("insertMeshEdge: refVaultRid must be a 16-byte UUIDv7 BLOB.");
   }
-  if (!isUuidv7Bytes(edge.homeMeshRid)) {
+  if (!isPersistedEntityRidBytes(edge.homeMeshRid)) {
     throw new Error("insertMeshEdge: homeMeshRid must be a 16-byte UUIDv7 BLOB.");
   }
-  if (!isUuidv7Bytes(edge.homeVaultRid)) {
+  if (!isPersistedEntityRidBytes(edge.homeVaultRid)) {
     throw new Error("insertMeshEdge: homeVaultRid must be a 16-byte UUIDv7 BLOB.");
   }
   await db.execute({

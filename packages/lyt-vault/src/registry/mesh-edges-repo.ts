@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
 import {
   insertMeshEdge as insertMeshEdgeImpl,
   type InsertMeshEdgeArgs,
@@ -86,7 +86,7 @@ export async function removeMeshEdge(
 }
 
 function bytesOrThrow(raw: unknown, column: string): Uint8Array {
-  if (!isUuidv7Bytes(raw)) {
+  if (!isPersistedEntityRidBytes(raw)) {
     throw new Error(`mesh_edges.${column} is not a valid UUIDv7 blob.`);
   }
   return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);

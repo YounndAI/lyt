@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
 
 // 0.9.4 (F — pod-local aliases). alias → vault rid. The alias keys on
 // the rid (identity), so it survives rename + move. Resolved in the single
@@ -31,7 +31,7 @@ export interface AliasRow {
 
 function rowToAlias(row: Record<string, unknown>): AliasRow {
   const ridRaw = row["vault_rid"];
-  if (!isUuidv7Bytes(ridRaw)) {
+  if (!isPersistedEntityRidBytes(ridRaw)) {
     throw new Error(
       `vault_aliases.vault_rid for alias ${JSON.stringify(String(row["alias"]))} is not a valid UUIDv7 blob.`,
     );
@@ -53,7 +53,7 @@ export async function setAlias(
   vaultRid: Uint8Array,
   createdAt?: string,
 ): Promise<void> {
-  if (!isUuidv7Bytes(vaultRid)) {
+  if (!isPersistedEntityRidBytes(vaultRid)) {
     throw new Error("setAlias: vaultRid must be a 16-byte UUIDv7 BLOB.");
   }
   await db.execute({
@@ -72,7 +72,7 @@ export async function getAliasTargetRid(db: Client, alias: string): Promise<Uint
   });
   if (r.rows.length === 0) return null;
   const ridRaw = (r.rows[0] as unknown as Record<string, unknown>)["vault_rid"];
-  if (!isUuidv7Bytes(ridRaw)) return null;
+  if (!isPersistedEntityRidBytes(ridRaw)) return null;
   return ridRaw instanceof Uint8Array ? ridRaw : new Uint8Array(ridRaw as ArrayBuffer);
 }
 
@@ -128,7 +128,7 @@ export async function insertAliasRow(
   db: Client,
   args: { alias: string; vaultRid: Uint8Array; kind: string; createdAt: string },
 ): Promise<void> {
-  if (!isUuidv7Bytes(args.vaultRid)) {
+  if (!isPersistedEntityRidBytes(args.vaultRid)) {
     throw new Error("insertAliasRow: vaultRid must be a 16-byte UUIDv7 BLOB.");
   }
   await db.execute({

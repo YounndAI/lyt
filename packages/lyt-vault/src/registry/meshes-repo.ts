@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
 import { isValidGhHandle } from "../util/identity.js";
 import {
   projectLegacyMeshOwnership,
@@ -72,7 +72,7 @@ export interface InsertMeshArgs {
 
 function toBytesOrNull(raw: unknown, column: string): Uint8Array | null {
   if (raw == null) return null;
-  if (!isUuidv7Bytes(raw)) {
+  if (!isPersistedEntityRidBytes(raw)) {
     throw new Error(`meshes.${column} is not a valid UUIDv7 blob.`);
   }
   return raw instanceof Uint8Array ? raw : new Uint8Array(raw as ArrayBuffer);
@@ -80,7 +80,7 @@ function toBytesOrNull(raw: unknown, column: string): Uint8Array | null {
 
 function rowToMesh(row: Record<string, unknown>): MeshRow {
   const ridRaw = row["rid"];
-  if (!isUuidv7Bytes(ridRaw)) {
+  if (!isPersistedEntityRidBytes(ridRaw)) {
     throw new Error(
       `meshes.rid for name ${JSON.stringify(String(row["name"]))} is not a valid UUIDv7 blob.`,
     );
@@ -135,7 +135,7 @@ function rowToMesh(row: Record<string, unknown>): MeshRow {
 }
 
 export async function insertMesh(db: Client, args: InsertMeshArgs): Promise<void> {
-  if (!isUuidv7Bytes(args.rid)) {
+  if (!isPersistedEntityRidBytes(args.rid)) {
     throw new Error("insertMesh: rid must be a 16-byte UUIDv7 BLOB.");
   }
   // MA (deferred pure-hardening) — `push_target` feeds resolveRemoteUrl → a
@@ -221,7 +221,7 @@ export async function updateMeshOwnership(
   rid: Uint8Array,
   args: { pushTarget: string; pushKind: MeshPushKind; ownCreated: boolean },
 ): Promise<void> {
-  if (!isUuidv7Bytes(rid)) {
+  if (!isPersistedEntityRidBytes(rid)) {
     throw new Error("updateMeshOwnership: rid must be a 16-byte UUIDv7 BLOB.");
   }
   if (!isValidGhHandle(args.pushTarget)) {

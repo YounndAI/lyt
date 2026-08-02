@@ -87,7 +87,8 @@ export const realMeshGhClient: MeshGhClient = {
     mkdirSync(dirname(localDir), { recursive: true });
     const url = resolveRemoteUrl(handle, repoName);
     try {
-      execFileSync("git", ["clone", url, localDir], {
+      // 0.20.17 — long-path support applied before checkout (see flows/clone.ts).
+      execFileSync("git", ["clone", "-c", "core.longPaths=true", url, localDir], {
         stdio: ["ignore", "ignore", "pipe"],
         shell: isWindows,
       });

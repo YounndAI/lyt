@@ -25,9 +25,11 @@ import {
   getVaultByName,
   getVaultByRid,
   type ForeignVaultSource,
+  type VaultRow,
 } from "../registry/repo.js";
 import {
   canonicalizeCoordinate,
+  resolveLiveVaultByCoordinate,
   gitUrlToCoordinate,
   vaultLeaf,
   vaultOriginCoordinate,
@@ -326,11 +328,16 @@ const defaultCloneFn: SubscribeCloneFn = async (args) => {
     // (omitted here → keep upstream origin to pull).
     preserveRid: true,
   });
-  const vault = await getVaultByName(args.registryDb, clone.name);
+  // A0 (0.20.17) — resolve by the RID the clone returned, not its non-unique
+  // `name`. Mirrors accept-share's defaultCloneFn, which already did this; the
+  // public-subscribe seam was the one that did not. A subscribed vault keeps the
+  // publisher's stored name, so on two default installs this lookup resolved
+  // ambiguously (or, with a single local row, to the RECEIVER'S OWN vault).
+  const vault = await getVaultByRid(args.registryDb, clone.rid);
   if (vault === null || vault.homeMeshRid === null) {
     throw new SubscribeVaultNotFoundError(
       args.vaultName,
-      `clone succeeded but registry lookup of '${clone.name}' returned no vault row with home_mesh_rid (defensive — shouldn't happen).`,
+      `clone succeeded but registry lookup of rid '${clone.ridHex}' (name '${clone.name}') returned no vault row with home_mesh_rid (defensive — shouldn't happen).`,
     );
   }
   return {
@@ -425,9 +432,38 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
           `match expected convention repository '${ref.repoName}'.`,
       );
     }
-    let subscribedVault = ref !== null ? await getVaultByName(db, ref.vaultName) : null;
-    if (subscribedVault === null && (ref === null || ref.vaultName !== args.subscribedVaultName)) {
-      subscribedVault = await getVaultByName(db, args.subscribedVaultName);
+    // A0 (0.20.17) — when the authoritative remote is known, dedupe by the
+    // CANONICAL ORIGIN COORDINATE (unique per upstream repo) and NEVER by the
+    // publisher's stored name (not unique post-migration-003). On two default
+    // installs both sides are `personal/main`, so the name rail resolved to the
+    // RECEIVER'S OWN vault; the coordinate guard immediately below then refused
+    // the subscription — blocking public subscribe for every default vault,
+    // before any clone. There is deliberately NO name fallback on this branch:
+    // a name hit without a coordinate hit IS the false positive.
+    //
+    // The coordinate string goes through the same `resolveVault` chokepoint
+    // (its origin-coordinate rail canonicalizes both sides). A 3-segment
+    // coordinate cannot collide with a stored name (depth <= 1 gate) or with a
+    // computed 2-segment `{mesh}/{leaf}` display name.
+    //
+    // The name rails remain for the legacy branch where no authoritative remote
+    // is resolvable — behavior there is explicitly supported and unchanged.
+    let subscribedVault: VaultRow | null = null;
+    if (authoritativeRemote !== undefined && authoritativeRemote !== null) {
+      // Uses the LIVE-ONLY coordinate rail, not the public resolver's
+      // status-agnostic first-match one: `git_url` is not unique and tombstoning
+      // does not clear it, so a delete/tombstone -> re-clone leaves two rows for
+      // one coordinate. Selecting a tombstoned or arbitrary row here would skip
+      // the clone the subscriber actually needs. Fails closed on >1 live match.
+      subscribedVault = await resolveLiveVaultByCoordinate(
+        db,
+        `github.com/${authoritativeRemote.owner}/${authoritativeRemote.repoName}`.toLowerCase(),
+      );
+    } else {
+      subscribedVault = ref !== null ? await getVaultByName(db, ref.vaultName) : null;
+      if (subscribedVault === null && (ref === null || ref.vaultName !== args.subscribedVaultName)) {
+        subscribedVault = await getVaultByName(db, args.subscribedVaultName);
+      }
     }
     if (subscribedVault !== null && authoritativeRemote === null) {
       throw new SubscribeVaultNotFoundError(
@@ -536,8 +572,12 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       const bucketOwner = slugifyHandle(remote.owner);
       const cloneHomeMesh = bucketMeshName(entryModeForSource(foreignSource), bucketOwner);
       const cloneSubdir = bucketVaultRelDir(foreignSource, bucketOwner, vaultLeaf(ref.vaultName));
+      // A0 (0.20.17) — RETAIN the clone result. It carries the vault rid, which
+      // is the identity; discarding it and re-resolving `ref.vaultName` below
+      // sent this continuation back through the ambiguous public name rail.
+      let cloned: SubscribeCloneResult;
       try {
-        await cloneFn({
+        cloned = await cloneFn({
           vaultName: ref.vaultName,
           homeMeshName: cloneHomeMesh,
           targetSubdir: cloneSubdir,
@@ -553,11 +593,12 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
         );
       }
       cloneAction = "cloned";
-      subscribedVault = await getVaultByName(db, ref.vaultName);
+      // A0 — continue by the rid the clone just returned, not by name.
+      subscribedVault = await getVaultByRid(db, cloned.vaultRid);
       if (subscribedVault === null) {
         throw new SubscribeVaultNotFoundError(
           args.subscribedVaultName,
-          `clone succeeded but vault '${ref.vaultName}' is not in the registry (defensive).`,
+          `clone succeeded but vault '${ref.vaultName}' (rid ${cloned.vaultRidHex}) is not in the registry (defensive).`,
         );
       }
     }

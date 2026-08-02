@@ -36,7 +36,9 @@ export interface GitCloneFn {
 
 const defaultGitClone: GitCloneFn = (cloneUrl, dest) =>
   new Promise((resolve, reject) => {
-    const child = spawn("git", ["clone", "--quiet", cloneUrl, dest], {
+    // 0.20.17 — long-path support applied before checkout (see
+    // lyt-vault/src/flows/clone.ts for why it must be on the clone itself).
+    const child = spawn("git", ["clone", "--quiet", "-c", "core.longPaths=true", cloneUrl, dest], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stderr = "";

@@ -289,6 +289,63 @@ export class AmbiguousVaultLeafError extends Error {
   }
 }
 
+// A0 (0.20.17) — raised when one origin coordinate matches more than one LIVE
+// vault. Mirrors the never-tiebreak posture of the exact-name and bare-leaf
+// rails: a receive-path dedup decision must never silently pick a row.
+export class AmbiguousVaultCoordinateError extends Error {
+  readonly errorCode = "ambiguous-vault-coordinate";
+  readonly coordinate: string;
+  readonly candidates: readonly string[];
+  constructor(coordinate: string, candidates: readonly string[]) {
+    super(
+      `Ambiguous origin coordinate '${coordinate}': matches ${candidates.length} LIVE vaults — ` +
+        `${candidates.join(", ")}. Two local vaults claim the same upstream. Remove one with ` +
+        `'lyt vault forget <name>' before receiving from that origin again.`,
+    );
+    this.name = "AmbiguousVaultCoordinateError";
+    this.coordinate = coordinate;
+    this.candidates = [...candidates];
+  }
+}
+
+// A0 (0.20.17) — INTERNAL live-only coordinate resolution, for receive-path
+// dedup decisions.
+//
+// `resolveVault`'s coordinate rail (step 4 below) is deliberately
+// status-AGNOSTIC and first-match-wins: a tombstoned vault still resolves by its
+// origin coordinate, which is correct for a stored user-facing reference.
+//
+// It is NOT correct for deciding "do I already hold this upstream, or must I
+// clone it?" `git_url` is indexed but NOT unique, and tombstoning does not clear
+// it — so a delete/tombstone → re-clone sequence leaves two rows carrying one
+// coordinate. First-match could then hand the receive path a tombstoned or
+// arbitrary row and skip the clone the caller actually needed.
+//
+// This rail therefore filters to LIVE rows and fails closed on multiplicity.
+export async function resolveLiveVaultByCoordinate(
+  db: Client,
+  coordinate: string,
+): Promise<VaultRow | null> {
+  const norm =
+    gitUrlToCoordinate(coordinate) ?? coordinate.replace(/\.git$/, "").replace(/\/+$/, "");
+  const live: VaultRow[] = [];
+  for (const { rid, gitUrl } of await listGitUrlRids(db)) {
+    const coord = gitUrlToCoordinate(gitUrl);
+    if (coord === null || coord !== norm) continue;
+    const v = await getVaultByRid(db, rid);
+    if (v !== null && v.status !== "tombstoned") live.push(v);
+  }
+  if (live.length === 0) return null;
+  if (live.length === 1) return live[0]!;
+
+  const meshes = await listMeshes(db);
+  const meshNameByRidHex = new Map(meshes.map((m) => [m.ridHex, m.name] as const));
+  const candidates = live
+    .map((v) => computeDisplayNameSync(v, meshNameByRidHex, vaultOriginCoordinate(v)))
+    .sort();
+  throw new AmbiguousVaultCoordinateError(norm, candidates);
+}
+
 async function rawByName(db: Client, name: string): Promise<VaultRow | null> {
   const r = await db.execute({
     sql: "SELECT rid, status FROM vaults WHERE name = ?",

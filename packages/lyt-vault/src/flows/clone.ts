@@ -24,7 +24,6 @@ import { closeRegistry, openRegistry } from "../registry/client.js";
 import { addVaultToMesh } from "../registry/mesh-vaults-repo.js";
 import { getMeshByName, getMeshByRid, insertMesh, type MeshRow } from "../registry/meshes-repo.js";
 import {
-  getVaultByName,
   getVaultByPath,
   getVaultByRid,
   markVaultSourcePreserving,
@@ -484,7 +483,15 @@ export async function cloneVaultFlow(rawOpts: CloneOptions): Promise<CloneResult
     // fed-v2 Layer-2 P1 — `--` terminates git option parsing so the
     // URL + target are always treated as positionals, never as options, even if
     // a future code path lets a dash-leading value slip past the guard above.
-    execFileSync("git", ["clone", "--", opts.url, target], { stdio: "inherit" });
+    // 0.20.17 — `-c core.longPaths=true` is set ON THE CLONE, which applies it
+    // BEFORE checkout and persists it in the new repo. A post-hoc `git config`
+    // would be too late: the failure happens DURING checkout, per file
+    // ("unable to create file ...: Filename too long"), leaving a partial
+    // worktree. Inert on non-Windows, so it is unconditional rather than
+    // platform-branched -- one code path, nothing to get wrong per OS.
+    execFileSync("git", ["clone", "-c", "core.longPaths=true", "--", opts.url, target], {
+      stdio: "inherit",
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // We claimed the dir above, so it is ours to sweep (no
@@ -1127,10 +1134,20 @@ async function cloneIntoTargetMesh(args: CloneIntoTargetMeshArgs): Promise<Clone
     // Belt-and-braces (fresh-INSERT paths): ensure vaults.home_mesh_rid is set,
     // INSERT mesh_vaults role='home', append @MESH_HOME to the target mesh's
     // mesh.yon.
-    const vaultRow = await getVaultByName(db, join_.name);
+    // A0 (0.20.17) — continue by the RID we already hold, never by `name`.
+    // `getVaultByName` delegates to the PUBLIC resolver (repo.ts → resolveVault),
+    // whose exact-name rail fails closed on >1 live row. A received foreign vault
+    // keeps the PUBLISHER's stored name (preserve-rid path registers vault.yon's
+    // name verbatim; only the home mesh + disk path are re-keyed to the bucket),
+    // so a receiver that already owns the same name — `personal/main` on any two
+    // default installs — made this internal continuation throw
+    // AmbiguousVaultLeafError AFTER the gh invitation had been consumed. The
+    // resolver is correct; using a non-unique human handle for an internal
+    // post-insert identity check is not. `join_.rid` is the identity.
+    const vaultRow = await getVaultByRid(db, join_.rid);
     if (vaultRow === null) {
       throw new Error(
-        `cloneVaultFlow: registered vault '${join_.name}' did not land in the registry (defensive).`,
+        `cloneVaultFlow: registered vault '${join_.name}' (rid ${join_.ridHex}) did not land in the registry (defensive).`,
       );
     }
     // Inc-2 Phase B / → (keystone) — positively mark the received foreign

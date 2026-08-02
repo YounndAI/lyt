@@ -18,7 +18,7 @@ import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByRid } from "../registry/repo.js";
-import { isUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
 import type { MeshPushKind } from "../yon/mesh-write.js";
 
 // v1.B.1 — `lyt mesh list [--json]` flow.
@@ -83,7 +83,7 @@ export async function meshListUsingDb(db: Client): Promise<MeshListResult> {
   for (const row of meshRows.rows) {
     const r = row as unknown as Record<string, unknown>;
     const ridRaw = r["rid"];
-    if (!isUuidv7Bytes(ridRaw)) continue;
+    if (!isPersistedEntityRidBytes(ridRaw)) continue;
     const rid = ridRaw instanceof Uint8Array ? ridRaw : new Uint8Array(ridRaw as ArrayBuffer);
     const ridHex = uuid7BytesToHex(rid);
     const name = String(r["name"]);
@@ -94,7 +94,7 @@ export async function meshListUsingDb(db: Client): Promise<MeshListResult> {
 
     const mainVaultRidRaw = r["main_vault_rid"];
     let mainVault: MeshListVaultRef | null = null;
-    if (isUuidv7Bytes(mainVaultRidRaw)) {
+    if (isPersistedEntityRidBytes(mainVaultRidRaw)) {
       const mainRid =
         mainVaultRidRaw instanceof Uint8Array
           ? mainVaultRidRaw
@@ -121,7 +121,7 @@ export async function meshListUsingDb(db: Client): Promise<MeshListResult> {
     for (const mvRow of mvRows.rows) {
       const m = mvRow as unknown as Record<string, unknown>;
       const vRidRaw = m["vault_rid"];
-      if (!isUuidv7Bytes(vRidRaw)) continue;
+      if (!isPersistedEntityRidBytes(vRidRaw)) continue;
       const vRid = vRidRaw instanceof Uint8Array ? vRidRaw : new Uint8Array(vRidRaw as ArrayBuffer);
       const vaultRow = await getVaultByRid(db, vRid);
       if (vaultRow === null) continue;

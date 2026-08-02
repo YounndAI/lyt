@@ -485,7 +485,11 @@ export const realFederationGhClient: FederationGhClient = {
     await withSpinner(
       `${handle}/${repoName}`,
       () =>
-        spawnArgvVerbatimAsync("git", ["clone", url, localDir], {
+        // 0.20.17 — see flows/clone.ts: long-path support must be set ON the
+        // clone so it applies before checkout. This is the fresh-machine adopt
+        // path, where a partial checkout previously left a directory that a
+        // later retry mistook for a complete vault.
+        spawnArgvVerbatimAsync("git", ["clone", "-c", "core.longPaths=true", url, localDir], {
           // MF5 (V-A-11) — never hang a TTY-less `lyt init --auto` on a git
           // credential prompt for a private pod/vault repo. GIT_TERMINAL_PROMPT=0
           // makes git fail FAST with a non-zero exit (→ the adopt-path catch

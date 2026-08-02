@@ -42,6 +42,27 @@ export function isUuidv7Bytes(bytes: unknown): bytes is Uint8Array {
   return (view[6]! & 0xf0) === 0x70;
 }
 
+// B1 (0.20.17) — the PERSISTED-ENTITY rid predicate: accepts UUID v7 or v8.
+//
+// Deliberately a SIBLING of isUuidv7Bytes rather than a widening of it. That one
+// is shared by entity-rid readers AND by boundaries that must stay strictly v7
+// (clock-derived records: attempts, runs, audit/provenance rows, automator
+// leases). Widening it in place would silently relax those too.
+//
+// Entity rids — pod, mesh, vault, memscope — are allocated by the DETERMINISTIC
+// creation planner, which now mints v8 because its first 48 bits are digest
+// material rather than a timestamp. Identities minted before that change are v7
+// and remain perfectly valid opaque keys, so every persisted-entity boundary has
+// to accept both, forever. There is no migration and none is needed: nothing
+// decodes a timestamp out of these.
+export function isPersistedEntityRidBytes(bytes: unknown): bytes is Uint8Array {
+  const view = toUint8(bytes);
+  if (!view) return false;
+  if (view.length !== 16) return false;
+  const version = view[6]! & 0xf0;
+  return version === 0x70 || version === 0x80;
+}
+
 function toUint8(b: unknown): Uint8Array | null {
   if (b instanceof Uint8Array) return b;
   if (b instanceof ArrayBuffer) return new Uint8Array(b);

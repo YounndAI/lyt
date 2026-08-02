@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isUuidv7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, newUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
 
 // Per-machine row tracking the locally-cached federation repo. v1.A.0 ships
 // one row per machine (multi-handle support is a future concern; the PK
@@ -34,7 +34,7 @@ export interface FederationStateRow {
 function rowToState(row: Record<string, unknown>): FederationStateRow {
   const handle = String(row["handle"]);
   const ridRaw = row["fed_rid"];
-  if (!isUuidv7Bytes(ridRaw)) {
+  if (!isPersistedEntityRidBytes(ridRaw)) {
     throw new Error(
       `federation_state.fed_rid for handle ${JSON.stringify(handle)} is not a valid UUIDv7 blob.`,
     );
