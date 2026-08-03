@@ -1,15 +1,16 @@
 # lyt housekeep
 
-Month-boundary rotation for per-vault YON ledger files (audit + provenance).
+Preview month-boundary rotation for per-vault YON ledger files (audit + provenance).
 YON is the source of truth; libSQL is the regenerable cache.
 
 ## Usage
 
 ```
-lyt housekeep [--vault <name>] [--ledger <name>] [--rotate-now] [--dry-run] [--json]
+lyt housekeep [--vault <name>] [--ledger <name>] [--rotate-now] [--apply] [--json]
 ```
 
-Default scope: every active vault in the registry × every known ledger.
+Default mode is a read-only preview. `--apply` is required to rotate or delete
+eligible retained archives. Default scope: every active vault in the registry × every known ledger.
 The known-ledger set currently covers `audit` + `provenance`; friction tracking
 stays libSQL-only for now and will join rotation when it gains a YON spine.
 
@@ -40,7 +41,8 @@ the prior file in place or the archived path, never a half-rotated state.
 | `--vault <name>`  | Restrict to one vault by name (default: every active vault).                                                          |
 | `--ledger <name>` | Restrict to one ledger (default: every known ledger).                                                                 |
 | `--rotate-now`    | Force rotation regardless of the month-boundary check. Useful for manual archive cuts or test deterministic captures. |
-| `--dry-run`       | Report what would change without mutating any file. Outcome reads `would-rotate` or `would-rotate-now`.               |
+| `--dry-run`       | Explicit compatibility spelling for the default preview. Outcome reads `would-rotate` or `would-rotate-now`.         |
+| `--apply`         | Apply the previewed rotations and eligible retention deletions.                                                       |
 | `--json`          | Deterministic JSON shape: `{ rotations, dryRun, scannedVaults, scannedLedgers }`.                                    |
 
 ## Outcomes
@@ -59,7 +61,7 @@ Each rotation report carries an `outcome` field:
 
 ## When to run
 
-`lyt housekeep` is idempotent. Cron it monthly (`0 3 1 * *` — 03:00 UTC on
+`lyt housekeep --apply` is idempotent. Cron that explicit apply command monthly (`0 3 1 * *` — 03:00 UTC on
 the 1st), or just let it pile up — the rotation runs whenever it next runs
 and the archived file is correctly month-tagged regardless of when it was
 moved.

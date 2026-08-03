@@ -59,8 +59,8 @@ const VERB_GROUPS: VerbGroup[] = [
       },
       { verb: "lyt vault disconnect <name>", summary: "Stop syncing; local copy preserved" },
       {
-        verb: "lyt vault delete <name>",
-        summary: "Remove .lyt/ derived state; .md files untouched; tombstone by default",
+        verb: "lyt vault delete <name> --yes",
+        summary: "Confirm and remove .lyt/ derived state; .md files untouched; tombstone by default",
       },
       {
         verb: "lyt vault verify",
@@ -309,9 +309,9 @@ const VERB_GROUPS: VerbGroup[] = [
     name: "housekeep",
     verbs: [
       {
-        verb: "lyt housekeep [--vault <name>] [--ledger <name>] [--rotate-now] [--dry-run] [--json]",
+        verb: "lyt housekeep [--vault <name>] [--ledger <name>] [--rotate-now] [--apply] [--json]",
         summary:
-          "Month-boundary rotation for per-vault YON ledgers (audit, provenance). Idempotent; default scope = every active vault × every known ledger.",
+          "Preview month-boundary rotation for per-vault YON ledgers (audit, provenance). --apply mutates; default scope = every active vault × every known ledger.",
       },
     ],
   },

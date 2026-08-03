@@ -38,7 +38,7 @@ import { normalizeCommanderCreationDestination } from "../op/cli-destination-nor
 import { observeActiveActor, type ActiveActorObservation } from "../op/active-actor-observation.js";
 import {
   parseReceiptV1ForEmission,
-  receiptSafeTextOrFallback,
+  receiptSafeErrorSummary,
   type ReceiptV1,
 } from "../op/receipt-v1.js";
 import { creationPlanReplayKeyDigest } from "../op/creation-command-receipt.js";
@@ -463,10 +463,7 @@ function buildMeshInitSubcommand(dependencies: MeshCommandDependencies): Command
         const mutationFailure = err instanceof CreationMutationFailure ? err : null;
         const mutations = mutationFailure?.mutations;
         const local = mutations === undefined ? 0 : creationLocalMutationCount(mutations);
-        const summary = receiptSafeTextOrFallback(
-          mutationFailure?.message ?? "Mesh creation failed.",
-          "Mesh creation failed.",
-        );
+        const summary = receiptSafeErrorSummary(err, "Mesh creation failed.");
         receipt = meshReceipt({
           operationId,
           attemptId,

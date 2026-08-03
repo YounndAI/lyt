@@ -100,11 +100,12 @@ export function plannedMeshPodEffectPathsV1(
 ): string[] {
   const writerId = getWriterId();
   return [
-    ...(includePodScaffold ? [".gitignore", "README.md", "identity.yon"] : []),
+    ...(includePodScaffold
+      ? [".gitignore", "README.md", "identity.yon", `ledger/machines/${writerId}.yon`]
+      : []),
     "pod.yon",
     `ledger/destination-policy/${writerId}.yon`,
     ...(includeMeshLedger ? [`ledger/meshes/${writerId}.yon`] : []),
-    `ledger/machines/${writerId}.yon`,
     `ledger/vaults/${writerId}.yon`,
   ].sort();
 }

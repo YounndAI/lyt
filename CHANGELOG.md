@@ -7,11 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [Unreleased]
+## [0.20.22] — 2026-08-03
 
 ### Changed
 
+- Fixed `lyt mesh init` on an existing pod by checkpointing only pod files the operation actually rewrites, while preserving exact-path concurrency guards.
+- Surfaced the deepest receipt-safe creation failure cause and made `lyt vault init` enumerate every checkpoint repository, commit, and path it mutates.
+- Made local creation checkpoint commits truthful across vault, mesh-main, and pod repositories.
+- Required `--yes` for `lyt vault delete` and made `lyt housekeep` preview-only unless `--apply` is explicit.
 - Restored the root and all seven package `LICENSE` files to the exact, unmodified Apache License 2.0 text; MARLINK attribution remains in `NOTICE`.
+
+---
 
 ## [0.20.21] — 2026-08-03
 

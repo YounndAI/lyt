@@ -114,9 +114,10 @@ rows) is a slower probe deferred to a later phase.
 ## Monthly rotation — `lyt housekeep`
 
 ```bash
-lyt housekeep              # rotate every vault × every known ledger
-lyt housekeep --dry-run    # report what would change; no writes
-lyt housekeep --rotate-now # force rotation regardless of month boundary
+lyt housekeep                      # preview every vault × every known ledger
+lyt housekeep --apply              # apply month-boundary rotation
+lyt housekeep --rotate-now         # preview a forced rotation
+lyt housekeep --rotate-now --apply # apply a forced rotation
 ```
 
 Run `lyt help housekeep` for the full algorithm.

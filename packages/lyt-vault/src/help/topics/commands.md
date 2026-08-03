@@ -98,7 +98,7 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   mesh is immutable).
 - `lyt vault forget <name> [--tombstone]` — remove from registry; files untouched.
 - `lyt vault disconnect <name>` — stop syncing; local copy preserved.
-- `lyt vault delete <name> [--no-tombstone]` — wipe `.lyt/` derived state;
+- `lyt vault delete <name> [--no-tombstone] --yes` — confirm and wipe `.lyt/` derived state;
   `.md` files and the GitHub repo untouched.
 - `lyt vault abandon <name>` — anti-lock-in un-adopt: remove only Lyt's local
   adoption state. Your markdown and remote are left exactly as they were.
@@ -189,7 +189,8 @@ sync` first for an authoritative decision (a peer's un-synced backing can
 - `lyt machine status [--json]` — this machine's roles + region.
 - `lyt machine alias <alias> [--json]` — set this machine's synchronized alias.
 - `lyt federation alias [alias] [--json]` — inspect or update Your Pod's alias; its RID stays stable.
-- `lyt housekeep [--dry-run|--rotate-now]` — monthly ledger rotation. See
+- `lyt housekeep [--rotate-now] [--apply]` — preview monthly ledger rotation;
+  `--apply` is required to mutate. See
   `lyt help ledgers` and `lyt help housekeep`.
 
 ## Registry

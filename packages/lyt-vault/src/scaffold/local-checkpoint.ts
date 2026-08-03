@@ -145,7 +145,7 @@ export function createLocalCheckpoint(
         "--pathspec-from-file=-",
         "--pathspec-file-nul",
         "-m",
-        "chore: lyt vault init scaffold",
+        "chore: lyt local creation checkpoint",
       ],
       {
         cwd: vaultPath,

@@ -18,17 +18,23 @@ import { Command } from "commander";
 
 import { deleteVaultFlow } from "../flows/delete.js";
 
-export function buildDeleteCommand(): Command {
+export function buildDeleteCommand(dependencies: { deleteVaultFlow?: typeof deleteVaultFlow } = {}): Command {
   const cmd = new Command("delete");
   cmd
     .description(
-      "Remove a vault's .lyt/ derived state. .md files are NEVER touched. By default leaves a tombstone in the registry (a 'closed path' marker); pass --no-tombstone to fully remove the row.",
+      "Remove a vault's .lyt/ derived state. .md files are NEVER touched. By default leaves a tombstone in the registry (a 'closed path' marker); pass --no-tombstone to fully remove the row. Requires --yes.",
     )
     .argument("<name>", "Registered vault name")
     .option("--no-tombstone", "Fully remove the registry row instead of tombstoning")
-    .action(async (name: string, opts: { tombstone?: boolean }) => {
+    .option("--yes", "Confirm deleting the vault's Lyt state")
+    .action(async (name: string, opts: { tombstone?: boolean; yes?: boolean }) => {
+      if (opts.yes !== true) {
+        throw new Error(
+          `Refusing to delete '${name}' without explicit confirmation. Pass --yes to proceed.`,
+        );
+      }
       const noTombstone = opts.tombstone === false;
-      const result = await deleteVaultFlow(name, { noTombstone });
+      const result = await (dependencies.deleteVaultFlow ?? deleteVaultFlow)(name, { noTombstone });
       // Phase E item 1 (#9) — surface the orphaned-then-dropped pod-local
       // aliases. delete has no interactive gate, so the warning is reported with
       // the outcome rather than before a prompt.

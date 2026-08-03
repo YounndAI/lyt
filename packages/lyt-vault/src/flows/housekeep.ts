@@ -39,7 +39,7 @@ import { dirname, join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { LEDGER_NAMES, type LedgerKindName } from "../registry/ledger-registry.js";
-import { listVaults, type VaultRow } from "../registry/repo.js";
+import { getVaultByName, listVaults, type VaultRow } from "../registry/repo.js";
 import { resolveConfig } from "../util/config.js";
 import { getMachineId } from "../util/writer-id.js";
 import { assertNoReparsePointInPath } from "../util/write-path-guard.js";
@@ -144,12 +144,20 @@ export async function housekeepFlow(args: HousekeepArgs = {}): Promise<Housekeep
   const db = await openRegistry();
   let vaults: VaultRow[];
   try {
-    const all = await listVaults(db);
-    vaults = args.vaultRid !== undefined
-      ? all.filter((v) => v.ridHex === args.vaultRid)
-      : args.vault
-      ? all.filter((v) => v.name === args.vault)
-      : all.filter((v) => v.status === "active");
+    if (args.vaultRid !== undefined) {
+      const all = await listVaults(db);
+      vaults = all.filter((v) => v.ridHex === args.vaultRid);
+    } else if (args.vault !== undefined) {
+      // Names are an addressing layer over the stable RID. Route through the
+      // shared resolver so a canonical `{mesh}/{vault}` address keeps working
+      // immediately after `vault move`, even while the stored legacy prefix
+      // remains unchanged.
+      const resolved = await getVaultByName(db, args.vault);
+      vaults = resolved === null ? [] : [resolved];
+    } else {
+      const all = await listVaults(db);
+      vaults = all.filter((v) => v.status === "active");
+    }
     if ((args.vault || args.vaultRid) && vaults.length === 0) {
       throw new Error(args.vaultRid !== undefined
         ? `No vault registered with RID '${args.vaultRid}'.`

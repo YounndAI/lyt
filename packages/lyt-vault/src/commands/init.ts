@@ -52,8 +52,14 @@ import {
   type ReceiptAttemptSession,
   type ReceiptAttemptWarningCode,
 } from "../op/receipt-attempt.js";
-import { receiptSafeTextOrFallback, type ReceiptV1 } from "../op/receipt-v1.js";
-import { CreationMutationFailure } from "../op/creation-mutation-journal.js";
+import {
+  receiptSafeErrorSummary,
+  type ReceiptV1,
+} from "../op/receipt-v1.js";
+import {
+  CreationMutationFailure,
+  type CreationCheckpointEvidence,
+} from "../op/creation-mutation-journal.js";
 import { plannedInitialScaffoldPaths, plannedObsidianScaffoldPaths } from "../scaffold/init.js";
 import { openSqliteReadOnly } from "../sqlite/read-only-client.js";
 import {
@@ -397,12 +403,7 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
             ? err.errorCode
             : "vault-init-failed");
         const retryable = mutationFailure?.retryable ?? false;
-        const rawSummary =
-          mutationFailure?.message ??
-          (err instanceof Error && code !== "vault-init-failed"
-            ? err.message
-            : "Vault creation did not complete.");
-        const summary = receiptSafeTextOrFallback(rawSummary, safeInitFailureDiagnostic(code));
+        const summary = receiptSafeErrorSummary(err, safeInitFailureDiagnostic(code));
         emitInitDiagnostic(safeInitFailureDiagnostic(code));
         const receipt = makeCreationCommandReceipt({
           operation: "vault-init",
@@ -474,6 +475,9 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
         emitInitDiagnostic(
           `Created '${displayName}' locally at ${result.vaultPath}. ${publishNext.message}`,
         );
+        for (const checkpoint of result.creation.mutations.checkpointRepositories ?? []) {
+          emitInitDiagnostic(formatInitCheckpointDiagnostic(checkpoint));
+        }
         if (aliasRecommendation !== null) {
           emitInitDiagnostic(formatAliasRecommendationHuman(aliasRecommendation));
         }
@@ -529,6 +533,15 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
       if (checkpointFailed) process.exitCode = 2;
     });
   return cmd;
+}
+
+export function formatInitCheckpointDiagnostic(checkpoint: CreationCheckpointEvidence): string {
+  const commit = checkpoint.commitSha === undefined ? "no commit" : checkpoint.commitSha;
+  const status = checkpoint.clean === true ? "clean" : "incomplete";
+  return (
+    `Checkpoint ${status}: ${checkpoint.repositoryRoot} (${commit})\n` +
+    `  paths: ${checkpoint.paths.join(", ")}`
+  );
 }
 
 async function planInitCreation(

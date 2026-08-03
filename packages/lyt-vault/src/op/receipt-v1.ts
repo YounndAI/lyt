@@ -67,6 +67,20 @@ export function receiptSafeTextOrFallback(value: string, fallback: string): stri
   if (safeTextSchema.safeParse(fallback).success) return fallback;
   return "Operation did not complete.";
 }
+
+/** Select the deepest bounded, receipt-safe message from one Error cause chain. */
+export function receiptSafeErrorSummary(error: unknown, fallback: string): string {
+  let current: unknown = error;
+  let selected: string | undefined;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < MAX_RECEIPT_DIAGNOSTIC_DEPTH; depth += 1) {
+    if (!(current instanceof Error) || seen.has(current)) break;
+    seen.add(current);
+    if (safeTextSchema.safeParse(current.message).success) selected = current.message;
+    current = current.cause;
+  }
+  return selected ?? receiptSafeTextOrFallback(fallback, "Operation did not complete.");
+}
 const recommendationTarget = z
   .string()
   .min(1)

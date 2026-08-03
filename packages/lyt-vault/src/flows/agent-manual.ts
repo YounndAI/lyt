@@ -477,7 +477,7 @@ function buildDestructiveSection(): string {
   return [
     "## `[lyt.destructive]` Destructive verbs need handler confirmation",
     "",
-    "`lyt vault delete|forget`, `git push --force`. Non-idempotent by design. Lyt refuses to",
+    "`lyt vault delete --yes|forget`, `git push --force`. Non-idempotent by design. Lyt refuses to",
     "delete, forget, or abandon a mesh main vault; removing it requires an explicit mesh-lifecycle",
     "flow, never a vault-command workaround.",
   ].join("\n");

@@ -25,6 +25,7 @@ interface HousekeepCliOpts {
   ledger?: string;
   rotateNow?: boolean;
   dryRun?: boolean;
+  apply?: boolean;
   json?: boolean;
   retention?: string;
 }
@@ -35,7 +36,7 @@ export function buildHousekeepCommand(dependencies: {
 } = {}): Command {
   return new Command("housekeep")
     .description(
-      "Month-boundary rotation for per-vault YON ledger files. Default: every active vault, every known ledger (audit, provenance). Idempotent — re-runs the same month skip silently. Deterministic --json.",
+      "Preview month-boundary rotation for per-vault YON ledger files. Default: every active vault, every known ledger (audit, provenance). Pass --apply to mutate. Deterministic --json.",
     )
     .option("--vault <name>", "Restrict to one vault by name")
     .option("--ledger <name>", `Restrict to one ledger (known: ${KNOWN_LEDGERS.join(", ")})`)
@@ -44,12 +45,16 @@ export function buildHousekeepCommand(dependencies: {
       "Force rotation regardless of month boundary (for testing or manual archive cuts)",
     )
     .option("--dry-run", "Report proposed rotations without mutating any files")
+    .option("--apply", "Apply the proposed rotations and eligible retention deletions")
     .option(
       "--retention <days|never>",
       `Sync archive retention (default: ${DEFAULT_LYT_CONFIG.syncLedgerRetentionDays} days; 'never' disables GC)`,
     )
     .option("--json", "Emit a deterministic JSON result instead of human-readable text")
     .action(async (opts: HousekeepCliOpts) => {
+      if (opts.apply === true && opts.dryRun === true) {
+        throw new Error("Choose either --apply or --dry-run, not both.");
+      }
       if (
         opts.ledger !== undefined &&
         !(KNOWN_LEDGERS as readonly string[]).includes(opts.ledger)
@@ -69,7 +74,7 @@ export function buildHousekeepCommand(dependencies: {
         ...(opts.vault !== undefined ? { vault: opts.vault } : {}),
         ...(opts.ledger !== undefined ? { ledger: opts.ledger as LedgerName } : {}),
         ...(opts.rotateNow === true ? { rotateNow: true } : {}),
-        ...(opts.dryRun === true ? { dryRun: true } : {}),
+        dryRun: opts.apply !== true,
         ...(retentionDays === undefined ? {} : { retentionDays }),
         ...(authority === undefined ? {} : {
           publishedMachineSnapshot: authority.snapshot,
