@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- Restored the root and all seven package `LICENSE` files to the exact, unmodified Apache License 2.0 text; MARLINK attribution remains in `NOTICE`.
+
 ## [0.20.21] — 2026-08-03
 
 ### Changed
