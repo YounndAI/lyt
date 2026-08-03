@@ -22,12 +22,10 @@
 </p>
 
 <p align="center">
-  <a href="#status"><img alt="status" src="https://img.shields.io/badge/status-public%20alpha-orange" /></a>
+  <a href="https://www.npmjs.com/package/@younndai/lyt"><img alt="npm latest" src="https://img.shields.io/npm/v/%40younndai%2Flyt?label=latest&amp;color=brightgreen" /></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue" /></a>
   <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D20.9-brightgreen" /></a>
 </p>
-
-> ⚠️ **Public alpha — under active testing.** Lyt works and we use it daily, but it is alpha software: surfaces change between releases, documentation is still growing, and you may hit rough edges. The normal install follows `latest`; `@alpha` is the opt-in preview channel. Your vaults are plain markdown in plain git repos — your data is never locked in. Found something? [Open an issue](https://github.com/YounndAI/lyt/issues) or see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -41,9 +39,9 @@ Lyt is **AI-first by design**: an AI agent is a first-class operator of your kno
 
 You keep the markdown. Lyt is the thin federation layer over it: it never asks you to move your notes into a database or a proprietary format, works with any markdown editor (Obsidian, VS Code, your terminal), and it never phones home. Lyt ships as npm packages, installs globally, and is driven by the `lyt` CLI — and by AI agents via the harness skills in [`@younndai/lyt-skills`](packages/lyt-skills/README.md).
 
-## Status
+## Current release
 
-**Public alpha — in active testing.** Lyt is being validated with a small alpha cohort right now. The CLI surface, file formats, and docs may change between releases without deprecation cycles. The untagged install follows the tested `latest` channel; use `@alpha` only when you deliberately want the preview candidate. Nothing phones home, and your notes stay plain markdown in plain git repos. Feedback is welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+**Install from `latest`.** The untagged npm package is the recommended, dogfooded release. Use `@alpha` only when you deliberately want an opt-in preview candidate. Lyt remains under active development and 0.x surfaces may evolve; nothing phones home, and your notes stay plain markdown in plain git repositories. Feedback is welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Install
 
