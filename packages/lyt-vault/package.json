@@ -1,6 +1,6 @@
 {
   "name": "@younndai/lyt-vault",
-  "version": "0.20.24",
+  "version": "0.20.25",
   "description": "Lyt vault primitive — CLI verbs to create and manage editor-neutral markdown vaults with a .lyt scaffold.",
   "homepage": "https://linkyourthink.com",
   "repository": {

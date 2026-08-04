@@ -375,12 +375,18 @@ export async function initBootstrapFlow(args: InitBootstrapArgs): Promise<InitBo
   const readOnlyTopology = ownDb ? inspectRegistryTopologyPreflight() : null;
   let branch: InitBootstrapBranch | null = null;
   let adoptHandle: string | null = null;
+  let adoptLocalOnly = false;
   let preparedFresh: PreparedFreshCreation | null = null;
   if (readOnlyTopology !== null) {
     if (args.mode === "discover") {
       branch = "discovery";
     } else if (readOnlyTopology.meshCount === 0 && readOnlyTopology.vaultCount === 0) {
-      adoptHandle = await probeAdoptable(args);
+      if (readOnlyTopology.podIdentities.length === 1) {
+        adoptHandle = readOnlyTopology.podIdentities[0]!.handle;
+        adoptLocalOnly = true;
+      } else {
+        adoptHandle = await probeAdoptable(args);
+      }
       branch = adoptHandle !== null ? "adopt" : "fresh";
       if (branch === "fresh") {
         preparedFresh = await prepareFreshCreation(args, readOnlyTopology.podIdentities);
@@ -423,7 +429,7 @@ export async function initBootstrapFlow(args: InitBootstrapArgs): Promise<InitBo
 
     if (branch === "adopt") {
       // adoptHandle is non-null here (branch was set from it).
-      const result = await doAdoptBranch(args, db, adoptHandle!);
+      const result = await doAdoptBranch(args, db, adoptHandle!, adoptLocalOnly);
       // a review finding — on adopt failure surface it cleanly: no heal/materialize, the
       // command layer renders the actionable error + sets a non-zero exit.
       if (result.adoptError !== undefined) {
@@ -534,6 +540,7 @@ async function doAdoptBranch(
   args: InitBootstrapArgs,
   db: Client,
   handle: string,
+  localOnly = false,
 ): Promise<Omit<InitBootstrapResult, "branch" | "durationMs">> {
   // MF2 — skipDiscover:true makes adopt MANIFEST-AUTHORITATIVE (pod.yon is the
   // catalog): deterministic, and it eliminates the gh-walk-reaches-the-real-account
@@ -548,6 +555,7 @@ async function doAdoptBranch(
       registryDb: db,
       noPush: true,
       skipDiscover: true,
+      ...(localOnly ? { localOnly: true } : {}),
       ...(args.federationGhClient !== undefined
         ? { federationGhClient: args.federationGhClient }
         : {}),

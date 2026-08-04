@@ -113,6 +113,9 @@ export interface AdoptAndPrimeArgs {
   // Hold the push on the scaffolded first vault (default true — handler
   // controls the push; the wizard always passes noPush).
   noPush?: boolean | undefined;
+  // A transferred local pod on a wiped machine must be reconstructed without
+  // probing or creating a GitHub remote.
+  localOnly?: boolean | undefined;
 }
 
 export interface AdoptAndPrimeResult {
@@ -175,6 +178,7 @@ export async function adoptAndPrimeFlow(
       ...(args.handle !== undefined ? { handle: args.handle } : {}),
       pushToRemote: false,
       createRemoteIfMissing: false,
+      ...(args.localOnly === true ? { localOnly: true } : {}),
       db,
       ...(args.federationGhClient !== undefined ? { ghClient: args.federationGhClient } : {}),
     });
@@ -197,7 +201,7 @@ export async function adoptAndPrimeFlow(
     let manifestRefused = false;
     let manifestRefusedKind: RecoverPodResult["refusedKind"];
     let manifestRefusedReason: string | undefined;
-    if (fed.branch === "adopted") {
+    if (fed.branch === "adopted" || args.localOnly === true) {
       try {
         const recovered = await recoverVaultsFromPodManifest({
           handle,

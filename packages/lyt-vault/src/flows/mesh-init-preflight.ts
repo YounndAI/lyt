@@ -11,7 +11,8 @@ import { dirname, join } from "node:path";
 import { getRegistryPath } from "../registry/client.js";
 import { validateMeshName } from "../util/identity.js";
 import { getDefaultVaultsRoot, resolveVaultPath } from "../util/paths.js";
-import { getFederationRepoDir } from "../util/federation-paths.js";
+import { getFederationRepoDir, getFederationRoot } from "../util/federation-paths.js";
+import { readPodIdentity } from "../util/identity-cache.js";
 import { assertNoSymlinkOnWritePath, assertSafeWritePath } from "../util/write-path-guard.js";
 import { openSqliteReadOnly, type ReadOnlySqliteDatabase } from "../sqlite/read-only-client.js";
 import type { CreationPlanV1 } from "./creation-plan.js";
@@ -42,13 +43,36 @@ export interface RegistryTopologyPreflight {
   podIdentities: readonly { handle: string; rid: string }[];
 }
 
+function localPodIdentity(): { handle: string; rid: string } | null {
+  const identity = readPodIdentity(getFederationRoot());
+  if (identity?.podRid === undefined) return null;
+  return { handle: identity.handle, rid: identity.podRid };
+}
+
+function includeLocalPodIdentity(
+  registryIdentities: readonly { handle: string; rid: string }[],
+): readonly { handle: string; rid: string }[] {
+  const local = localPodIdentity();
+  if (local === null) return registryIdentities;
+  return registryIdentities.some(
+    (identity) => identity.handle === local.handle && identity.rid === local.rid,
+  )
+    ? registryIdentities
+    : [...registryIdentities, local];
+}
+
 export function inspectRegistryTopologyPreflight(args?: {
   registryPath?: string;
 }): RegistryTopologyPreflight {
   const registryPath = args?.registryPath ?? getRegistryPath();
   const opened = openSqliteReadOnly(registryPath);
   if (opened.kind === "missing") {
-    return { registryPath, meshCount: 0, vaultCount: 0, podIdentities: [] };
+    return {
+      registryPath,
+      meshCount: 0,
+      vaultCount: 0,
+      podIdentities: includeLocalPodIdentity([]),
+    };
   }
   try {
     const tables = new Set(
@@ -72,10 +96,12 @@ export function inspectRegistryTopologyPreflight(args?: {
       registryPath,
       meshCount: scalar("meshes"),
       vaultCount: scalar("vaults"),
-      podIdentities: podIdentities.map((row) => ({
-        handle: String(row.handle),
-        rid: String(row.rid),
-      })),
+      podIdentities: includeLocalPodIdentity(
+        podIdentities.map((row) => ({
+          handle: String(row.handle),
+          rid: String(row.rid),
+        })),
+      ),
     };
   } finally {
     opened.database.close();

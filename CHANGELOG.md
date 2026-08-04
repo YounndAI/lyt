@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.25] — 2026-08-04
+
+### Changed
+
+- Reconstruct transferred local pods on wiped machines without replacing their identity, requiring a registry, or contacting GitHub.
+
+---
+
 ## [0.20.24] — 2026-08-04
 
 ### Changed
