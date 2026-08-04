@@ -49,7 +49,9 @@ import {
   type CachedIdentity,
 } from "../../util/identity-cache.js";
 import { POD_REPO_DESCRIPTION, POD_TOPICS } from "../../scaffold/github-defaults.js";
+import { createLocalCheckpoint } from "../../scaffold/local-checkpoint.js";
 import { hexToUuid7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../../util/uuid7.js";
+import { getMachineId } from "../../util/writer-id.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { renderFederationYon } from "../../yon/federation-write.js";
 import { registerCurrentMachine } from "../../yon/machine-ledger.js";
@@ -236,6 +238,7 @@ export async function federationInitFlow(
       // commits it.
       ensurePodIdentityWriteback(localDir, handle, now().getTime(), existingState.fedRidHex, false);
       registerMachineForPod(localDir, now().toISOString());
+      checkpointPodRegistration(localDir);
       const stamped = await upsertFederationState(db, {
         handle,
         fedRidBytes: existingState.fedRidBytes,
@@ -527,6 +530,17 @@ function registerMachineForPod(podDir: string, nowIso: string): void {
     nowIso,
     ...(identity === null ? {} : { accountIdentity: `${identity.provider}:${identity.handle}` }),
   });
+}
+
+function checkpointPodRegistration(podDir: string): void {
+  const paths = [`ledger/machines/${getMachineId()}.yon`];
+  if (existsSync(join(podDir, "identity.yon"))) paths.push("identity.yon");
+  const checkpoint = createLocalCheckpoint(podDir, paths);
+  if (checkpoint.status !== "committed") {
+    throw new Error(
+      `federation init: could not checkpoint the local machine registration (${checkpoint.status}).`,
+    );
+  }
 }
 
 function defaultIdentityProvider(): string {

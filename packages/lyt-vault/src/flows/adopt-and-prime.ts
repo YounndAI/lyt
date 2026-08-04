@@ -15,6 +15,8 @@
  */
 
 import type { Client } from "@libsql/client";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { listVaults } from "../registry/repo.js";
@@ -54,6 +56,8 @@ import {
   withCreationRepositoryEffectsV1,
 } from "./creation-plan.js";
 import { resolveVaultPath } from "../util/paths.js";
+import { createLocalCheckpoint } from "../scaffold/local-checkpoint.js";
+import { getMachineId } from "../util/writer-id.js";
 
 // W2.1 / W2.2 (2026-06-03) — adopt-and-prime. The "never-fail, adopt instead
 // of halt" flow that replaces the wizard P7 halt (DF-2) + the spec decision
@@ -426,6 +430,15 @@ export async function adoptAndPrimeFlow(
     // later sync owns any publication-facing regeneration.
     if (fed.branch !== "adopted") {
       await regeneratePodManifestNonFatal(db, { handle });
+    } else {
+      const paths = [`ledger/machines/${getMachineId()}.yon`];
+      if (existsSync(join(fed.localPath, "identity.yon"))) paths.push("identity.yon");
+      const checkpoint = createLocalCheckpoint(fed.localPath, paths);
+      if (checkpoint.status !== "committed") {
+        throw new Error(
+          `lyt adopt: could not checkpoint the local machine registration (${checkpoint.status}).`,
+        );
+      }
     }
 
     return {

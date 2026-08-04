@@ -224,6 +224,9 @@ function providerContentChecks(
   );
   const verification = verifyInstalledStateAnchorV1(updateOperationRoot, observed);
   const mismatched = new Set(verification.mismatched_object_ids);
+  const allProviderContentCurrent = plan.objects.every(
+    (object) => object.disposition === "already-current",
+  );
   const anchorCheck: CheckResult =
     verification.status === "match"
       ? {
@@ -238,10 +241,13 @@ function providerContentChecks(
             id: "install.provider-anchor",
             group: "install",
             label: "sealed managed-content anchor",
-            status: "warn",
-            message:
-              "no sealed installed-state anchor is available; managed-content health is unknown",
-            remediation: "Run a successful exact Lyt update to create installed-state evidence",
+            status: allProviderContentCurrent ? "info" : "warn",
+            message: allProviderContentCurrent
+              ? "managed content matches the installed provider inventory; no update anchor exists yet"
+              : "no sealed installed-state anchor is available and managed content needs reconciliation",
+            remediation: allProviderContentCurrent
+              ? "A future exact Lyt update will add external installed-state evidence"
+              : "Run a successful exact Lyt update to reconcile content and create installed-state evidence",
           }
         : failure(
             "install.provider-anchor",
@@ -260,6 +266,7 @@ function providerContentChecks(
       const anchorInvalid = verification.status === "invalid";
       const anchorMismatch = mismatched.has(object.object_id);
       const providerDrift = object.disposition !== "already-current";
+      const directlyVerifiedFreshInstall = verification.status === "missing" && !providerDrift;
       const objectAnchorStatus = anchorInvalid
         ? "invalid"
         : anchorUnknown
@@ -269,13 +276,15 @@ function providerContentChecks(
             : "match";
       const status = anchorInvalid || anchorMismatch
         ? "fail"
-        : anchorUnknown || providerDrift
+        : (anchorUnknown && !directlyVerifiedFreshInstall) || providerDrift
           ? "warn"
           : "pass";
       const message = anchorInvalid
         ? `${object.target_path} cannot be verified because its installed-state anchor is invalid`
         : anchorMismatch
           ? `${object.target_path} differs from its externally anchored digest`
+          : directlyVerifiedFreshInstall
+            ? `${object.target_path} matches the installed provider content; no update anchor exists yet`
           : anchorUnknown
             ? `${object.target_path} has no externally anchored expected digest; health is unknown`
             : providerDrift && legacyMatches.has(object.object_id)
