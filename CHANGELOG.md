@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.24] — 2026-08-04
+
+### Changed
+
+- Preserved an existing local-only pod during wiped-machine initialization instead of rewriting its identity and manifest as a fresh pod.
+
+---
+
 ## [0.20.23] — 2026-08-04
 
 ### Changed

@@ -265,8 +265,11 @@ export async function federationInitFlow(
       // no gh: never probe or create the remote (a `gh api`
       // probe throws ENOENT with no gh on PATH). The pod is a fresh LOCAL git
       // repo with the provisional handle; initLocalNoRemote wires NO `origin`
-      // (the remote is created + set at connect under the real handle).
-      branch = "fresh";
+      // (the remote is created + set at connect under the real handle). A
+      // wiped machine may already have a materialized pod from an offline
+      // transfer. Preserve that repository as adoption input instead of
+      // rewriting its identity and manifest as a fresh pod.
+      branch = localExists ? "adopted" : "fresh";
       if (!localExists) {
         mkdirSync(dirname(localDir), { recursive: true });
         await ghClient.initLocalNoRemote(handle, localDir);
