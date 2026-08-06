@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
+import { listFederationStates } from "../registry/federation-state.js";
 import { listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { listVaults } from "../registry/repo.js";
 import {
@@ -109,12 +110,49 @@ export async function repairVaultOriginOwnerFlow(
 
     // OWN vaults only — a foreign vault's origin legitimately points upstream.
     // M1 — optionally scope to a single vault (repairFlow per-finding apply).
-    const ownVaults = (await listVaults(db)).filter(
-      (v) =>
-        v.source === "own" &&
-        v.status !== "tombstoned" &&
-        (args.onlyVaultRidHex === undefined || v.ridHex === args.onlyVaultRidHex),
+    // The known-owner set below is a POD-WIDE property and must be derived from
+    // every own vault, not the scoped selection — otherwise `--target` builds a
+    // smaller set than an unscoped run and refuses the same vault it would
+    // otherwise repair. `resolveMeshOwnerEvidence` can source a canonical owner
+    // from the destination-policy ledger winner or `mesh.destinationTarget`,
+    // neither of which appears in `federation_state.handle` or any
+    // `mesh.pushTarget`, so this loop is the only path that contributes them.
+    const allOwnVaults = (await listVaults(db)).filter(
+      (v) => v.source === "own" && v.status !== "tombstoned",
     );
+    const ownVaults =
+      args.onlyVaultRidHex === undefined
+        ? allOwnVaults
+        : allOwnVaults.filter((v) => v.ridHex === args.onlyVaultRidHex);
+
+    // The set of GitHub owners this pod actually publishes to — every mesh push
+    // target plus every own vault's canonical destination owner. Used by the
+    // mis-owned fence below: an origin pointing at an owner OUTSIDE this set is a
+    // stranger's repository, never a local misconfiguration to repair. Derived
+    // from policy, never from the observed remote, so a hijacked origin cannot
+    // vote itself into the set.
+    const knownPodOwners = new Set<string>();
+    for (const state of await listFederationStates(db)) {
+      // The pod's own account handle. A personal mesh often carries no explicit
+      // push target, so its vaults' origins sit under the handle and nowhere else
+      // — omitting it would refuse every legitimate personal-vault repair.
+      if (isValidGhHandle(state.handle)) knownPodOwners.add(state.handle.toLowerCase());
+    }
+    for (const mesh of meshes) {
+      const target = mesh.pushTarget ?? "";
+      if (target.length > 0 && isValidGhHandle(target)) knownPodOwners.add(target.toLowerCase());
+    }
+    for (const vault of allOwnVaults) {
+      const canonical = assessCanonicalOwnedVaultDestination(
+        vault,
+        meshByRid(vault.homeMeshRid),
+        policyContext,
+      );
+      if (canonical.status !== "refused" && canonical.destination.kind === "github") {
+        const owner = canonical.destination.owner;
+        if (isValidGhHandle(owner)) knownPodOwners.add(owner.toLowerCase());
+      }
+    }
 
     for (const vault of ownVaults) {
       const homeMesh = meshByRid(vault.homeMeshRid);
@@ -155,6 +193,34 @@ export async function repairVaultOriginOwnerFlow(
       if (parsed.repo.toLowerCase() !== repoName.toLowerCase()) {
         // A custom remote pointing at a different repo — never clobber it.
         skipped.push({ name: vault.name, reason: "custom-remote-repo" });
+        continue;
+      }
+
+      // MIS-OWNED FENCE. Everything above this point trusts `source === "own"`,
+      // and that is the one field known to lie: a vault received by accepting a
+      // GitHub invitation outside Lyt and registering it with `lyt vault join`
+      // (whose `source` is optional and fail-closes to `own`) is FOREIGN while
+      // claiming to be owned. Such a vault clears the `custom-remote-repo` escape
+      // too, because the publisher's repo follows the same `lyt-vault-{mesh}--{leaf}`
+      // convention this repair derives — so without a fence, `lyt repair --apply`
+      // (which the agent manual recommends as the fix-everything verb, and which
+      // is not `--target`-gated) rewrites the PUBLISHER's origin to point at the
+      // local account, after which the write gate treats the vault as pushable.
+      //
+      // The discriminator is the CURRENT origin owner, not the mesh provenance.
+      // A vault this pod genuinely owns always points at an owner this pod has a
+      // publishing relationship with — its account handle, a mesh push target, or
+      // a canonical destination owner — even when the specific owner recorded is
+      // wrong, which is the case this repair exists to fix. A vault pointing at an
+      // owner OUTSIDE that set is someone else's repository, and repointing it is
+      // never a repair.
+      //
+      // `ownCreated` is deliberately NOT used here. It is false for legacy and
+      // migrated meshes as well as foreign-joined ones, so it cannot separate
+      // "not ours" from "we don't know" — gating on it refuses legitimate repairs
+      // on any pod predating the flag.
+      if (!knownPodOwners.has(parsed.owner.toLowerCase())) {
+        skipped.push({ name: vault.name, reason: "origin-owner-unknown-to-pod" });
         continue;
       }
       // The fresh origin is supplied explicitly as observation for this repair

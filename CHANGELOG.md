@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.20.26] — 2026-08-07
+
+### Fixed
+
+- `lyt mesh join` validated an untrusted foreign mesh name against the reserved bucket namespace with an exact match, but that namespace is a prefix. A published mesh declaring a name such as `shared/evil` could occupy the reserved namespace, where it was subsequently read back as system-created foreign homing. The name is now checked on its leading segment, matching the guard already used for `lyt vault clone --to-mesh`.
+- `lyt repair --apply` could repoint a vault's git origin at the local account when that vault was foreign but recorded as owned — the state produced by accepting a repository invitation outside Lyt and registering it with `lyt vault join`, which defaults its source to owned. The repair now requires the current origin owner to be one the pod actually publishes to (its account handle, a mesh push target, or a canonical destination owner) before rewriting anything, and reports `origin-owner-unknown-to-pod` otherwise. Repairs of genuinely owned vaults, including those in legacy meshes and those run under `--target`, are unaffected.
+
+---
+
 ## [0.20.25] — 2026-08-04
 
 ### Changed

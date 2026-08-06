@@ -140,7 +140,17 @@ export async function meshJoinFlow(opts: MeshJoinOptions): Promise<MeshJoinResul
   // the local system bucket namespace on join. A foreign mesh name is a bare
   // mesh slot, so assert it directly. The SYSTEM's own bucket creation
   // (rebuildFederationCacheFlow) does not route through here.
-  if (isReservedMeshName(parsedMesh.mesh.name)) {
+  //
+  // LEADING-SEGMENT, not exact. `isReservedMeshName` compares the WHOLE string,
+  // but the bucket namespace is a PREFIX: `isForeignBucketMeshName` classifies on
+  // the leading segment alone. A publisher declaring `shared/evil` therefore
+  // passed the exact-match guard and landed inside the reserved prefix, where it
+  // is then read back as system-created foreign homing. `parseMeshYon` does no
+  // shape validation — the name is a raw quoted field — so this guard is the only
+  // thing standing between untrusted publisher bytes and the bucket namespace.
+  // `clone.ts` already gets this right for `--to-mesh`; match it.
+  const foreignMeshLeadingSegment = parsedMesh.mesh.name.split("/")[0] ?? parsedMesh.mesh.name;
+  if (isReservedMeshName(foreignMeshLeadingSegment)) {
     throw new Error(
       `lyt mesh join: the foreign mesh name ${JSON.stringify(parsedMesh.mesh.name)} ` +
         `collides with a reserved Lyt bucket namespace (subscriptions, shared, agents, ` +
