@@ -34,6 +34,7 @@ import {
   repairVaultOriginOwnerFlow,
   type GitRunner as OriginGitRunner,
 } from "./repair-vault-origin-owner.js";
+import { reregisterStrandedForeignVaultsFlow } from "./repair-foreign-homing.js";
 import { isLytDbCorrupt } from "../registry/vault-db.js";
 import { rebuildVaultFlow } from "./rebuild-vault.js";
 import { findLegacyAgentFiles } from "../util/agent-file-paths.js";
@@ -110,7 +111,10 @@ export type RepairActionKind =
   | "inspect-pod-origin"
   // B2a (Inc-2 Phase B slice 2) — re-point a vault `origin` mis-derived from the
   // personal handle to its home mesh's org push_target (git remote set-url).
-  | "repoint-origin-owner";
+  | "repoint-origin-owner"
+  // re-register a foreign vault found on disk under its owner-bucket
+  // tree with no registry row at all.
+  | "reregister-foreign-vault";
 
 export type RepairFindingClass =
   | "broken-mesh-edge"
@@ -124,7 +128,10 @@ export type RepairFindingClass =
   | "noncanonical-pod-origin"
   // B2a — a vault whose `origin` owner was mis-derived from the personal handle
   // instead of its home mesh's org push_target.
-  | "mis-owned-origin";
+  | "mis-owned-origin"
+  // a foreign vault present on disk under `subscriptions/{owner}/{leaf}`
+  // or `shared/{owner}/{leaf}` with NO row in `vaults`.
+  | "stranded-foreign-vault";
 
 // One row per actionable issue discovered during the walk. `target_id`
 // is a stable per-finding identifier the caller can pass back as
@@ -471,6 +478,42 @@ export async function repairFlow(args: RepairArgs = {}): Promise<RepairResult> {
       }
     }
 
+    // 1g. STRANDED FOREIGN VAULTS. A vault received via subscribe /
+    // accept-share lives at `<vaultsRoot>/<subscriptions|shared>/{owner}/{leaf}`
+    // and its receiver-side coordinates (bucket mesh, source, path) exist ONLY in
+    // the registry row — its committed vault.yon is the publisher's, byte-unchanged.
+    // Lose the row and nothing that iterates the registry can see the vault again:
+    // `repairForeignHomingFlow` walks `listVaults`, so it is blind to exactly this
+    // case (the live pod: 3 foreign vaults on disk, 0 rows). Detect them by
+    // scanning the bucket trees ON DISK. Read-only here — the dry-run default is
+    // preserved.
+    {
+      const scan = await reregisterStrandedForeignVaultsFlow({ registryDb: db, mode: "dry-run" });
+      for (const v of scan.stranded) {
+        findings.push({
+          class: "stranded-foreign-vault",
+          meshName: v.bucketMesh,
+          targetId: `foreign-vault:${v.ridHex}`,
+          reason: "foreign-vault-on-disk-with-no-registry-row",
+          // fix-pass (cold review) - the remedy states its SCOPE: this heal
+          // only INSERTS the missing row. `source` is written on the fresh insert
+          // only (upsertVault omits it ON CONFLICT), so a vault already carrying a
+          // row mis-recorded as source='own' is NOT corrected here - that needs a
+          // re-receive ('lyt vault forget', then 'lyt mesh subscribe' /
+          // 'lyt vault accept-share').
+          remediation: `Run: lyt repair --target foreign-vault:${v.ridHex} --apply (re-registers '${v.name}' under bucket mesh '${v.bucketMesh}' as source='${v.source}'). Restores a MISSING row only - a vault already registered with source='own' is not corrected by it; re-receive that one ('lyt vault forget <name>', then 'lyt mesh subscribe' / 'lyt vault accept-share').`,
+          details: {
+            vault_rid: v.ridHex,
+            vault_name: v.name,
+            vault_path: v.path,
+            bucket_mesh: v.bucketMesh,
+            owner: v.owner,
+            source: v.source,
+          },
+        });
+      }
+    }
+
     // A gh-backed identity without the canonical pod origin is not healthy
     // online state. Diagnose it here, but keep the outward create/reconnect
     // operation on the explicit `lyt sync` path rather than repair --apply.
@@ -590,7 +633,8 @@ function filterFindingsByTarget(findings: RepairFinding[], target: string): Repa
       (f.class === "orphan-vault" ||
         f.class === "corrupt-vault-index" ||
         f.class === "legacy-agent-files" ||
-        f.class === "mis-owned-origin") &&
+        f.class === "mis-owned-origin" ||
+        f.class === "stranded-foreign-vault") &&
       f.details["vault_name"] === target,
   );
   return byVaultName;
@@ -617,6 +661,8 @@ async function applyOne(db: Client, f: RepairFinding, args: RepairArgs): Promise
         return await applyMigrateAgentFiles(f);
       case "mis-owned-origin":
         return await applyRepointOriginOwner(db, f, args);
+      case "stranded-foreign-vault":
+        return await applyReregisterForeignVault(db, f);
       case "missing-pod-origin":
         return {
           kind: "reconnect-pod",
@@ -666,6 +712,8 @@ function kindForClass(c: RepairFindingClass): RepairActionKind {
       return "migrate-agent-files";
     case "mis-owned-origin":
       return "repoint-origin-owner";
+    case "stranded-foreign-vault":
+      return "reregister-foreign-vault";
     case "missing-pod-origin":
       return "reconnect-pod";
     case "noncanonical-pod-origin":
@@ -709,6 +757,40 @@ async function applyRepointOriginOwner(
     targetId: f.targetId,
     status: "skipped",
     message: `no repoint applied${reason !== undefined ? ` (${reason.reason})` : ""}`,
+    details: { ...f.details },
+  };
+}
+
+// apply leg — re-register ONE stranded foreign vault. Delegates to the
+// standalone flow scoped to this vault's directory (`onlyPath`) in apply mode;
+// the bucket-mesh derivation, the preserve-rid contract, and idempotence all
+// live inside it. A vault that gained a row between detect and apply comes back
+// as a skip, not an error — the idempotent no-op.
+async function applyReregisterForeignVault(db: Client, f: RepairFinding): Promise<RepairAction> {
+  const vaultPath = String(f.details["vault_path"] ?? "");
+  const res = await reregisterStrandedForeignVaultsFlow({
+    registryDb: db,
+    mode: "apply",
+    onlyPath: vaultPath,
+  });
+  const done = res.registered.find((r) => r.ridHex === String(f.details["vault_rid"] ?? ""));
+  if (done !== undefined) {
+    return {
+      kind: "reregister-foreign-vault",
+      meshName: f.meshName,
+      targetId: f.targetId,
+      status: "applied",
+      message: `re-registered foreign vault '${done.name}' under bucket mesh '${done.bucketMesh}' (source=${done.source})`,
+      details: { ...f.details },
+    };
+  }
+  const reason = res.skipped.find((sk) => sk.path === vaultPath);
+  return {
+    kind: "reregister-foreign-vault",
+    meshName: f.meshName,
+    targetId: f.targetId,
+    status: "skipped",
+    message: `no re-registration applied${reason !== undefined ? ` (${reason.reason})` : ""}`,
     details: { ...f.details },
   };
 }

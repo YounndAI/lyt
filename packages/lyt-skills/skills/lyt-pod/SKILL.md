@@ -4,7 +4,7 @@ description: >
   Overview of the user's Lyt pod — enumerates all meshes and vaults on this machine, grouped by mesh, with orphan vaults surfaced separately and summary stats (mesh count, vault count, pushable/subscriber/orphan breakdown). Trigger when the user runs /lyt-pod, or says "what's in my pod", "show me my pod", "give me a pod overview", "list all my vaults", "what meshes do I have", "show me everything in my pod", or similar phrasing on a pod-scoped enumeration. Composes `lyt mesh list --json` (mesh-level records) + `lyt vault list --json` (vault-level records) into one agent-facing summary. Read-only; pairs with /lyt-primer-context (agent priming with active arcs + writable status) and /lyt-search (query across the pod).
 visibility: public
 skill-version: 1.0.0
-requires-lyt: ">=0.20.0 <0.21.0"
+requires-lyt: ">=0.20.0 <0.22.0"
 contract-version: 1.0.0
 lyt-version: 0.7.0
 capabilities: [read]

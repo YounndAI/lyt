@@ -19,7 +19,6 @@ import { existsSync } from "node:fs";
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { listFederationStates } from "../registry/federation-state.js";
 import { listMeshes, type MeshRow } from "../registry/meshes-repo.js";
 import { listVaults } from "../registry/repo.js";
 import {
@@ -28,6 +27,7 @@ import {
 } from "./federation/destination-policy-service.js";
 import { vaultRepoName } from "../util/federation-paths.js";
 import { isValidGhHandle } from "../util/identity.js";
+import { collectKnownPodOwners, UNKNOWN_POD_OWNER_REASON } from "../util/pod-owners.js";
 import { parseOwnerRepoFromUrl } from "../util/gh.js";
 import { resolveRemoteUrl } from "../util/remote-url.js";
 import { runGit as defaultRunGit, type GitRunOptions, type GitRunResult } from "../util/git-run.js";
@@ -131,28 +131,16 @@ export async function repairVaultOriginOwnerFlow(
     // stranger's repository, never a local misconfiguration to repair. Derived
     // from policy, never from the observed remote, so a hijacked origin cannot
     // vote itself into the set.
-    const knownPodOwners = new Set<string>();
-    for (const state of await listFederationStates(db)) {
-      // The pod's own account handle. A personal mesh often carries no explicit
-      // push target, so its vaults' origins sit under the handle and nowhere else
-      // — omitting it would refuse every legitimate personal-vault repair.
-      if (isValidGhHandle(state.handle)) knownPodOwners.add(state.handle.toLowerCase());
-    }
-    for (const mesh of meshes) {
-      const target = mesh.pushTarget ?? "";
-      if (target.length > 0 && isValidGhHandle(target)) knownPodOwners.add(target.toLowerCase());
-    }
-    for (const vault of allOwnVaults) {
-      const canonical = assessCanonicalOwnedVaultDestination(
-        vault,
-        meshByRid(vault.homeMeshRid),
-        policyContext,
-      );
-      if (canonical.status !== "refused" && canonical.destination.kind === "github") {
-        const owner = canonical.destination.owner;
-        if (isValidGhHandle(owner)) knownPodOwners.add(owner.toLowerCase());
-      }
-    }
+    //
+    // C1 (release review, vault-visibility) — LIFTED to util/pod-owners.ts so
+    // `lyt vault visibility` fences on the SAME policy-derived set instead of a
+    // copy that can drift. The pod-wide `allOwnVaults` is handed in deliberately
+    // (see the note above): a `--target` run must not build a smaller set.
+    const knownPodOwners = await collectKnownPodOwners(db, {
+      meshes,
+      ownVaults: allOwnVaults,
+      policyContext,
+    });
 
     for (const vault of ownVaults) {
       const homeMesh = meshByRid(vault.homeMeshRid);
@@ -220,7 +208,7 @@ export async function repairVaultOriginOwnerFlow(
       // "not ours" from "we don't know" — gating on it refuses legitimate repairs
       // on any pod predating the flag.
       if (!knownPodOwners.has(parsed.owner.toLowerCase())) {
-        skipped.push({ name: vault.name, reason: "origin-owner-unknown-to-pod" });
+        skipped.push({ name: vault.name, reason: UNKNOWN_POD_OWNER_REASON });
         continue;
       }
       // The fresh origin is supplied explicitly as observation for this repair

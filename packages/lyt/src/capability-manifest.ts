@@ -72,6 +72,7 @@ export const CAPABILITY_MANIFEST: readonly CapabilityOp[] = [
   { id: "sync", mcp: "sync", cli: "sync", access: "write", handlerGated: false, sideEffects: "writes GitHub repo metadata + regenerates agents.md (on --apply)" },
   { id: "primer", mcp: "primer", cli: "primer", access: "read", handlerGated: false, sideEffects: "writes a primer file unless --dry-run" },
   { id: "vault.share", mcp: "vault.share", cli: "vault share", access: "write", handlerGated: true, sideEffects: "grants a gh repo-collaborator" },
+  { id: "vault.visibility", mcp: "vault.visibility", cli: "vault visibility", access: "write", handlerGated: true, sideEffects: "flips GitHub repo visibility, reconciles the lyt-public topic, and appends the @FED_VAULT manifest record", note: "CLI mutates behind --yes (default is a read-only preview, non-zero exit); the MCP tool ALWAYS previews — its handler hard-codes confirmed:false, so it can never apply the flip. access/handlerGated are declared for the mutation surface the op names (and to keep this row inside the write-op review allowlist), not for what the MCP handler can currently do." },
   { id: "vault.unshare", mcp: "vault.unshare", cli: "vault unshare", access: "write", handlerGated: true, sideEffects: "revokes a gh repo-collaborator" },
   { id: "vault.access", mcp: "vault.access", cli: "vault access", access: "read", handlerGated: false, sideEffects: "none" },
   { id: "vault.invites", mcp: "vault.invites", cli: "vault invites", access: "read", handlerGated: false, sideEffects: "none" },

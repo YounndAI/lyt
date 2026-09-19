@@ -512,6 +512,16 @@ export type {
   RepairForeignHomingResult,
   RelocatedForeignVault,
 } from "./flows/repair-foreign-homing.js";
+// the companion heal: re-register a foreign vault present on disk under
+// its owner-bucket tree with NO registry row at all (the pass iterates
+// `listVaults` and is blind to those). Wired into `lyt repair` + `reindex --all`;
+// exported here beside its sibling for direct invocation.
+export { reregisterStrandedForeignVaultsFlow } from "./flows/repair-foreign-homing.js";
+export type {
+  ReregisterStrandedForeignVaultsArgs,
+  ReregisterStrandedForeignVaultsResult,
+  StrandedForeignVault,
+} from "./flows/repair-foreign-homing.js";
 // B2a (Inc-2 Phase B slice 2 / M1) — org-mesh vault origin-owner repair. Wired
 // into repairFlow as the `mis-owned-origin` finding class; also exported for
 // direct invocation.
@@ -1897,6 +1907,17 @@ export type {
   UnshareVaultResult,
   ShareVaultFlowOpts,
 } from "./flows/share.js";
+// The conscious-public flip + its reversal (github-defaults.ts gaps #1 + #2).
+// Handler-gated at MCP dispatch (lyt-mcp registry.ts `vault.visibility`).
+export { setVaultVisibilityFlow } from "./flows/vault-visibility.js";
+export type {
+  VaultVisibilityArgs,
+  VaultVisibilityFlowOpts,
+  VaultVisibilityPreview,
+  VaultVisibilityResult,
+  VaultVisibilityStatus,
+  VaultVisibilityTarget,
+} from "./flows/vault-visibility.js";
 // keystone Phase C — the vault access (read-only) + invites (list/accept)
 // verbs (gh-as-SoT, through the AccessProvider port).
 export { vaultAccessFlow } from "./flows/access.js";

@@ -23,6 +23,7 @@ import {
   readAllFedVaultRecords,
 } from "./federation-vault-ledger-read.js";
 import { appendFedVaultActive } from "./federation-vault-ledger-write.js";
+import type { FederationVisibility } from "./federation-write.js";
 
 // Inc-2 R1 (PROPER FIX) — author-on-mutation for the @FED_VAULT manifest ledger.
 //
@@ -48,6 +49,11 @@ export interface AuthorFedVaultMutationArgs {
   // The NEW converged VALUE fields after the mutation.
   vaultName: string;
   homeMeshRidHex: string | null;
+  // EXPLICIT visibility override — the conscious-public flip
+  // (flows/vault-visibility.ts) is the one mutation whose POINT is to change this
+  // VALUE field, so it supplies the new value here. OMITTED by every other caller
+  // (rename / move), which keeps the carry-forward behaviour below byte-identical.
+  visibility?: FederationVisibility;
   // Test seam — override the pod root (defaults to getFederationRoot()).
   podRoot?: string;
 }
@@ -71,7 +77,7 @@ export function authorFedVaultMutation(args: AuthorFedVaultMutationArgs): void {
   // / move does not change visibility); default only when the rid has no live
   // ledger record yet. Mirrors the reconcile's changed-existing arm.
   const live = foldFedVaults(records).find((v) => v.vaultRid === args.vaultRidHex);
-  const visibility = live?.visibility ?? resolveConfig().defaultRepoVisibility;
+  const visibility = args.visibility ?? live?.visibility ?? resolveConfig().defaultRepoVisibility;
 
   appendFedVaultActive({
     vaultRid: args.vaultRidHex,

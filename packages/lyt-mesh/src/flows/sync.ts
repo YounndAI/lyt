@@ -90,6 +90,7 @@ const inspectWindowsGitPath = (
 // Increment 1 · Phase A.4 — the sync flow emits a SyncOperation per pushing
 // vault so its reversibility horizon is read back from the ACTUAL push result.
 import { SyncOperation } from "../op/operations/sync-op.js";
+import { withForeignSyncAttempt, type ForeignSyncAuthority } from "./foreign-sync-authority.js";
 
 export type VaultSyncStatus =
   | "clean"
@@ -298,7 +299,7 @@ interface PublicationAttemptContext {
 
 export interface SyncOnlineVaultAuthority {
   expectedOrigin: string;
-  publication: SyncPublicationAuthority;
+  publication: SyncPublicationAuthority | ForeignSyncAuthority;
 }
 
 const MESH_CONTEXT_PATH = ".lyt/mesh-context.md";
@@ -431,6 +432,11 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     }
     for (const v of candidates) {
       const ridHex = uuid7BytesToHex(v.rid);
+      if (v.source === "subscribed") {
+        readOnlyRidHexes.add(ridHex);
+        subscribedRidHexes.add(ridHex);
+        continue;
+      }
       const policyOnline = networkMode === "online" && authorityForVault(args, v) !== undefined;
       if (!policyOnline) {
         if (subscribedRidHexes.has(ridHex)) readOnlyRidHexes.add(ridHex);
@@ -467,6 +473,22 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     const onlineAuthority = authorityForVault(args, v);
     const vaultNetworkMode =
       networkMode === "online" && onlineAuthority !== undefined ? "online" : "local-only";
+    if (
+      networkMode === "online" &&
+      v.status === "active" &&
+      v.source !== "own" &&
+      onlineAuthority === undefined
+    ) {
+      reports.push({
+        name: v.name,
+        path: v.path,
+        status: "error",
+        staged: false,
+        message:
+          "Online sync refused: no live received-vault record matches this vault and its origin. Local files were not synchronized.",
+      });
+      continue;
+    }
     let promotedEventIds: string[] = [];
     let hadNonProvenanceChanges = false;
     let provenanceWarning: string | undefined;
@@ -563,17 +585,19 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     if (machine === null || podRid === null) {
       provenanceWarning ??=
         "Sync provenance identity is unavailable; the sync outcome was not relabelled.";
-    } else if (!(
-      (promotedEventIds.length > 0 &&
-        !hadNonProvenanceChanges &&
-        (report.status === "clean" ||
-          report.status === "committed" ||
-          report.status === "pushed")) ||
-      (promotedEventIds.length === 0 &&
-        !hadNonProvenanceChanges &&
-        report.status === "clean" &&
-        provenance.getSyncProvenanceStatus(v.path).latestPublishedSync !== null)
-    )) {
+    } else if (
+      !(
+        (promotedEventIds.length > 0 &&
+          !hadNonProvenanceChanges &&
+          (report.status === "clean" ||
+            report.status === "committed" ||
+            report.status === "pushed")) ||
+        (promotedEventIds.length === 0 &&
+          !hadNonProvenanceChanges &&
+          report.status === "clean" &&
+          provenance.getSyncProvenanceStatus(v.path).latestPublishedSync !== null)
+      )
+    ) {
       try {
         provenance.queueSyncProvenance({
           vaultPath: v.path,
@@ -967,7 +991,7 @@ async function syncOneVault(
   ghAuthOk: () => boolean | null = () => realIdentityRunner.ghAuthStatus(),
   networkMode: "online" | "local-only" = "online",
   expectedOrigin?: string,
-  publicationAuthority?: SyncPublicationAuthority,
+  publicationAuthority?: SyncPublicationAuthority | ForeignSyncAuthority,
   permissionObserver: PublicationPermissionObserver = observePublicationPermission,
   permissionAttemptId: string = randomUUID(),
   authorityHeld = false,
@@ -1224,6 +1248,35 @@ async function syncOneVault(
       };
     }
     if (publicationAuthority !== undefined && !authorityHeld) {
+      if (publicationAuthority.policy === null) {
+        return withForeignSyncAttempt({
+          authority: publicationAuthority,
+          vault,
+          readOnly,
+          attemptId: permissionAttemptId,
+          permissionObserver,
+          action: (attempt) =>
+            syncOneVault(
+              vault,
+              runGit,
+              remote,
+              now,
+              resolveMeshContext,
+              messageOverride,
+              readOnly,
+              resolveConflict,
+              ghAuthOk,
+              networkMode,
+              expectedOrigin,
+              publicationAuthority,
+              permissionObserver,
+              permissionAttemptId,
+              true,
+              attempt,
+              beforeEligibleSync,
+            ),
+        });
+      }
       // Keep the repository binding explicit even while lyt-mesh typechecks
       // against the last built lyt-vault declaration during this source wave.
       const canonicalAttempt = {
@@ -1935,10 +1988,12 @@ async function syncOneVault(
       cwd: vault.path,
       allowFailure: true,
     });
-    const onlineHead = await runGit(
-      ["ls-remote", "--exit-code", pushTarget.url, destinationRef],
-      { cwd: vault.path, allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 1024 },
-    );
+    const onlineHead = await runGit(["ls-remote", "--exit-code", pushTarget.url, destinationRef], {
+      cwd: vault.path,
+      allowFailure: true,
+      timeoutMs: 10_000,
+      maxOutputBytes: 1024,
+    });
     const localObject = parseGitObjectId(localHead.stdout);
     const onlineObject = parseRemoteObjectId(onlineHead.stdout, destinationRef);
     if (

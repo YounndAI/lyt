@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+import { existsSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
@@ -30,8 +33,10 @@ import {
   bucketMeshName,
   entryModeForSource,
   isForeignBucketMeshName,
+  parseBucketRelDir,
 } from "../util/bucket-mesh.js";
 import { slugifyHandle } from "../util/federation-paths.js";
+import { getDefaultVaultsRoot } from "../util/paths.js";
 import { hexToUuid7Bytes, ridsEqual } from "../util/uuid7.js";
 import { liveFedMeshes, observedMaxFedMeshHlc } from "../yon/federation-mesh-ledger-read.js";
 import { appendFedMeshTombstone } from "../yon/federation-mesh-ledger-write.js";
@@ -40,7 +45,7 @@ import {
   type LiveSubscription,
 } from "../yon/subscription-ledger-read.js";
 import { coordinateOwner } from "./federation/rebuildFederationCacheFlow.js";
-import { foreignVaultOwner } from "./repair-foreign-homing.js";
+import { foreignVaultOwner, listBucketVaultDirs } from "./repair-foreign-homing.js";
 
 // Inc-2 Phase C (#6) — `lyt mesh prune <name>`.
 //
@@ -77,6 +82,13 @@ export interface MeshPruneOptions {
   // registry.db resolves under, so production needs no explicit podRoot (the CLI
   // passes neither registryPath nor podRoot and both resolve via LYT_HOME).
   podRoot?: string | undefined;
+  // Final review (item 10) — the vaults root the on-disk bucket-backing scan
+  // walks. It was hard-wired to `getDefaultVaultsRoot()` while every LEDGER read
+  // in this flow threaded `podRoot`, so a caller that redirected the pod root
+  // (tests, and any future split layout) got a guard reading one machine's disk
+  // and a ledger reading another's. Threaded alongside `podRoot`; when omitted
+  // both still resolve from the same LYT_HOME, which is what production passes.
+  vaultsRoot?: string | undefined;
 }
 
 export interface MeshPruneResult {
@@ -194,9 +206,9 @@ export async function meshPruneFlow(
     // now appends the existing @FED_MESH tombstone before deleting the derived
     // cache row. Subscription-backed bucket meshes still refuse until their
     // independent subscription/vault relationships are retracted first.
-    const ledgerBacking = await detectLedgerBacking(db, mesh, opts.podRoot);
+    const ledgerBacking = await detectLedgerBacking(db, mesh, opts.podRoot, opts.vaultsRoot);
     let meshLedgerRetracted = false;
-    if (ledgerBacking === "own") {
+    if (ledgerBacking?.kind === "own") {
       // Retraction is an identity mutation: once the registry row supplies a
       // stable rid, a display-name match is never an acceptable fallback.
       const liveMesh = liveFedMeshes(opts.podRoot).find((candidate) =>
@@ -217,11 +229,13 @@ export async function meshPruneFlow(
       });
       meshLedgerRetracted = true;
     }
-    if (ledgerBacking === "bucket") {
+    if (ledgerBacking?.kind === "bucket") {
       throw new Error(
-        `Refusing to prune mesh '${name}': it is still backed by a live subscription or a ` +
-          `registered foreign vault — unsubscribe it / 'lyt vault forget' the foreign vault(s) ` +
-          `homed there first. Pruning the cache row now would be undone on the next ` +
+        `Refusing to prune mesh '${name}': it is still backed by a live subscription, a ` +
+          `registered foreign vault, or a foreign vault directory on disk` +
+          (ledgerBacking.diskDir !== null ? ` (${ledgerBacking.diskDir})` : "") +
+          `. Unsubscribe it / 'lyt vault forget' the foreign vault(s) homed there / remove or ` +
+          `relocate that directory first. Pruning the cache row now would be undone on the next ` +
           `sync/rebuild/reindex.`,
       );
     }
@@ -247,6 +261,12 @@ export async function meshPruneFlow(
   }
 }
 
+type LedgerBacking =
+  | { kind: "own" }
+  // `diskDir` names the on-disk bucket vault directory that backs this mesh, or
+  // null when the backing came from the subscription fold / a registry row.
+  | { kind: "bucket"; diskDir: string | null };
+
 // Would `rebuildFederationCacheFlow` / recover-pod re-create this mesh from a
 // DURABLE ledger? Kind-aware — a foreign bucket mesh is re-created from the live
 // subscription fold; an own mesh from the @FED_MESH fold. Returns which backing
@@ -261,7 +281,8 @@ async function detectLedgerBacking(
   db: Client,
   mesh: MeshRow,
   podRoot: string | undefined,
-): Promise<"own" | "bucket" | null> {
+  vaultsRoot: string | undefined,
+): Promise<LedgerBacking | null> {
   if (isForeignBucketMeshName(mesh.name)) {
     // BUCKET: ledger-backed iff EITHER re-creation path would re-mint THIS bucket:
     //
@@ -282,19 +303,47 @@ async function detectLedgerBacking(
     //       (which already slugifies) + bucketMeshName(entryModeForSource(source)),
     //       incl. repair's skip-not-fail cases (a null owner does not back a bucket).
     if (liveSubscriptions(podRoot).some((sub) => liveSubBucketName(sub) === mesh.name)) {
-      return "bucket";
+      return { kind: "bucket", diskDir: null };
     }
     const foreignBacked = (await listVaults(db))
       .filter((v) => v.source !== "own")
       .some((v) => foreignVaultBucketName(v) === mesh.name);
-    return foreignBacked ? "bucket" : null;
+    if (foreignBacked) return { kind: "bucket", diskDir: null };
+    // (3) a BUCKET VAULT DIRECTORY ON DISK homes into THIS bucket (
+    //       fix-pass, cold review). `reregisterStrandedForeignVaultsFlow` scans the
+    //       two bucket TREES and re-registers any `<prefix>/{owner}/{leaf}` dir
+    //       carrying a `.lyt/vault.yon` with no registry row — minting the bucket
+    //       mesh as it goes. Sources (1) and (2) are both blind to that vault (no
+    //       @SUBSCRIPTION record, no registry row), so prune would delete a bucket
+    //       the very next `lyt repair --apply` / `reindex --all` resurrects. The
+    //       scan REUSES the exported `listBucketVaultDirs` — the same anti-drift
+    //       discipline the file's comment above already imposes on
+    //       `foreignVaultOwner`: one enumerator, two callers, no drift.
+    const diskDir = bucketVaultDirBacking(mesh.name, vaultsRoot);
+    return diskDir === null ? null : { kind: "bucket", diskDir };
   }
   // OWN: ledger-backed iff a LIVE (active, add-wins) @FED_MESH record exists for
   // it — matched by rid (preferred; rid-stable across renames) then by name.
   const backed = liveFedMeshes(podRoot).some(
     (lm) => fedMeshRidMatches(lm.meshRid, mesh) || lm.meshName === mesh.name,
   );
-  return backed ? "own" : null;
+  return backed ? { kind: "own" } : null;
+}
+
+// fix-pass (cold review, F2) — the FIRST on-disk bucket vault directory that
+// homes into `meshName`, or null when none does. A directory counts only when it
+// carries a `.lyt/vault.yon` (the same file the heal requires before it registers
+// anything) and its vaults-root-relative path parses to THIS bucket name through
+// `parseBucketRelDir` — so the guard and the heal agree, byte-for-byte, on which
+// directories back a bucket.
+function bucketVaultDirBacking(meshName: string, vaultsRootOpt: string | undefined): string | null {
+  const vaultsRoot = resolve(vaultsRootOpt ?? getDefaultVaultsRoot());
+  for (const dir of listBucketVaultDirs(vaultsRoot)) {
+    if (!existsSync(join(dir, ".lyt", "vault.yon"))) continue;
+    const coords = parseBucketRelDir(relative(vaultsRoot, dir));
+    if (coords !== null && coords.bucketMesh === meshName) return dir;
+  }
+  return null;
 }
 
 // The bucket mesh name a REGISTERED FOREIGN vault (source ∈ {shared,subscribed})

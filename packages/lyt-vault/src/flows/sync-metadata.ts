@@ -24,6 +24,7 @@ import {
   baseTopicsForClass,
   formatRepoDescription,
   mergeTopics,
+  PUBLIC_TOPIC,
 } from "../scaffold/github-defaults.js";
 import { regenMeshContextFromYon } from "../scaffold/mesh-context.js";
 import { AGENTS_MD_TEMPLATE_VERSION } from "../templates/priming.js";
@@ -355,18 +356,43 @@ async function processVault(
   // floor against the live set is sufficient.
   const have = new Set(beforeInfo.topics.map((t) => t.trim().toLowerCase()));
   const missingFloor = baseTopics.filter((t) => !have.has(t.trim().toLowerCase()));
-  const changed = beforeInfo.description !== desiredDescription || missingFloor.length > 0;
+  // M2(a) (release review, vault-visibility) — the CLASS FLOOR reconciles DOWNWARD
+  // too. `lyt-public` is not a user-authored topic: it is the publication marker
+  // this codebase owns, and a vault whose recorded visibility is PRIVATE must not
+  // keep advertising it (a `--private` flip whose topic edit failed used to point
+  // here for the remedy, and this path could not deliver it). This is the ONLY
+  // topic ever removed — every other GH-only extra is still preserved by the
+  // union semantics above.
+  const excessFloor = !isPublic && have.has(PUBLIC_TOPIC) ? [PUBLIC_TOPIC] : [];
+  const changed =
+    beforeInfo.description !== desiredDescription ||
+    missingFloor.length > 0 ||
+    excessFloor.length > 0;
 
   // Honest reported post-apply state. editRepo only ADDS, so the real `after` is
   // the UNION of what's live on GH plus what we'd assert — never a set that drops
   // a pre-existing GH-only extra (which the old `after = desiredTopics` implied).
-  const afterTopics = unionTopics(beforeInfo.topics, desiredTopics);
+  // Final review (item 13) — the exclusion is CASE-INSENSITIVE, matching the
+  // detection above (`have` is lowercased). A repo carrying `LYT-Public` tripped
+  // the drift check and was stripped by the gh edit, while this filter kept the
+  // topic in the reported `after` — a receipt that disagreed with the write it
+  // described.
+  const excessFloorLower = new Set(excessFloor.map((t) => t.trim().toLowerCase()));
+  const afterTopics = unionTopics(beforeInfo.topics, desiredTopics).filter(
+    (t) => !excessFloorLower.has(t.trim().toLowerCase()),
+  );
   const before = { description: beforeInfo.description, topics: beforeInfo.topics };
   const after = { description: desiredDescription, topics: afterTopics };
 
   if (changed && args.mode === "apply") {
     try {
-      await gh.editRepo(ownerRepo.owner, ownerRepo.repo, desiredDescription, desiredTopics);
+      await gh.editRepo(
+        ownerRepo.owner,
+        ownerRepo.repo,
+        desiredDescription,
+        desiredTopics,
+        excessFloor,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {

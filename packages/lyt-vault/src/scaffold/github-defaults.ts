@@ -47,6 +47,8 @@ export const POD_TOPICS: readonly string[] = ["lyt", "lyt-pod", "linkyourthink"]
 // POD-repo visibility axis, NOT the per-vault axis. So `lyt-public` is reachable
 // today ONLY via a hand-edited or test-seeded pod.yon. When the per-vault
 // conscious-public flip ships, it becomes live.
+// SHIPPED: `lyt vault visibility <vault> --public|--private --yes`
+// (commands/visibility.ts → flows/vault-visibility.ts). This consumer is LIVE.
 //
 // DEFERRED LIFECYCLE GAP #2 — REVERSAL IS UNBUILT, and is a HARD DEPENDENCY of the
 // flip above. Flipping a vault back to private will NOT strip `lyt-public`: the
@@ -54,7 +56,20 @@ export const POD_TOPICS: readonly string[] = ["lyt", "lyt-pod", "linkyourthink"]
 // never removes). A proper un-publish needs a `--remove-topic` capability that
 // MUST ship WITH the conscious-public flip — never the flip alone, or a
 // de-published vault keeps advertising `lyt-public` forever.
-export const PUBLIC_VAULT_TOPICS: readonly string[] = [...BRAND_TOPICS, "lyt-public"];
+// SHIPPED: `lyt vault visibility` — it shipped in the SAME verb as gap #1, and
+// `--private` strips `lyt-public` through the new `removeTopics` capability on
+// util/gh.ts editRepo (`gh repo edit --remove-topic`).
+
+// The publication marker itself — the ONE topic the visibility flip adds on
+// `--public` and strips on `--private`. Named so the reversal path never has to
+// re-spell the literal (a drifted spelling would silently strand a de-published
+// vault advertising itself as public).
+export const PUBLIC_TOPIC = "lyt-public";
+
+// Final review (item 12) — composed from the named constant, never re-spelled.
+// A literal here could drift from PUBLIC_TOPIC, and then `--public` would add one
+// spelling while `--private` stripped another.
+export const PUBLIC_VAULT_TOPICS: readonly string[] = [...BRAND_TOPICS, PUBLIC_TOPIC];
 
 // (B-2 Phase E) — formalized per-repo-class topic sets. A repo's brand-grade
 // topic floor is determined by which CLASS of Lyt artifact it is:

@@ -30,6 +30,7 @@ import {
   listMeshes,
   listFederationStates,
   listVaults,
+  liveSubscriptions,
   loadDestinationPolicyContext,
   materializeVaultPublishable,
   normalizeGitHubRepoCoordinate,
@@ -64,6 +65,7 @@ import {
   type SyncOnlineVaultAuthority,
 } from "../flows/sync.js";
 import { syncWatchFlow } from "../flows/sync-watch.js";
+import { resolveForeignSyncRepository } from "../flows/foreign-sync-authority.js";
 
 // Injectable seam for the pod-wide federation flows (R7/S3 test seam). Defaults
 // to the real imports; a test overrides them with spies to assert the forge
@@ -435,13 +437,21 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
       let podLedger: SyncPodLedgerResult | undefined;
       if (federationPassAllowed && !connectDeferredPublish) {
         podLedger = await syncPodLedgerFlowFn({ push: true });
-        const publishedMachineSnapshot = (podLedger as typeof podLedger & {
-          publishedMachineSnapshot?: unknown;
-        }).publishedMachineSnapshot;
-        const verifyPublishedSnapshot = (podLedger as typeof podLedger & {
-          revalidatePublishedMachineSnapshot?: () => Promise<boolean>;
-        }).revalidatePublishedMachineSnapshot;
-        if (podLedger.status === "synced" && publishedMachineSnapshot !== undefined && verifyPublishedSnapshot !== undefined) {
+        const publishedMachineSnapshot = (
+          podLedger as typeof podLedger & {
+            publishedMachineSnapshot?: unknown;
+          }
+        ).publishedMachineSnapshot;
+        const verifyPublishedSnapshot = (
+          podLedger as typeof podLedger & {
+            revalidatePublishedMachineSnapshot?: () => Promise<boolean>;
+          }
+        ).revalidatePublishedMachineSnapshot;
+        if (
+          podLedger.status === "synced" &&
+          publishedMachineSnapshot !== undefined &&
+          verifyPublishedSnapshot !== undefined
+        ) {
           const runPublishedGc = housekeepFlowFn as unknown as (args: {
             vaultRid?: string;
             ledger: "sync";
@@ -455,7 +465,9 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
             verifyPublishedSnapshot,
           });
           const changedVaults = new Set(
-            housekeeping.gc.filter((entry) => entry.outcome === "deleted").map((entry) => entry.vaultName),
+            housekeeping.gc
+              .filter((entry) => entry.outcome === "deleted")
+              .map((entry) => entry.vaultName),
           );
           for (const report of result.reports) {
             if (!changedVaults.has(report.name)) continue;
@@ -641,6 +653,28 @@ export async function materializeScopedVaultAfterSync(args: {
         ok: true,
         message:
           "This subscribed/read-only vault was saved locally only; no online action happened.",
+      };
+    }
+    if (vault.source === "shared" || vault.source === "subscribed") {
+      const complete =
+        args.report !== undefined &&
+        ["clean", "pulled", "pushed", "diverged-synced", "skipped-readonly"].includes(
+          args.report.status,
+        ) &&
+        !args.report.readonlyDiverged &&
+        (args.report.behind ?? 0) === 0;
+      return {
+        vaultName: vault.name,
+        status: complete ? "already-online" : "sync-incomplete",
+        remoteAction: "none",
+        visibility: "private",
+        expectedRepo: vault.gitUrl === null ? null : normalizeGitHubRepoCoordinate(vault.gitUrl),
+        materialized: null,
+        syncStatus: args.report?.status ?? null,
+        ok: complete,
+        message: complete
+          ? "The received vault was processed against its existing origin; no repository was created or retargeted."
+          : `Received-vault sync ended as ${args.report?.status ?? "missing-report"}; no repository was created or retargeted.`,
       };
     }
     const writeGate = await deriveWriteGate(vault, db);
@@ -918,7 +952,7 @@ export async function resolveScopedVaultName(vault: string): Promise<string> {
   return (await resolveScopedVaultIdentity(vault)).name;
 }
 
-async function resolveSyncAuthority(vaultRids?: readonly string[]): Promise<{
+export async function resolveSyncAuthority(vaultRids?: readonly string[]): Promise<{
   onlineAuthorityByVaultRid: Record<string, SyncOnlineVaultAuthority>;
 }> {
   const db = await openRegistry();
@@ -939,8 +973,16 @@ async function resolveSyncAuthority(vaultRids?: readonly string[]): Promise<{
       const repository = `${authority.destination.owner}/${authority.destination.repositoryName}`;
       return [{ vault, authority, repository }];
     });
-    const assignments = new Map<string, typeof resolved>();
-    for (const assignment of resolved) {
+    const subscriptions = liveSubscriptions(context.podRoot);
+    const received = all.flatMap((vault) => {
+      const repository = resolveForeignSyncRepository(vault, subscriptions);
+      return repository === null ? [] : [{ vault, repository }];
+    });
+    const assignments = new Map<
+      string,
+      Array<{ vault: (typeof all)[number]; repository: string }>
+    >();
+    for (const assignment of [...resolved, ...received]) {
       const coordinate = `github.com/${assignment.repository}`.toLowerCase();
       const existing = assignments.get(coordinate);
       if (existing === undefined) assignments.set(coordinate, [assignment]);
@@ -982,6 +1024,27 @@ async function resolveSyncAuthority(vaultRids?: readonly string[]): Promise<{
           policy: authority,
         },
       };
+    }
+    if (actor !== null && context.podRid !== null) {
+      for (const vault of all) {
+        if (vaultRids !== undefined && !vaultRids.includes(vault.ridHex)) continue;
+        const repository = resolveForeignSyncRepository(vault, subscriptions);
+        if (repository === null || (vault.source !== "shared" && vault.source !== "subscribed"))
+          continue;
+        onlineAuthorityByVaultRid[vault.ridHex] = {
+          expectedOrigin: repository,
+          publication: {
+            actor,
+            target: `github:user/${repository.split("/")[0]}`,
+            repository,
+            vaultRid: vault.rid,
+            podRid: context.podRid,
+            ...(context.podRoot === undefined ? {} : { podRoot: context.podRoot }),
+            policy: null,
+            foreignSource: vault.source,
+          },
+        };
+      }
     }
     return { onlineAuthorityByVaultRid };
   } finally {

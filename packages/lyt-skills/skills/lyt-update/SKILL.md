@@ -4,7 +4,7 @@ description: >
   Keep installed Lyt current on its configured alpha or latest channel. Trigger on /lyt-update, "is my Lyt up to date", "check for Lyt updates", "update Lyt", or "switch update channel". Uses `lyt outdated`, confirmation-gated `lyt update`, and the authoritative new-binary `lyt install reconcile`. Never substitutes raw npm or silently downgrades.
 visibility: public
 skill-version: 1.0.0
-requires-lyt: ">=0.20.0 <0.21.0"
+requires-lyt: ">=0.20.0 <0.22.0"
 contract-version: 1.0.0
 lyt-version: 0.11.0
 capabilities: [read]

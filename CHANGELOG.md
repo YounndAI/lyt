@@ -7,6 +7,36 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.0] — 2026-09-20
+
+### Added
+
+- `lyt vault visibility <vault> --public|--private [--yes] [--json]` — sets a vault's publication posture directly: flips the GitHub repository visibility, records the change in the ledger, and asserts or strips the `lyt-public` topic to match. Fenced to owners the pod already knows; refuses the pod's own map repositories. Reads the live GitHub state and the recorded ledger state and converges them rather than assuming either is current. Runs preview-only without `--yes`. The MCP `vault.visibility` tool mirrors the same flow but stays preview-only and requires handler confirmation before it applies anything. Closes the two deferred lifecycle gaps left open in `scaffold/github-defaults.ts`.
+
+### Fixed
+
+- A foreign vault received into `shared/{owner}` or `subscriptions/{owner}` did not survive from-disk re-registration: `lyt registry rebuild`'s scan and `registerVaultFromYon`'s bucket-arm gate now key off trusted reconstruction, so `lyt repair` and `reindex --all` heal a vault stranded on disk with no registry row instead of leaving it orphaned. The fix honours an existing `lyt vault forget` tombstone, lets the ledger's recorded `entry_mode` win over a guess from the disk prefix, and `lyt mesh prune` now sees the same on-disk source.
+- `lyt vault sync-metadata --apply` stripped the `lyt-public` GitHub topic from a vault whose recorded visibility is private, correcting a drift that a plain metadata sync should not have touched.
+- Shared-vault sync now uses its existing origin only when the receiver's live subscription record matches the vault identity and relationship. Writes require fresh push permission; subscribed vaults remain pull-only even when the account has write access.
+- Accepting a share now records the durable subscription needed for subsequent sync. If cloning fails after the invitation is accepted, the recovery guidance preserves shared provenance instead of recommending a generic clone.
+- Receiving a foreign vault whose publisher mesh name matches an owned mesh now uses the isolated owner bucket without changing the owned mesh.
+- `lyt registry rebuild` now discovers owned vaults under `<root>/{mesh}/{vault}` with bounded, no-follow directory traversal. Recovery of foreign buckets requires a matching live subscription identity, mode, and origin repository rather than trusting the pod manifest alone.
+
+### Changed
+
+- Widened the skills `requires-lyt` compatibility range to `>=0.20.0 <0.22.0` so the installed 0.21.0 CLI still satisfies it.
+
+### Internal
+
+- Mesh fixtures now derive their pod-identity plan from preflight (a test helper), so the receive-path tests run standalone instead of depending on fixture order.
+- The skills range tests now pin an explicit out-of-range fixture instead of a hardcoded range, so the refusal path they assert stays real as the installed version moves.
+
+### Validation status
+
+- Real registry-alpha use on one machine, continuation of the same vault on a second machine, and two-account team acceptance remain pending. This candidate is not yet promoted to `latest`.
+
+---
+
 ## [0.20.26] — 2026-08-07
 
 ### Fixed

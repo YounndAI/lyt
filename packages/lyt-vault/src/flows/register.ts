@@ -15,16 +15,22 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import type { Client } from "@libsql/client";
 
 import { addKnownPath } from "../registry/known-paths.js";
-import { getMeshByName, getMeshByRid } from "../registry/meshes-repo.js";
+import {
+  addVaultToMesh,
+  listMeshesForVault,
+  removeVaultFromMesh,
+} from "../registry/mesh-vaults-repo.js";
+import { ensureBucketMesh, getMeshByName, getMeshByRid } from "../registry/meshes-repo.js";
 import { upsertVault, type VaultSource, type VaultStatus } from "../registry/repo.js";
+import { parseBucketRelDir, type ParsedBucketRelDir } from "../util/bucket-mesh.js";
 import { readGitRemoteOriginUrl } from "../util/git.js";
 import { getDefaultVaultsRoot } from "../util/paths.js";
-import { hexToUuid7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { hexToUuid7Bytes, ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
 import { parseVaultYon } from "../yon/parse.js";
 
 export interface RegisterVaultArgs {
@@ -46,6 +52,26 @@ export interface RegisterVaultArgs {
   // pass. Set true ONLY on the genuine restore axis. NOTE: a no-op today —
   // upsertVault (:267) `void`s the flag; pre-wired for the P5 same-name-arm gate.
   trustedReconstruction?: boolean | undefined;
+  // fix-pass (final review) — FROM-DISK RECONSTRUCTION AUTHORITY, and the
+  // ONLY key that opens the owner-bucket arm below. It is DISTINCT from
+  // `trustedReconstruction` (which is relocation authority: permission to
+  // re-point an already-registered identity at a new path) because the two
+  // authorities are not the same claim and their caller sets differ.
+  //
+  // `lyt vault join <path>` is a USER-driven registration and legitimately
+  // carries relocation authority; it must NEVER carry this one. Gating the
+  // bucket arm on `trustedReconstruction` meant `lyt vault join
+  // <vaultsRoot>/shared/<owner>/<leaf>` on the user's OWN vault inserted it as
+  // source='shared' inside a minted system bucket mesh — and `source` is STICKY
+  // (registry/repo.ts upsert omits it ON CONFLICT), so the mislabel never
+  // self-corrected.
+  //
+  // Passed by EXACTLY three callers, all of which re-derive rows from a
+  // directory tree THIS pod's receive path wrote: flows/rebuild.ts (registry
+  // rebuild), flows/repair-foreign-homing.ts (the stranded-vault heal) and
+  // flows/federation/recover-pod.ts. join / adopt / init / mesh-init / mesh-join
+  // never pass it and therefore keep the pre-D147 rid/name-fallback behaviour.
+  fromDiskReconstruction?: boolean | undefined;
   // (Phase-0 A2b, CRIT-1) — registry-side home-mesh REBIND. When set, the
   // vault is homed into THIS local mesh rid instead of the one its (untrusted,
   // publisher-authored) `.lyt/vault.yon` @VAULT_HOME_MESH declares. The
@@ -86,21 +112,40 @@ export class VaultHomeMeshNotRegisteredError extends Error {
   readonly meshName: string;
   readonly meshRidHex: string;
   readonly vaultName: string;
-  constructor(vaultName: string, meshName: string, meshRidHex: string) {
+  // true when the vault sits inside a reserved FOREIGN owner-bucket tree
+  // (`subscriptions/{owner}/{leaf}` | `shared/{owner}/{leaf}`). The declared
+  // home mesh is then the PUBLISHER's claim about its OWN mesh, and scaffolding
+  // it locally is precisely the wrong remedy — it mints a plain mesh named after
+  // another owner's and commingles a foreign vault into it.
+  readonly bucketHomed: boolean;
+  constructor(vaultName: string, meshName: string, meshRidHex: string, bucketHomed = false) {
     super(
       `lyt vault register: vault '${vaultName}' declares home mesh '${meshName}' ` +
         `(mesh:${meshRidHex}), which is not a registered mesh on this machine. ` +
-        `To consume another owner's vault, run ` +
-        `'lyt mesh subscribe --vault ${vaultName} --from-mesh <your-mesh>' ` +
-        `(registers the external mesh record automatically), or re-clone it into ` +
-        `one of your own meshes with 'lyt vault clone <url> --to-mesh <local-mesh>'. ` +
-        `Run 'lyt mesh init ${meshName}' only if '${meshName}' is YOUR mesh — ` +
-        `never scaffold another owner's mesh locally.`,
+        (bucketHomed
+          ? `This vault lives in a reserved foreign bucket directory, so ` +
+            `'${meshName}' is the PUBLISHER's own mesh name, not yours — never ` +
+            `scaffold it locally. Run 'lyt repair --apply' to re-register it under ` +
+            `its owner bucket mesh. ` +
+            // fix-pass (cold review) - scope the remedy honestly: the heal
+            // only INSERTS a missing row (`source` is set on the fresh insert
+            // only; upsertVault never updates it ON CONFLICT).
+            `That heal restores a MISSING registry row only - it does NOT correct ` +
+            `a row already recorded as source='own'; re-receive that vault ` +
+            `('lyt vault forget <name>', then 'lyt mesh subscribe' / ` +
+            `'lyt vault accept-share') to reset its provenance.`
+          : `To consume another owner's vault, run ` +
+            `'lyt mesh subscribe --vault ${vaultName} --from-mesh <your-mesh>' ` +
+            `(registers the external mesh record automatically), or re-clone it into ` +
+            `one of your own meshes with 'lyt vault clone <url> --to-mesh <local-mesh>'. ` +
+            `Run 'lyt mesh init ${meshName}' only if '${meshName}' is YOUR mesh — ` +
+            `never scaffold another owner's mesh locally.`),
     );
     this.name = "VaultHomeMeshNotRegisteredError";
     this.meshName = meshName;
     this.meshRidHex = meshRidHex;
     this.vaultName = vaultName;
+    this.bucketHomed = bucketHomed;
   }
 }
 
@@ -109,6 +154,24 @@ export async function registerVaultFromYon(
   args: RegisterVaultArgs,
 ): Promise<RegisteredVault> {
   const absPath = resolve(args.vaultPath);
+  // RECEIVER-SIDE coordinates recovered from the on-disk LOCATION, before
+  // anything is read out of the (publisher-authored, untrusted) vault.yon. See
+  // `bucketHomingFor` below for why the path is the authority here.
+  //
+  // fix-pass (final review) — GATED on `fromDiskReconstruction`, NOT on
+  // `trustedReconstruction`. Path shape ALONE is not sufficient authority to mark
+  // a vault foreign: `flows/adopt.ts` and `flows/init.ts` call this with a bare
+  // `vaultPath`, and `lyt vault join` calls it with RELOCATION authority — so a
+  // user who joins/adopts/inits a vault at `<vaultsRoot>/shared/x/y` would
+  // otherwise have an OWN vault inserted as `source='shared'` and homed into a
+  // system bucket mesh, and `source` is STICKY (registry/repo.ts upsert omits it
+  // ON CONFLICT) so that mislabel would never self-correct. Only the three
+  // FROM-DISK reconstruction callers (registry rebuild, the stranded-vault heal,
+  // recover-pod) pass `fromDiskReconstruction: true`; those are exactly the
+  // callers whose input directory WAS written by this pod's receive path. Every
+  // other caller keeps the pre-D147 rid/name-fallback behaviour.
+  const bucketHoming =
+    args.fromDiskReconstruction === true ? bucketHomingFor(absPath) : null;
   const yonPath = join(absPath, ".lyt", "vault.yon");
   const content = readFileSync(yonPath, "utf8");
   const parsed = parseVaultYon(content);
@@ -141,6 +204,12 @@ export async function registerVaultFromYon(
   //
   // Precedence : homeMeshRidOverride ?? (rid-match ?? name-fallback).
   let homeMeshBytes: Uint8Array | null;
+  // Final review — set ONLY when the owner-bucket arm below resolved the home
+  // mesh. The bucket arm mints the bucket mesh itself, so it also owes the
+  // mesh-side view of that binding (the `mesh_vaults` role='home' row) — the
+  // stranded-vault heal already writes it, and without it a registry rebuild
+  // produced a bucket mesh whose `listVaultsInMesh` was empty.
+  let bucketHomeMeshRid: Uint8Array | null = null;
   if (args.homeMeshRidOverride !== undefined) {
     // (CRIT-1) — a caller-supplied override (the LOCAL `--to-mesh` target,
     // meshRow.rid) wins over the publisher's declared @VAULT_HOME_MESH rid. The
@@ -154,11 +223,43 @@ export async function registerVaultFromYon(
         parsed.name,
         parsed.homeMesh?.meshName ?? "<local-target-mesh>",
         uuid7BytesToHex(homeMeshBytes),
+        bucketHoming !== null,
       );
     }
+  } else if (bucketHoming !== null) {
+    // BUCKET-HOMED FOREIGN VAULT, re-derived FROM DISK (registry rebuild,
+    // the stranded-vault heal, recover-pod) with NO caller override. `lyt vault
+    // join` is NOT one of these callers: it is a user-driven registration and
+    // never passes `fromDiskReconstruction`.
+    //
+    // The vault was received via subscribe / accept-share, cloned with
+    // `preserveRid` into `<vaultsRoot>/<subscriptions|shared>/{owner}/{leaf}`, and
+    // its committed `.lyt/vault.yon` was deliberately left BYTE-UNCHANGED (
+    // clean-tree contract). That file therefore states the PUBLISHER's
+    // `@VAULT_HOME_MESH mesh_name` — a claim about the PUBLISHER's own mesh. Both
+    // remaining fallbacks are wrong for it:
+    //   - the rid lookup MISSES (the publisher's mesh rid is not local); and
+    //   - the by-NAME fallback would home a foreign `personal/main` into the
+    //     RECEIVER's own `personal` mesh (the live commingling defect), or, with
+    //     no same-named mesh, throw and invite the user to `lyt mesh init
+    //     <publisher-mesh>` — minting a plain mesh named after another owner's.
+    //
+    // The on-disk LOCATION is the receiver-owned fact that survived: it is
+    // exactly the tree the receive path chose, derived from the SAME
+    // bucket-mesh.ts rules. So reconstruct the receiver's coordinates from it —
+    // home mesh `<subscriptions|shared>/{owner}` and `source` from the prefix —
+    // while `name` and `rid` stay the PUBLISHER's (the preserve-rid contract is
+    // untouched; nothing is written back to vault.yon).
+    //
+    // The by-name fallback is NEVER taken for a bucket-homed vault. Genuinely OWN
+    // vaults cannot reach this arm (a user cannot occupy the reserved
+    // `subscriptions`/`shared` mesh prefixes), so their name-fallback behaviour
+    // is unchanged.
+    homeMeshBytes = (await ensureBucketMesh(db, bucketHoming.bucketMesh)).mesh.rid;
+    bucketHomeMeshRid = homeMeshBytes;
   } else if (parsedHomeMeshBytes !== null) {
     // (R1) — from-disk re-registration (`lyt registry rebuild`,
-    // recover-pod, a cold `lyt vault join`) re-registers a vault from its
+    // recover-pod, the stranded-vault heal) re-registers a vault from its
     // FROZEN, committed `.lyt/vault.yon` with NO override. A preserve-rid
     // subscribe/adopt clone kept the PUBLISHER's committed @VAULT_HOME_MESH
     // (byte-unchanged on ingest), whose mesh rid is the publisher's — NOT
@@ -181,12 +282,15 @@ export async function registerVaultFromYon(
           parsed.name,
           parsed.homeMesh?.meshName ?? "<local-target-mesh>",
           uuid7BytesToHex(parsedHomeMeshBytes),
+          false,
         );
       }
     }
   } else {
     homeMeshBytes = null;
   }
+
+  const effectiveSource: VaultSource | undefined = args.source ?? bucketHoming?.source;
 
   await upsertVault(
     db,
@@ -199,12 +303,31 @@ export async function registerVaultFromYon(
       homeMeshRid: homeMeshBytes,
       tierHint: parsed.tierHint,
       status: args.status ?? "active",
-      ...(args.source !== undefined ? { source: args.source } : {}),
+      // an explicit caller `source` still wins (the live receive path passes
+      // it). Absent one, a bucket-homed vault is positively marked from its bucket
+      // prefix, so a from-disk re-registration cannot silently fail closed to
+      // 'own' and strip a foreign vault's provenance. Only ever applied on the
+      // fresh INSERT — upsertVault never updates `source` on conflict.
+      ...(effectiveSource !== undefined ? { source: effectiveSource } : {}),
       gitUrl,
       createdAt: parsed.createdAt,
     },
     { trustedReconstruction: args.trustedReconstruction === true },
   );
+
+  // Final review — the mesh-side half of the bucket binding. `upsertVault` writes
+  // `vaults.home_mesh_rid`; `mesh_vaults` role='home' is the same fact seen from
+  // the mesh, and `listVaultsInMesh` (mesh explore, prune's emptiness check, the
+  // mesh rollup) reads THAT table. flows/repair-foreign-homing.ts wrote it and
+  // this chokepoint did not, so `registry rebuild` and `repair --apply` disagreed
+  // about the same vault. Written here so both paths converge on one row.
+  if (bucketHomeMeshRid !== null) {
+    const homeRows = (await listMeshesForVault(db, ridBytes)).filter((r) => r.role === "home");
+    if (!homeRows.some((r) => ridsEqual(r.meshRid, bucketHomeMeshRid))) {
+      for (const h of homeRows) await removeVaultFromMesh(db, h.meshRid, ridBytes);
+      await addVaultToMesh(db, bucketHomeMeshRid, ridBytes, "home");
+    }
+  }
 
   // v1.A.1b: cross-mesh mesh_edges insertion is gated on real `meshes` rows
   // (which v1.B.1 lands). For now, `vaults.parent_vault` carries the parent
@@ -219,6 +342,24 @@ export async function registerVaultFromYon(
   }
 
   return { rid: ridBytes, ridHex: uuid7BytesToHex(ridBytes), name: parsed.name, path: absPath };
+}
+
+// is `absPath` a FOREIGN owner-bucket vault directory under the default
+// vaults root? Returns the receiver-side coordinates recovered from the path, or
+// null for anything else (own vaults, out-of-root vaults, the bucket roots
+// themselves, a subdirectory INSIDE a foreign vault).
+//
+// Path-derived, deliberately: the bucket directory IS the receive decision made
+// visible, it is written by us and never by the publisher, and it survives every
+// registry wipe — which is the exact failure this repairs. It is computed with
+// the same `util/bucket-mesh.ts` rules the receive path used, so the two can not
+// drift. A vault held OUTSIDE the vaults root is out of scope by construction
+// (there is no bucket tree to sit in) and keeps the pre-existing behaviour.
+function bucketHomingFor(absPath: string): ParsedBucketRelDir | null {
+  const root = resolve(getDefaultVaultsRoot());
+  const rel = relative(root, resolve(absPath));
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+  return parseBucketRelDir(rel);
 }
 
 export function isUnderDefaultVaultsRoot(path: string): boolean {

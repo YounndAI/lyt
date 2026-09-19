@@ -39,6 +39,8 @@
 // mesh directly via registry insertMesh (which bypasses validateMeshName), so
 // the reserved-name guard blocks user occupation WITHOUT blocking this path.
 
+import { slugifyHandle } from "./federation-paths.js";
+
 export const SUBSCRIPTION_BUCKET_MESH = "subscriptions";
 export const SHARED_BUCKET_MESH = "shared";
 
@@ -93,4 +95,79 @@ export function bucketVaultRelDir(
   leaf: string,
 ): string {
   return `${bucketMeshName(entryModeForSource(source), owner)}/${leaf}`;
+}
+
+// the INVERSE of `bucketVaultRelDir`. Given a vaults-root-RELATIVE
+// directory, decide whether it is a FOREIGN owner-bucket vault location and, if
+// so, recover the receiver's coordinates from it.
+//
+// WHY this exists: a foreign vault received via subscribe / accept-share is
+// cloned with `preserveRid` and its committed `.lyt/vault.yon` is left
+// BYTE-UNCHANGED (clean-tree contract — clone.ts / register.ts). The file
+// therefore carries the PUBLISHER's `@VAULT name` and `@VAULT_HOME_MESH
+// mesh_name`; the RECEIVER's view (bucket mesh, source, path) lives ONLY in the
+// registry row. Any re-derivation FROM DISK (registry rebuild, the stranded-vault
+// heal, recover-pod — the three callers that pass register's
+// `fromDiskReconstruction`; `lyt vault join` is NOT one of them) would otherwise
+// lose those bucket facts and home a
+// foreign `personal/main` into the receiver's OWN `personal` mesh. The on-disk
+// LOCATION is the receiver-owned fact that survives — it is exactly the tree the
+// receive path chose — so it is the reconstruction source.
+//
+// Shape (mirrors bucketVaultRelDir byte-for-byte): `<prefix>/<owner>/<leaf>`,
+// EXACTLY three segments. Anything shorter (the bucket root, an owner dir with
+// no vault) or longer (a nested dir INSIDE a foreign vault) is NOT a bucket
+// vault location and returns null — deliberately strict so a subdirectory of a
+// foreign vault can never be mistaken for a second vault.
+export interface ParsedBucketRelDir {
+  // The STORED provenance implied by the bucket prefix.
+  source: "shared" | "subscribed";
+  // The owner segment the receive path keyed the bucket on (already slugified
+  // at receive time by `slugifyHandle`, so it round-trips unchanged).
+  owner: string;
+  // The vault directory leaf.
+  leaf: string;
+  // The reserved owner-bucket mesh name — `bucketMeshName(entryMode, owner)`.
+  bucketMesh: string;
+}
+
+export function parseBucketRelDir(relDir: string): ParsedBucketRelDir | null {
+  // Accept BOTH separators: the caller may hand us a POSIX-joined relative path
+  // or a Windows `path.relative()` result.
+  const segs = relDir.split(/[\\/]+/).filter((s) => s.length > 0);
+  if (segs.length !== 3) return null;
+  const [prefix, owner, leaf] = segs as [string, string, string];
+  // fix-pass (cold review) — FAIL CLOSED on a prefix that is not BYTE-EQUAL
+  // to a reserved bucket prefix. The prefixes are minted here (lowercase, by
+  // `bucketMeshName`) and never by a user, so `Shared/` is NOT our tree: on a
+  // case-insensitive filesystem it may alias one, but on a case-sensitive one it
+  // is a directory a user could have created. Case-folding it would let a
+  // hand-made `Shared/x/y` be read as a receiver-owned bucket location and mark
+  // an OWN vault foreign. (Was `prefixRaw.toLowerCase()`.)
+  if (prefix !== SUBSCRIPTION_BUCKET_MESH && prefix !== SHARED_BUCKET_MESH) return null;
+  if (owner.length === 0 || leaf.length === 0) return null;
+  if (owner === "." || owner === ".." || leaf === "." || leaf === "..") return null;
+  // fix-pass (cold review) — the OWNER segment must be BYTE-EQUAL to its own
+  // slug. The receive path writes the bucket dir as `slugifyHandle(owner)`
+  // (clone / subscribe / accept-share, and `foreignVaultOwner` in
+  // flows/repair-foreign-homing.ts), so a directory whose owner segment is not
+  // already a slug was NOT written by that path. Round-tripping it through the
+  // slug here (instead of rejecting) would silently key the vault to a DIFFERENT
+  // bucket mesh than the directory it sits in — this inverse must agree with the
+  // forward mapping byte-for-byte or the two derivations drift. A
+  // reserved/underivable handle throws out of slugifyHandle → also null.
+  let ownerSlug: string;
+  try {
+    ownerSlug = slugifyHandle(owner);
+  } catch {
+    return null;
+  }
+  if (ownerSlug !== owner) return null;
+  const source: "shared" | "subscribed" = prefix === SHARED_BUCKET_MESH ? "shared" : "subscribed";
+  return {
+    source,
+    owner,
+    leaf,
+    bucketMesh: bucketMeshName(entryModeForSource(source), owner),
+  };
 }

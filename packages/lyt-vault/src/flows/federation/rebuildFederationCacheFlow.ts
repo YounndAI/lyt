@@ -18,9 +18,8 @@ import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../../registry/client.js";
 import {
-  getMeshByName,
+  ensureBucketMesh,
   getMeshByRid,
-  insertMesh,
   type MeshRow,
 } from "../../registry/meshes-repo.js";
 import { deleteAllAliases, insertAliasRow } from "../../registry/aliases-repo.js";
@@ -34,7 +33,7 @@ import {
 import { canonicalizeCoordinate, gitUrlToCoordinate } from "../../registry/vault-addressing.js";
 import { bucketMeshName } from "../../util/bucket-mesh.js";
 import { slugifyHandle } from "../../util/federation-paths.js";
-import { hexToUuid7Bytes, newUuidv7Bytes } from "../../util/uuid7.js";
+import { hexToUuid7Bytes } from "../../util/uuid7.js";
 import { liveAliases, type LiveAlias } from "../../yon/alias-ledger-read.js";
 import { liveMeshEdges, type LiveMeshEdge } from "../../yon/mesh-edge-ledger-read.js";
 import { liveSubscriptions, type LiveSubscription } from "../../yon/subscription-ledger-read.js";
@@ -698,22 +697,7 @@ async function writeBackRegistryFromLedger(
   return { vaultsWrittenBack, meshesWrittenBack };
 }
 
-// Resolve the reserved bucket mesh by name, creating it locally if absent. The
-// bucket mesh is LOCAL homing scaffolding (the homing mesh_rid FK target) — it
-// is derived, not part of the git-synced ledger SoT.
-async function ensureBucketMesh(
-  db: Client,
-  name: string,
-): Promise<{ mesh: MeshRow; created: boolean }> {
-  const existing = await getMeshByName(db, name);
-  if (existing !== null) return { mesh: existing, created: false };
-  await insertMesh(db, { rid: newUuidv7Bytes(), name, pushTarget: null, pushKind: null });
-  const created = await getMeshByName(db, name);
-  if (created === null) {
-    throw new Error(
-      `rebuildFederationCacheFlow: bucket mesh ${JSON.stringify(name)} insert succeeded ` +
-        `but re-lookup returned null (defensive).`,
-    );
-  }
-  return { mesh: created, created: true };
-}
+// the local find-or-create was LIFTED to registry/meshes-repo.ts
+// (`ensureBucketMesh`) so the ledger reconstitution here, the lazy
+// re-homing repair, and the from-disk re-registration in flows/register.ts all
+// mint the bucket mesh through ONE implementation. Imported above.

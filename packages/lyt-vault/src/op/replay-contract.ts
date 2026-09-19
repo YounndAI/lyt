@@ -49,6 +49,8 @@ export type PhaseALifecycleMutation =
   | "vault-restore"
   | "vault-share"
   | "vault-unshare"
+  | "vault-visibility"
+  | "vault-destination"
   | "vault-invites"
   | "vault-accept-share"
   | "mesh-join"
@@ -311,6 +313,22 @@ export const PHASE_A_REPLAY_INVENTORY: readonly ReplayBoundaryDeclaration[] = [
     coverage: "handler-gated-non-replay",
     sideEffects: ["github"],
     note: "Explicit confirmation removes GitHub repository access.",
+  },
+  {
+    operation: "vault-destination",
+    commandPath: "vault destination",
+    coverage: "canonical-state-idempotent",
+    sideEffects: ["registry"],
+    note: "Records one explicit local or GitHub publication destination for an owned vault.",
+  },
+  {
+    operation: "vault-visibility",
+    commandPath: "vault visibility",
+    coverage: "handler-gated-non-replay",
+    sideEffects: ["github", "filesystem"],
+    note:
+      "Explicit confirmation flips GitHub repository visibility and its lyt-public topic, then " +
+      "appends the @FED_VAULT manifest record and the vault audit journal entry on disk.",
   },
   {
     operation: "vault-invites",

@@ -54,6 +54,7 @@ import { buildSyncMetadataCommand } from "./commands/sync-metadata.js";
 import { buildUnshareCommand } from "./commands/unshare.js";
 import { buildUnfreezeCommand } from "./commands/unfreeze.js";
 import { buildVerifyCommand } from "./commands/verify.js";
+import { buildVisibilityCommand } from "./commands/visibility.js";
 
 export function buildVaultSubcommand(): Command {
   const vault = new Command("vault").description("Manage individual Lyt vaults");
@@ -89,6 +90,7 @@ export function buildVaultSubcommand(): Command {
   vault.addCommand(buildSnapshotCommand());
   vault.addCommand(buildRestoreCommand());
   vault.addCommand(buildListSnapshotsCommand());
+  vault.addCommand(buildVisibilityCommand());
   vault.addCommand(buildShareCommand());
   vault.addCommand(buildUnshareCommand());
   vault.addCommand(buildAccessCommand());

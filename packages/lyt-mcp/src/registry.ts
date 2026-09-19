@@ -25,6 +25,7 @@ import {
   patternRunFlow,
   reconnectVaultFlow,
   searchCascadeFlow,
+  setVaultVisibilityFlow,
   shareVaultFlow,
   syncMetadataFlow,
   unshareVaultFlow,
@@ -571,6 +572,51 @@ export function buildOpRegistry(): OpRow[] {
             vaultName: vault as string,
             withHandle: withHandle as string,
             level: access as ShareLevel,
+            confirmed: false,
+          });
+          return asText(result);
+        }),
+    },
+    {
+      name: "vault.visibility",
+      title: "Set a vault's publication posture",
+      // Final review (item 6) — the description now matches the handler. It said
+      // this op "sets", "reconciles" and "records"; the handler below hard-codes
+      // `confirmed: false`, so it has ALWAYS been a read-only preview and can
+      // never mutate anything. An agent reading the old text would report a flip
+      // it did not perform.
+      description:
+        "PREVIEW ONE vault's public|private posture: reports the current GitHub repository " +
+        "visibility, the @FED_VAULT manifest value, and the exact lyt-public topic deltas a " +
+        "flip would apply. It CHANGES NOTHING — this tool cannot confirm the change. Applying " +
+        "it is CLI-only: the handler runs 'lyt vault visibility <vault> --public|--private " +
+        "--yes'. Publishing a vault exposes every note in it and cannot be un-seen once crawled.",
+      inputSchema: {
+        vault: z.string().describe("Registered vault name"),
+        visibility: z.enum(["public", "private"]).describe("Target publication posture"),
+      },
+      // Final review (item 6) — access stays "write" even though the handler can
+      // only preview. Two reasons, both deliberate: the op names a MUTATION
+      // surface (its whole subject is an irreversible publication), and
+      // tests/capture-contract-invariants.ts pins the access:"write" allowlist as
+      // a review chokepoint — dropping this row to "read" would quietly move a
+      // publication verb out of that review, which is the opposite of what the
+      // honesty fix is for. The description above, not the access token, is what
+      // was lying.
+      access: "write",
+      // m4 (release review) — the flow's own refusal text says this mutation is
+      // "handler-gated". Without this row that claim was FALSE at the MCP layer:
+      // an op with no OpRow is not dispatch-gated at all. `handlerGated: true`
+      // makes it true — `registerTools` fails the op closed unless the server was
+      // launched with the out-of-band handler approval — and the `confirmed:
+      // false` below is the same defense-in-depth the share rows keep.
+      handlerGated: true,
+      defaultProfile: true,
+      handler: ({ vault, visibility }) =>
+        guarded(async () => {
+          const result = await setVaultVisibilityFlow({
+            vaultName: vault as string,
+            visibility: visibility as "public" | "private",
             confirmed: false,
           });
           return asText(result);

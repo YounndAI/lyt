@@ -143,6 +143,20 @@ vaults. Run `lyt help <topic>` for any group below in depth.
 
 ## Sharing
 
+- `lyt vault visibility <name> --public|--private [--yes] [--json]` — set ONE vault's
+  publication posture. `--public` flips the GitHub repo public, adds the
+  `lyt-public` discovery topic, and records `visibility=public` in the `@FED_VAULT`
+  manifest so subscribers route it as a public vault. `--private` reverses all three
+  (the `lyt-public` topic is REMOVED, not just left behind). WITHOUT `--yes` it
+  prints a read-only preview (repo, manifest vs GitHub visibility, the exact topic
+  deltas) and exits non-zero — nothing is changed. It reads the LIVE GitHub
+  visibility, so it converges real drift instead of trusting the local record, and
+  it refuses rather than guessing when GitHub cannot be reached. Idempotent; a vault
+  with no remote yet records the value locally and the repo is created at that
+  visibility on the first `lyt sync`. Only your OWN vaults, and only repositories
+  under an owner this pod publishes to — a subscribed or invitation-joined vault's
+  posture belongs to its owner. This is the PER-VAULT axis; the pod repo's own
+  visibility is a separate axis under `lyt federation`.
 - `lyt vault share <name> --with <handle> --access read|write --yes` — grant a
   GitHub handle access (a repo-collaborator grant). Handler-confirmed.
 - `lyt vault unshare <name> --with <handle> --yes` — revoke access.

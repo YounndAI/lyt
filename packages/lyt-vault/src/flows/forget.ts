@@ -147,8 +147,18 @@ export async function forgetVaultFlow(
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Final review (item 8b) — NAME THE CONSEQUENCE. The tombstone is the only
+      // durable record that this removal was deliberate; the directory stays on
+      // disk and is byte-identical to a stranded vault. Without the record, the
+      // from-disk heal re-registers it and the vault comes back.
       // eslint-disable-next-line no-console
-      console.error(`@FED_VAULT tombstone skipped non-fatally on forget — ${msg}`);
+      console.error(
+        `@FED_VAULT tombstone skipped non-fatally on forget — ${msg}. The registry row is ` +
+          `gone but the removal was NOT recorded in the manifest, so a later ` +
+          `'lyt reindex --all' / 'lyt repair --apply' may re-register '${vault.name}' from ` +
+          `its directory on disk. Re-run 'lyt vault forget ${vault.name}' once the ledger is ` +
+          `writable, or delete the directory yourself.`,
+      );
     }
     // (Brief A) — forget mutates the registry's vault set; regenerate the
     // derived pod manifest so the removed vault drops out of pod.yon. Non-fatal;

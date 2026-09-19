@@ -14,32 +14,53 @@
  * limitations under the License.
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 
 import type { Client } from "@libsql/client";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { getMeshByName, insertMesh } from "../registry/meshes-repo.js";
+import { ensureBucketMesh } from "../registry/meshes-repo.js";
 import {
   addVaultToMesh,
   listMeshesForVault,
   removeVaultFromMesh,
 } from "../registry/mesh-vaults-repo.js";
 import {
+  getVaultByRid,
   listVaults,
   setVaultHomeMesh,
   updateVaultPath,
   type VaultRow,
 } from "../registry/repo.js";
-import { vaultLeaf, vaultOriginCoordinate } from "../registry/vault-addressing.js";
-import { bucketMeshName, bucketVaultRelDir, entryModeForSource } from "../util/bucket-mesh.js";
+import {
+  canonicalizeCoordinate,
+  gitUrlToCoordinate,
+  vaultLeaf,
+  vaultOriginCoordinate,
+} from "../registry/vault-addressing.js";
+import {
+  bucketMeshName,
+  bucketVaultRelDir,
+  entryModeForSource,
+  parseBucketRelDir,
+  SHARED_BUCKET_MESH,
+  SUBSCRIPTION_BUCKET_MESH,
+} from "../util/bucket-mesh.js";
 import { slugifyHandle } from "../util/federation-paths.js";
+import { readGitRemoteOriginUrl } from "../util/git.js";
 import { canonicalizeVaultPath, getDefaultVaultsRoot } from "../util/paths.js";
-import { hexToUuid7Bytes, newUuidv7Bytes, ridsEqual } from "../util/uuid7.js";
+import { hexToUuid7Bytes, ridsEqual, uuid7BytesToHex } from "../util/uuid7.js";
 import { isGitRepo } from "../util/git-run.js";
+import {
+  foldFedVaultWinners,
+  listFedVaultShards,
+  readAllFedVaultRecords,
+} from "../yon/federation-vault-ledger-read.js";
+import { liveSubscriptions } from "../yon/subscription-ledger-read.js";
 import { parseVaultYon } from "../yon/parse.js";
 import { snapshotVaultFlow } from "./snapshot.js";
+import { registerVaultFromYon } from "./register.js";
 
 // Inc-2 Phase B / IDEMPOTENT LAZY REPAIR for already-commingled foreign
 // vaults. Before a foreign vault could be homed on-disk inside the user's
@@ -295,16 +316,11 @@ export async function repairForeignHomingFlow(
       // one txn so the vault never lands half-homed. removeVaultFromMesh clears
       // any prior home-role membership first (the one-home-per-vault partial
       // unique index forbids a second home row).
+      // via the SHARED find-or-create so this repair, the ledger
+      // reconstitution, and the from-disk re-registration mint an owner bucket
+      // through one implementation.
       const bucketMesh = bucketMeshName(entryModeForSource(source), owner);
-      let bucket = await getMeshByName(db, bucketMesh);
-      if (bucket === null) {
-        await insertMesh(db, { rid: newUuidv7Bytes(), name: bucketMesh, pushTarget: null, pushKind: null });
-        bucket = await getMeshByName(db, bucketMesh);
-      }
-      if (bucket === null) {
-        skipped.push({ name: vault.name, reason: "bucket-mesh-unresolved" });
-        continue;
-      }
+      const bucket = (await ensureBucketMesh(db, bucketMesh)).mesh;
 
       await db.execute("BEGIN");
       try {
@@ -341,6 +357,333 @@ export async function repairForeignHomingFlow(
       scanned,
       relocated,
       skipped,
+      durationMs: Date.now() - startedAt,
+    };
+  } finally {
+    if (!callerSupplied) await closeRegistry(db);
+  }
+}
+
+// the COMPANION heal to repairForeignHomingFlow above.
+//
+// repairForeignHomingFlow iterates `listVaults(db)`: it can only fix a foreign
+// vault that still HAS a registry row. The live pod failure is the case with no
+// row at all — three foreign vaults present on disk under their correct bucket
+// directories, zero rows in `vaults`, and plain publisher-named meshes minted by
+// the old by-name fallback. Nothing that iterates the registry can see those
+// vaults, so nothing healed them.
+//
+// This flow scans the two bucket TREES ON DISK instead, finds every
+// `<subscriptions|shared>/{owner}/{leaf}` directory that carries a
+// `.lyt/vault.yon` with NO corresponding registry row, and re-registers it
+// through the (now bucket-aware) registerVaultFromYon — which homes it into
+// `<subscriptions|shared>/{owner}` and marks its `source` from the bucket
+// prefix, all without touching the byte-unchanged committed vault.yon.
+//
+// Contract:
+//   - DRY-RUN by default (mirrors `lyt repair`'s safer write posture).
+//   - IDEMPOTENT: a vault whose rid already has a registry row is skipped, so a
+//     second apply is a no-op.
+//   - Bounded, link-safe scan: exactly owner level then leaf level, classified
+//     from the readdir DIRENT (never `statSync`), so a symlink/junction planted
+//     in a bucket tree is skipped rather than followed.
+//   - NON-DESTRUCTIVE: it only ever INSERTs a missing row. It moves nothing,
+//     deletes nothing, and writes nothing inside the vault.
+export interface StrandedForeignVault {
+  path: string;
+  ridHex: string;
+  name: string;
+  source: "shared" | "subscribed";
+  owner: string;
+  leaf: string;
+  bucketMesh: string;
+}
+
+export interface ReregisterStrandedForeignVaultsArgs {
+  // Open-once seam — the flow opens its own registry when omitted.
+  registryDb?: Client | undefined;
+  mode?: "dry-run" | "apply" | undefined;
+  // Restrict the walk to ONE vault directory (absolute path). Used by
+  // `lyt repair --target`, so a scoped repair heals exactly its finding.
+  onlyPath?: string | undefined;
+}
+
+export interface ReregisterStrandedForeignVaultsResult {
+  mode: "dry-run" | "apply";
+  // Bucket-tree directories that carried a `.lyt/vault.yon`.
+  scanned: number;
+  // Those with NO registry row — the findings.
+  stranded: StrandedForeignVault[];
+  // Rows actually created (always empty under dry-run).
+  registered: StrandedForeignVault[];
+  skipped: { path: string; reason: string }[];
+  // F1 — false when this pod has NO @FED_VAULT ledger shard at all. The forget
+  // tombstone check cannot run there, so the flow falls back to re-registering
+  // from the directory alone (see the fallback note in the flow body).
+  federationLedgerPresent: boolean;
+  durationMs: number;
+}
+
+// Bounded, link-safe enumeration of `<root>/<subscriptions|shared>/*/*`.
+// Deliberately mirrors the rebuild-scan shape (flows/rebuild.ts) — same two
+// levels, same dirent-based link handling — so the two candidate sets agree.
+//
+// EXPORTED (fix-pass, cold review) so `lyt mesh prune`'s bucket-backing
+// guard scans the DISK with the EXACT enumerator this resurrection path uses -
+// the same anti-drift discipline `foreignVaultOwner` already carries. A prune
+// guard with its own scanner could disagree about which directories count as
+// bucket vaults, delete a bucket this flow then resurrects, and re-open the
+// looks-fixed-but-isn't hole.
+export function listBucketVaultDirs(vaultsRoot: string): string[] {
+  const out: string[] = [];
+  for (const bucketPrefix of [SUBSCRIPTION_BUCKET_MESH, SHARED_BUCKET_MESH]) {
+    const bucketRoot = join(vaultsRoot, bucketPrefix);
+    if (!existsSync(bucketRoot)) continue;
+    let ownerEntries;
+    try {
+      ownerEntries = readdirSync(bucketRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ownerEntry of ownerEntries) {
+      if (ownerEntry.isSymbolicLink() || !ownerEntry.isDirectory()) continue;
+      const ownerDir = join(bucketRoot, ownerEntry.name);
+      let leafEntries;
+      try {
+        leafEntries = readdirSync(ownerDir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const leafEntry of leafEntries) {
+        if (leafEntry.isSymbolicLink() || !leafEntry.isDirectory()) continue;
+        out.push(resolve(join(ownerDir, leafEntry.name)));
+      }
+    }
+  }
+  return out;
+}
+
+// fix-pass (cold review, F1) — compare a rid across the registry (dashed
+// UUIDv7 hex) and the ledger (whatever hex form the writer emitted) on ONE
+// normal form: lowercase, dashes stripped. A malformed value simply never
+// matches.
+function normalizeRidHex(hex: string): string {
+  return hex.replace(/-/g, "").toLowerCase();
+}
+
+// F4 — the STORED provenance a LIVE @SUBSCRIPTION asserts for the upstream this
+// directory points at, or null when there is no coordinate / no live record.
+// Coordinate comparison is on the canonical form both sides normalize through
+// (canonicalizeCoordinate), so a bare-vs-typed, cased, or `.git`-suffixed url
+// still matches the ledger key. The entry_mode to source mapping is the exact
+// inverse of `entryModeForSource` (util/bucket-mesh.ts).
+function resolveLedgerSource(
+  gitUrl: string | null,
+  subs: readonly { coordinate: string; entryMode: string }[],
+): "shared" | "subscribed" | null {
+  if (gitUrl === null || gitUrl.length === 0) return null;
+  const coord = gitUrlToCoordinate(gitUrl);
+  if (coord === null) return null;
+  const canon = canonicalizeCoordinate(coord);
+  const hit = subs.find((sub) => canonicalizeCoordinate(sub.coordinate) === canon);
+  if (hit === undefined) return null;
+  return hit.entryMode === "shared" ? "shared" : "subscribed";
+}
+
+export async function reregisterStrandedForeignVaultsFlow(
+  args: ReregisterStrandedForeignVaultsArgs = {},
+): Promise<ReregisterStrandedForeignVaultsResult> {
+  const startedAt = Date.now();
+  const mode = args.mode ?? "dry-run";
+  const callerSupplied = args.registryDb !== undefined;
+  const db = args.registryDb ?? (await openRegistry());
+  // NOTE: deliberately NOT parameterised (unlike repairForeignHomingFlow's
+  // `vaultsRoot` test override). registerVaultFromYon recovers the bucket
+  // coordinates from `getDefaultVaultsRoot()`, so a scan rooted anywhere else
+  // would surface directories this flow could not then register correctly. One
+  // root, both halves. Tests scope it with LYT_HOME.
+  const vaultsRoot = resolve(getDefaultVaultsRoot());
+
+  const stranded: StrandedForeignVault[] = [];
+  const registered: StrandedForeignVault[] = [];
+  const skipped: { path: string; reason: string }[] = [];
+  let scanned = 0;
+
+  // FORGET TOMBSTONES (fix-pass, cold review, F1). `lyt vault forget`
+  // (default, WITHOUT `--tombstone`) DELETES the registry row and LEAVES the
+  // directory on disk (flows/forget.ts) — byte-identical to the stranded state
+  // this flow heals. Without this check `lyt reindex --all` (which runs the heal
+  // in APPLY mode unconditionally) would RESURRECT every forgotten foreign vault
+  // on the next pass. forget also appends a `state=tombstoned` @FED_VAULT record
+  // to the writer's own shard, so the ledger carries the durable "the handler
+  // removed this" fact the directory does not. A rid whose FOLDED @FED_VAULT
+  // winner is tombstoned is therefore SKIPPED (reason `forgotten`), never
+  // re-registered.
+  //
+  // NON-FEDERATED POD FALLBACK: a pod with no @FED_VAULT ledger at all (no
+  // shards on disk) yields zero records and therefore zero tombstones, so this
+  // flow keeps its pre-fix behaviour there and re-registers from the directory
+  // alone. That is the correct degrade — there is no durable retraction channel
+  // to consult — and it is stated in the result via `federationLedgerPresent`.
+  const federationLedgerPresent = listFedVaultShards().length > 0;
+  const forgottenRids = new Set<string>();
+  for (const winner of foldFedVaultWinners(readAllFedVaultRecords()).values()) {
+    if (winner.state === "tombstoned") forgottenRids.add(normalizeRidHex(winner.vaultRid));
+  }
+
+  // LEDGER-OVER-DISK (fix-pass, cold review, F4). The disk PREFIX
+  // (`subscriptions/` vs `shared/`) is a receiver-owned fact, but it is a
+  // SNAPSHOT of the entry mode at receive time; the @SUBSCRIPTION ledger is the
+  // durable, git-synced source of truth for that relationship and is what
+  // rebuildFederationCacheFlow re-homes from. When the two disagree the LEDGER
+  // wins, so a heal and a cache rebuild cannot land the same vault in two
+  // different buckets. Read once for the whole pass.
+  const subs = liveSubscriptions();
+
+  try {
+    for (const vaultDir of listBucketVaultDirs(vaultsRoot)) {
+      if (args.onlyPath !== undefined && resolve(args.onlyPath) !== vaultDir) continue;
+      if (!existsSync(join(vaultDir, ".lyt", "vault.yon"))) continue;
+      scanned += 1;
+
+      const coords = parseBucketRelDir(relative(vaultsRoot, vaultDir));
+      if (coords === null) {
+        // Unreachable given the enumeration shape; defensive.
+        skipped.push({ path: vaultDir, reason: "not-a-bucket-vault-dir" });
+        continue;
+      }
+
+      let parsed;
+      try {
+        parsed = parseVaultYon(readFileSync(join(vaultDir, ".lyt", "vault.yon"), "utf8"));
+      } catch (err) {
+        skipped.push({
+          path: vaultDir,
+          reason: `unreadable-vault-yon: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        continue;
+      }
+
+      let ridBytes: Uint8Array;
+      try {
+        ridBytes = hexToUuid7Bytes(parsed.rid);
+      } catch {
+        skipped.push({ path: vaultDir, reason: "unparseable-rid" });
+        continue;
+      }
+
+      // F1 — a forgotten vault (row deleted, directory deliberately left behind)
+      // is NOT stranded. Skip before it can become a finding, so neither the
+      // `lyt repair` dry-run nor the unconditional reindex apply resurrects it.
+      if (forgottenRids.has(normalizeRidHex(uuid7BytesToHex(ridBytes)))) {
+        skipped.push({ path: vaultDir, reason: "forgotten" });
+        continue;
+      }
+
+      // IDEMPOTENCE + NO-CLOBBER: a rid already present is either this vault's
+      // own row (repairForeignHomingFlow owns re-homing it) or a genuine
+      // conflict — either way this flow does not touch it.
+      if ((await getVaultByRid(db, ridBytes)) !== null) {
+        skipped.push({ path: vaultDir, reason: "already-registered" });
+        continue;
+      }
+
+      // F4 — LEDGER OVER DISK PREFIX. Resolve this directory's ORIGIN coordinate
+      // the way register.ts:141 already does (vault.yon's @META git_url, else
+      // `.git/config` remote.origin.url) and look for a LIVE @SUBSCRIPTION for it.
+      // A live record's `entry_mode` is the durable statement of the relationship
+      // (`shared` = a granted private vault, `subscribe` = a self-subscribed public
+      // one); the disk prefix is only the receive-time snapshot of it. When the two
+      // disagree the LEDGER wins, and the vault is registered AND homed under the
+      // bucket the ledger implies — the same bucket rebuildFederationCacheFlow
+      // would re-mint for that subscription — so the two derivations can never land
+      // one vault in two buckets. With no coordinate or no live record, the disk
+      // prefix stands.
+      const gitUrl = parsed.gitUrl ?? readGitRemoteOriginUrl(vaultDir);
+      const ledgerSource = resolveLedgerSource(gitUrl, subs);
+      const source = ledgerSource ?? coords.source;
+      const bucketMesh =
+        source === coords.source
+          ? coords.bucketMesh
+          : bucketMeshName(entryModeForSource(source), coords.owner);
+
+      const finding: StrandedForeignVault = {
+        path: vaultDir,
+        ridHex: uuid7BytesToHex(ridBytes),
+        name: parsed.name,
+        source,
+        owner: coords.owner,
+        leaf: coords.leaf,
+        bucketMesh,
+      };
+      stranded.push(finding);
+
+      if (mode === "dry-run") continue;
+
+      // F6 — ONE TRANSACTION over the bucket mesh + the row + the membership,
+      // matching the sibling repairForeignHomingFlow's BEGIN/COMMIT. The bucket
+      // mesh is minted INSIDE the txn, so a failure anywhere after it rolls the
+      // mesh back too and never leaves an EMPTY bucket mesh behind (which would
+      // then trip doctor's structural-invariant warn and invite a prune of a mesh
+      // this very flow would resurrect).
+      try {
+        await db.execute("BEGIN");
+        try {
+          const bucket = await ensureBucketMesh(db, bucketMesh);
+          // `source` and the home mesh are passed EXPLICITLY rather than left to
+          // register's own path-derived bucket arm: the ledger may have overridden
+          // the disk prefix above, and an explicit caller value wins there
+          // (register.ts homeMeshRidOverride / args.source). trustedReconstruction
+          // marks the identity-preserving from-disk restore axis (the rail registry
+          // rebuild already uses); the publisher's rid + name are kept and nothing
+          // is written back into vault.yon.
+          await registerVaultFromYon(db, {
+            vaultPath: vaultDir,
+            trustedReconstruction: true,
+            // Final review — the heal is one of the three FROM-DISK
+            // reconstruction callers permitted to open register's bucket arm.
+            // (It passes an explicit `homeMeshRidOverride`, so the arm is not
+            // actually taken here; the flag states the authority truthfully and
+            // keeps the caller set legible.)
+            fromDiskReconstruction: true,
+            source,
+            homeMeshRidOverride: bucket.mesh.rid,
+          });
+          // Mirror repairForeignHomingFlow: the mesh_vaults 'home' membership row
+          // is the mesh-side view of the same binding and is not written by
+          // register.
+          const homeRows = (await listMeshesForVault(db, ridBytes)).filter(
+            (r) => r.role === "home",
+          );
+          if (!homeRows.some((r) => ridsEqual(r.meshRid, bucket.mesh.rid))) {
+            for (const h of homeRows) await removeVaultFromMesh(db, h.meshRid, ridBytes);
+            await addVaultToMesh(db, bucket.mesh.rid, ridBytes, "home");
+          }
+          await db.execute("COMMIT");
+        } catch (innerErr) {
+          try {
+            await db.execute("ROLLBACK");
+          } catch {
+            /* best-effort */
+          }
+          throw innerErr;
+        }
+        registered.push(finding);
+      } catch (err) {
+        skipped.push({
+          path: vaultDir,
+          reason: `register-failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    return {
+      mode,
+      scanned,
+      stranded,
+      registered,
+      skipped,
+      federationLedgerPresent,
       durationMs: Date.now() - startedAt,
     };
   } finally {

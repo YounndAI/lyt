@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
+import { ghSetRepoVisibility } from "./gh.js";
 import { firewall } from "./git-error-firewall.js";
 import { GIT_COMMAND_TIMEOUT_MS } from "./git-run.js";
 import { resolveRemoteUrl } from "./remote-url.js";
@@ -59,6 +60,18 @@ export interface FederationGhClient {
   // Non-fatal at the caller: a topic failure must not unwind a successful
   // repo create (the caller logs + continues).
   setRepoTopics(handle: string, repoName: string, topics: readonly string[]): Promise<void>;
+  // SHIPPED (github-defaults.ts gap #1) — change an EXISTING repo's visibility.
+  // `createRepo` fixes visibility at creation only; before this there was no code
+  // path that could flip a live repo, which is exactly why the conscious-public
+  // flip was undeliverable. Used by flows/vault-visibility.ts. OPTIONAL so
+  // alternate clients / older fakes stay source-compatible (same convention as
+  // `fetchRemotePodManifest` / `remoteHasCommits`); the caller reports a skip
+  // rather than throwing when a client does not implement it.
+  setRepoVisibility?(
+    handle: string,
+    repoName: string,
+    visibility: FederationRepoVisibility,
+  ): Promise<void>;
   // Materialise the federation repo locally. v1.A.0 ships a hybrid path:
   // when the remote was JUST created by us, we `git init` locally + write
   // pod.yon + commit (no clone — the remote is empty). When the
@@ -440,6 +453,13 @@ export const realFederationGhClient: FederationGhClient = {
     const cleaned = topics.map((t) => t.trim()).filter((t) => t.length > 0);
     if (cleaned.length === 0) return;
     runGh(["repo", "edit", `${handle}/${repoName}`, "--add-topic", cleaned.join(",")]);
+  },
+
+  async setRepoVisibility(handle, repoName, visibility): Promise<void> {
+    // Delegates to the single shell implementation in util/gh.ts (which owns the
+    // `--accept-visibility-change-consequences` compatibility probe) so the two
+    // clients can never drift apart on the gh invocation.
+    ghSetRepoVisibility(handle, repoName, visibility);
   },
 
   async initLocalFromFresh(handle, repoName, localDir): Promise<void> {

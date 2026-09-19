@@ -16,7 +16,7 @@
 
 import type { Client } from "@libsql/client";
 
-import { isPersistedEntityRidBytes, uuid7BytesToHex } from "../util/uuid7.js";
+import { isPersistedEntityRidBytes, newUuidv7Bytes, uuid7BytesToHex } from "../util/uuid7.js";
 import { isValidGhHandle } from "../util/identity.js";
 import {
   projectLegacyMeshOwnership,
@@ -235,4 +235,32 @@ export async function deleteMesh(db: Client, rid: Uint8Array): Promise<void> {
     sql: "DELETE FROM meshes WHERE rid = ?",
     args: [rid],
   });
+}
+
+// SHARED find-or-create for a reserved OWNER-BUCKET mesh
+// (`subscriptions/{owner}` | `shared/{owner}`), lifted out of
+// flows/federation/rebuildFederationCacheFlow.ts so every path that has to
+// MATERIALIZE a bucket mesh uses one implementation: the ledger reconstitution,
+// the lazy re-homing repair, and the from-disk re-registration in
+// flows/register.ts. Bucket meshes are SYSTEM-created and deliberately bypass
+// `validateMeshName` (their leading segment is a RESERVED_MESH_NAMES prefix a
+// user cannot occupy), which is exactly why the create must not be re-typed per
+// caller — three copies of a name-and-insert would be three places to drift.
+// `pushTarget`/`pushKind` are NULL by construction: a foreign bucket is never a
+// publication destination.
+export async function ensureBucketMesh(
+  db: Client,
+  name: string,
+): Promise<{ mesh: MeshRow; created: boolean }> {
+  const existing = await getMeshByName(db, name);
+  if (existing !== null) return { mesh: existing, created: false };
+  await insertMesh(db, { rid: newUuidv7Bytes(), name, pushTarget: null, pushKind: null });
+  const created = await getMeshByName(db, name);
+  if (created === null) {
+    throw new Error(
+      `ensureBucketMesh: bucket mesh ${JSON.stringify(name)} insert succeeded ` +
+        `but re-lookup returned null (defensive).`,
+    );
+  }
+  return { mesh: created, created: true };
 }

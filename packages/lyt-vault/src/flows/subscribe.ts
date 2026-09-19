@@ -34,11 +34,7 @@ import {
   vaultLeaf,
   vaultOriginCoordinate,
 } from "../registry/vault-addressing.js";
-import {
-  bucketMeshName,
-  bucketVaultRelDir,
-  entryModeForSource,
-} from "../util/bucket-mesh.js";
+import { bucketMeshName, bucketVaultRelDir, entryModeForSource } from "../util/bucket-mesh.js";
 import {
   isReservedFederationRepoName,
   resolveVaultRef,
@@ -365,8 +361,10 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
   // caught by its repo/leaf-position segment being literally reserved.
   const subRef = resolveVaultRef(args.subscribedVaultName);
   const repoPositionSegment =
-    args.subscribedVaultName.split(/[\\/]/).filter((s) => s.length > 0).pop() ??
-    args.subscribedVaultName;
+    args.subscribedVaultName
+      .split(/[\\/]/)
+      .filter((s) => s.length > 0)
+      .pop() ?? args.subscribedVaultName;
   const referencesReservedManifestRepo =
     subRef !== null && subRef.inputForm === "repo-name"
       ? isReservedFederationRepoName(subRef.repoName)
@@ -461,7 +459,10 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       );
     } else {
       subscribedVault = ref !== null ? await getVaultByName(db, ref.vaultName) : null;
-      if (subscribedVault === null && (ref === null || ref.vaultName !== args.subscribedVaultName)) {
+      if (
+        subscribedVault === null &&
+        (ref === null || ref.vaultName !== args.subscribedVaultName)
+      ) {
         subscribedVault = await getVaultByName(db, args.subscribedVaultName);
       }
     }
@@ -507,28 +508,9 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
           `vault name '${args.subscribedVaultName}' is not in the canonical {owner}/{vault} shape; cannot derive the home mesh for clone-on-subscribe.`,
         );
       }
-      const homeMeshName = ref.vaultName.slice(0, ref.vaultName.indexOf("/"));
-      // release review — the repo-name form decouples GH owner from
-      // mesh name ("owner is WHERE, mesh is WHAT"), so a crafted repo like
-      // `evil/lyt-vault-personal--notes` would otherwise land a FOREIGN vault
-      // as a home member of the user's OWN 'personal' mesh (including an
-      // @MESH_HOME write into the user's mesh.yon). When the embedded mesh
-      // segment names a locally-OWNED mesh (main vault present) but the repo
-      // is hosted elsewhere, refuse with the explicit-intent remedies.
-      if (ref.inputForm === "repo-name" && ref.owner !== homeMeshName) {
-        const localMesh = await getMeshByName(db, homeMeshName);
-        if (localMesh !== null && localMesh.mainVaultRid !== null) {
-          throw new SubscribeVaultNotFoundError(
-            args.subscribedVaultName,
-            `repo '${ref.owner}/${ref.repoName}' declares home mesh '${homeMeshName}', ` +
-              `which is one of YOUR meshes, but the repo is hosted by '${ref.owner}' — ` +
-              `refusing to register a foreign vault into your own mesh. If this vault is ` +
-              `genuinely yours, clone it explicitly with ` +
-              `'lyt vault clone <url> --to-mesh ${homeMeshName}'; otherwise verify the ` +
-              `publisher and subscribe using the {mesh}/{vault} name form.`,
-          );
-        }
-      }
+      // Publisher mesh names may match an owned mesh. The clone below always
+      // uses an owner-keyed foreign bucket, never the publisher's mesh as a
+      // local destination. Origin and preserve-rid checks still apply.
       const remote = authoritativeRemote ?? null;
       if (remote === null) {
         throw new SubscribeVaultNotFoundError(
@@ -538,7 +520,8 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
         );
       }
       const remoteCoordinate = gitUrlToCoordinate(remote.cloneUrl);
-      const expectedRemoteCoordinate = `github.com/${remote.owner}/${remote.repoName}`.toLowerCase();
+      const expectedRemoteCoordinate =
+        `github.com/${remote.owner}/${remote.repoName}`.toLowerCase();
       if (remoteCoordinate !== expectedRemoteCoordinate) {
         throw new SubscribeVaultNotFoundError(
           args.subscribedVaultName,

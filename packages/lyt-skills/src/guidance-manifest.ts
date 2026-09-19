@@ -24,7 +24,7 @@ export interface GuidanceManifestEntryV1 {
   canonicalSourceRoute: string;
   packedPath: string;
   compatibility: {
-    requiresLyt: ">=0.20.0 <0.21.0";
+    requiresLyt: ">=0.20.0 <0.22.0";
     contractVersion: "1.0.0";
   };
   versionMetadata: {
@@ -62,7 +62,7 @@ export const GUIDANCE_MANIFEST_V1: GuidanceManifestV1 = Object.entries(LEGACY_LY
     canonicalSourceRoute: `skills/${name}/SKILL.md`,
     packedPath: `skills/${name}/SKILL.md`,
     compatibility: {
-      requiresLyt: ">=0.20.0 <0.21.0",
+      requiresLyt: ">=0.20.0 <0.22.0",
       contractVersion: "1.0.0",
     },
     versionMetadata: {

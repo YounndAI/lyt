@@ -31,6 +31,7 @@ import { initVaultDbs } from "../../registry/vault-db.js";
 import {
   federationRepoFullName,
   getFederationRepoDir,
+  slugifyHandle,
   vaultRepoName,
 } from "../../util/federation-paths.js";
 import {
@@ -60,8 +61,15 @@ import { hexToUuid7Bytes, uuid7BytesToHex } from "../../util/uuid7.js";
 import { validatePodManifestSemantics } from "../../yon/federation-manifest-validate.js";
 import { parseFederationYon } from "../../yon/federation-read.js";
 import { parseVaultYon } from "../../yon/parse.js";
+import { liveSubscriptions } from "../../yon/subscription-ledger-read.js";
 import type { FedMeshRecord, FedMeshRole } from "../../yon/federation-write.js";
+import {
+  bucketMeshName,
+  bucketVaultRelDir,
+  isForeignBucketMeshName,
+} from "../../util/bucket-mesh.js";
 import { registerVaultFromYon } from "../register.js";
+import { coordinateOwner } from "./rebuildFederationCacheFlow.js";
 
 // Brief B (B.5 — folds a review finding). Pod.yon-driven RECOVERY/acquisition.
 //
@@ -108,6 +116,13 @@ export interface RecoverPodArgs {
 //    or an org vault cloned under its own org) but the repo still didn't
 //    materialize — the repo genuinely moved/renamed/was deleted on GitHub. STATE.
 export type RecoverDropClassification = "owner-misresolved" | "repo-moved-or-deleted";
+
+interface LedgerBackedBucketRecovery {
+  bucketMesh: string;
+  entryMode: "subscribe" | "shared";
+  owner: string;
+  repository: string;
+}
 
 export interface RecoverDrop {
   vaultName: string;
@@ -176,6 +191,59 @@ function classifyRecoverDrop(
   return "repo-moved-or-deleted";
 }
 
+// A system bucket is local receiver state, never manifest authority. The
+// subscription ledger is the receiver-owned relationship source: only a live,
+// unambiguous record can authorize reconstructing a reserved bucket path.
+function ledgerBackedBucketsByVaultRid(
+  podDir: string,
+): Map<string, LedgerBackedBucketRecovery | null> {
+  const byRid = new Map<string, LedgerBackedBucketRecovery | null>();
+  for (const sub of liveSubscriptions(podDir)) {
+    if (sub.entryMode !== "subscribe" && sub.entryMode !== "shared") continue;
+    const rawOwner = coordinateOwner(sub.coordinate);
+    if (rawOwner === null) continue;
+    const coordinate = sub.coordinate.startsWith("lyt:vault:")
+      ? sub.coordinate.slice("lyt:vault:".length)
+      : sub.coordinate;
+    const coordinateSegments = coordinate.split("/").filter((segment) => segment.length > 0);
+    // The receiver ledger's coordinate, not the manifest's `repo`, authorizes
+    // a bucket checkout. Do not accept a same-owner record for another repo.
+    if (
+      coordinateSegments.length !== 3 ||
+      coordinateSegments[0]!.toLowerCase() !== "github.com" ||
+      coordinateSegments[2]!.length === 0
+    )
+      continue;
+    let owner: string;
+    try {
+      owner = slugifyHandle(rawOwner);
+    } catch {
+      continue;
+    }
+    const candidate: LedgerBackedBucketRecovery = {
+      entryMode: sub.entryMode,
+      owner,
+      repository: coordinateSegments[2]!,
+      bucketMesh: bucketMeshName(sub.entryMode, owner),
+    };
+    const existing = byRid.get(sub.rid);
+    if (existing === undefined) {
+      byRid.set(sub.rid, candidate);
+    } else if (
+      existing === null ||
+      existing.bucketMesh !== candidate.bucketMesh ||
+      existing.entryMode !== candidate.entryMode ||
+      existing.repository !== candidate.repository
+    ) {
+      // One manifest vault rid resolving to different live subscription
+      // relationships is ambiguous. Refuse the bucket derivation rather than
+      // selecting a receiver path or source arbitrarily.
+      byRid.set(sub.rid, null);
+    }
+  }
+  return byRid;
+}
+
 const defaultVaultCloneFn: VaultCloneFn = async ({ handle, repo, targetPath }) => {
   // cloneExisting git-clones {handle}/{repo} into targetPath + pins a local git
   // identity (fresh-machine guard). Reused from the pod-repo gh client — the op
@@ -204,7 +272,14 @@ async function verifyRecoveredOwnMeshClaims(
   meshes: readonly FedMeshRecord[],
   gh: GhExecutor,
 ): Promise<{ issues: string[]; normalizedPushKinds: Map<string, "handle" | "org"> }> {
-  const claims = meshes.filter((mesh) => mesh.role === "own" && mesh.pushTarget.length > 0);
+  // Reserved foreign buckets are receiver-local system state, not a manifest
+  // ownership claim. They are separately refused in the vault loop unless a
+  // live subscription ledger reconstructs them, so never authenticate or
+  // normalize their manifest push target as though it carried authority.
+  const claims = meshes.filter(
+    (mesh) =>
+      mesh.role === "own" && mesh.pushTarget.length > 0 && !isForeignBucketMeshName(mesh.meshName),
+  );
   if (claims.length === 0) return { issues: [], normalizedPushKinds: new Map() };
 
   const issues: string[] = [];
@@ -446,6 +521,7 @@ export async function recoverVaultsFromPodManifest(
   // registry row's push shape).
   const manifestMeshByRidHex = new Map<string, FedMeshRecord>();
   for (const m of recoveredMeshes) manifestMeshByRidHex.set(m.meshRidHex, m);
+  const ledgerBucketsByVaultRid = ledgerBackedBucketsByVaultRid(podDir);
 
   // 1. Recover meshes first (so vault home-mesh FK is satisfiable). Idempotent.
   let meshesRecovered = 0;
@@ -576,6 +652,29 @@ export async function recoverVaultsFromPodManifest(
         ? manifestMeshByRidHex.get(manifestHomeMeshRidHex)
         : undefined;
     const manifestRole = manifestMesh?.role;
+    const reservedForeignBucketMesh =
+      manifestMesh !== undefined && isForeignBucketMeshName(manifestMesh.meshName);
+    const reservedOwnManifestMesh =
+      manifestMesh !== undefined && manifestMesh.role === "own" && reservedForeignBucketMesh;
+    // A reserved bucket mesh may only be recovered as receiver-local state from
+    // a live subscription ledger record. In particular, its manifest role and
+    // push target never become ownership or publication authority.
+    const ledgerBucket =
+      manifestMesh !== undefined && manifestMesh.role !== "own" && reservedForeignBucketMesh
+        ? (ledgerBucketsByVaultRid.get(v.vaultRidHex) ?? undefined)
+        : undefined;
+    const bucketRecovery =
+      ledgerBucket !== undefined &&
+      ledgerBucket !== null &&
+      ledgerBucket.bucketMesh === manifestMesh?.meshName &&
+      ledgerBucket.repository === repo
+        ? ledgerBucket
+        : undefined;
+    const unbackedReservedBucketMesh =
+      manifestMesh !== undefined &&
+      manifestMesh.role !== "own" &&
+      reservedForeignBucketMesh &&
+      bucketRecovery === undefined;
     try {
       if (v.homeMeshRidHex !== null) {
         homeMesh = await getMeshByRid(db, hexToUuid7Bytes(v.homeMeshRidHex));
@@ -589,16 +688,21 @@ export async function recoverVaultsFromPodManifest(
       // remains untrusted and falls back to the pod owner.
       owner =
         manifestMesh !== undefined &&
+        !reservedOwnManifestMesh &&
+        !unbackedReservedBucketMesh &&
         isValidGhHandle(manifestMesh.pushTarget) &&
         (manifestMesh.role === "own" || manifestMesh.pushKind === "handle")
           ? manifestMesh.pushTarget
           : args.handle;
+      if (bucketRecovery !== undefined) owner = bucketRecovery.owner;
     } catch {
       owner = args.handle;
     }
+    // Registry lookup failure must not change a ledger-bound read coordinate.
+    if (bucketRecovery !== undefined) owner = bucketRecovery.owner;
     // Defense-in-depth (mirror the top-level handle guard): a derived owner that
     // isn't a valid GitHub username must never reach the clone spawn.
-    if (!isValidGhHandle(owner)) owner = args.handle;
+    if (!isValidGhHandle(owner) && bucketRecovery === undefined) owner = args.handle;
     try {
       validateVaultName(v.vaultName);
       // Idempotency probe is rid-keyed, NOT name-keyed. The vault `rid`
@@ -609,6 +713,49 @@ export async function recoverVaultsFromPodManifest(
       // under a changed name (→ re-clone + re-register, a duplicate-identity
       // clobber) or resolve a bare leaf to a DIFFERENT vault. Match on identity.
       const ridBytes = hexToUuid7Bytes(v.vaultRidHex);
+      if (reservedOwnManifestMesh) {
+        const reason =
+          `reserved bucket mesh '${manifestMesh!.meshName}' claims role=own; ` +
+          "recovery refuses manifest-owned bucket authority";
+        warnings.push(`vault ${v.vaultName}: ${reason}`);
+        skipped.push({ vaultName: v.vaultName, reason });
+        drops.push({
+          vaultName: v.vaultName,
+          repo,
+          owner,
+          classification: "repo-moved-or-deleted",
+          reason,
+        });
+        continue;
+      }
+      if (unbackedReservedBucketMesh) {
+        const reason =
+          `reserved bucket mesh '${manifestMesh!.meshName}' is not backed by a matching ` +
+          "live subscription coordinate and repository";
+        warnings.push(`vault ${v.vaultName}: ${reason}`);
+        skipped.push({ vaultName: v.vaultName, reason });
+        drops.push({
+          vaultName: v.vaultName,
+          repo,
+          owner,
+          classification: "repo-moved-or-deleted",
+          reason,
+        });
+        continue;
+      }
+      if (bucketRecovery !== undefined && !isValidGhHandle(owner)) {
+        const reason = `live subscription owner ${JSON.stringify(owner)} is not a valid GitHub handle`;
+        warnings.push(`vault ${v.vaultName}: ${reason}`);
+        skipped.push({ vaultName: v.vaultName, reason });
+        drops.push({
+          vaultName: v.vaultName,
+          repo,
+          owner,
+          classification: "repo-moved-or-deleted",
+          reason,
+        });
+        continue;
+      }
       const vaultPolicyWinner =
         policyWinners.get(destinationPolicyKey("vault", v.vaultRidHex)) ?? null;
       const existingVault = await getVaultByRid(db, ridBytes);
@@ -627,7 +774,17 @@ export async function recoverVaultsFromPodManifest(
         skipped.push({ vaultName: v.vaultName, reason: "already-registered" });
         continue;
       }
-      const targetPath = resolveVaultPath(v.vaultName);
+      const targetPath =
+        bucketRecovery === undefined
+          ? resolveVaultPath(v.vaultName)
+          : join(
+              getDefaultVaultsRoot(),
+              bucketVaultRelDir(
+                bucketRecovery.entryMode === "shared" ? "shared" : "subscribed",
+                bucketRecovery.owner,
+                v.vaultName.split("/").at(-1)!,
+              ),
+            );
       // Guard the target leaf and every parent before even probing for an
       // existing vault.yon: a leaf junction can make that read, DB init, and
       // registration operate on an external tree without ever cloning.
@@ -645,7 +802,10 @@ export async function recoverVaultsFromPodManifest(
       const preexisting = targetAlreadyExisted
         ? existsSync(vaultYonPath)
           ? inspectCheckoutCompleteness(targetPath)
-          : ({ complete: false, reason: "the pre-existing directory has no .lyt/vault.yon" } as const)
+          : ({
+              complete: false,
+              reason: "the pre-existing directory has no .lyt/vault.yon",
+            } as const)
         : ({ complete: false, reason: "not cloned yet" } as const);
       if (targetAlreadyExisted && !preexisting.complete) {
         // A tracked deletion is NOT exclusive proof of a failed checkout: it
@@ -702,13 +862,13 @@ export async function recoverVaultsFromPodManifest(
         );
       }
       const clonedHomeMeshRid = clonedVault.homeMesh?.meshRid;
-      if (
-        manifestHomeMeshRidHex === null ||
-        manifestMesh === undefined ||
-        clonedHomeMeshRid === undefined ||
-        uuid7BytesToHex(hexToUuid7Bytes(clonedHomeMeshRid)) !== manifestHomeMeshRidHex ||
-        clonedVault.homeMesh?.meshName !== manifestMesh.meshName
-      ) {
+      const clonedHomeMatchesManifest =
+        manifestHomeMeshRidHex !== null &&
+        manifestMesh !== undefined &&
+        clonedHomeMeshRid !== undefined &&
+        uuid7BytesToHex(hexToUuid7Bytes(clonedHomeMeshRid)) === manifestHomeMeshRidHex &&
+        clonedVault.homeMesh?.meshName === manifestMesh.meshName;
+      if (bucketRecovery === undefined && !clonedHomeMatchesManifest) {
         throw new Error(
           `cloned vault home-mesh mismatch for '${v.vaultName}': ` +
             `pod.yon requires mesh '${manifestMesh?.meshName ?? manifestHomeMeshRidHex ?? "<missing>"}'`,
@@ -730,8 +890,13 @@ export async function recoverVaultsFromPodManifest(
       const reg = await registerVaultFromYon(db, {
         vaultPath: targetPath,
         trustedReconstruction: true,
+        // Final review — recover-pod re-derives rows from a tree it just wrote,
+        // so it is one of the three callers that may open register's bucket arm.
+        fromDiskReconstruction: true,
         ridOverride: ridBytes,
-        homeMeshRidOverride: hexToUuid7Bytes(manifestHomeMeshRidHex),
+        ...(bucketRecovery === undefined
+          ? { homeMeshRidOverride: hexToUuid7Bytes(manifestHomeMeshRidHex!) }
+          : {}),
       });
       const recoveredVault = await getVaultByRid(db, ridBytes);
       if (recoveredVault?.source === "own") {

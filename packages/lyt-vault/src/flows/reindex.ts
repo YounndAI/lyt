@@ -39,7 +39,10 @@ import {
   type EmbeddingsBuildProgress,
   type RebuildVaultResult,
 } from "./rebuild-vault.js";
-import { repairForeignHomingFlow } from "./repair-foreign-homing.js";
+import {
+  repairForeignHomingFlow,
+  reregisterStrandedForeignVaultsFlow,
+} from "./repair-foreign-homing.js";
 
 export type ReindexScope = "all" | "mesh" | "vault";
 
@@ -90,6 +93,49 @@ export async function reindexFlow(args: ReindexArgs): Promise<ReindexResult> {
     // failure must never fail the reindex. Scoped to `all` so a single-vault /
     // single-mesh reindex stays narrow.
     if (args.scope === "all") {
+      // FIRST re-register any foreign vault sitting on disk under its
+      // bucket tree with NO registry row (repairForeignHomingFlow iterates
+      // `listVaults` and is blind to those), THEN run the re-homing pass so a
+      // freshly restored row is also re-homed if it is in the wrong tree.
+      //
+      // fix-pass (cold review, F7): its OWN try/catch. Sharing one try with
+      // the re-homing pass below meant a throw out of this newer flow
+      // SUPPRESSED the long-standing pass entirely (control jumped past it),
+      // silently regressing a shipped heal. Both are independently best-effort.
+      try {
+        // Final review (item 8a) — APPLY ONLY ON A FEDERATED POD. The heal skips
+        // a rid whose folded @FED_VAULT winner is `tombstoned`, which is the ONLY
+        // durable record that `lyt vault forget` removed a vault whose directory
+        // is still on disk. A pod with NO @FED_VAULT shard has no tombstones at
+        // all, so an unconditional apply here RESURRECTED every forgotten foreign
+        // vault on the next `lyt reindex --all`. Probe read-only first; apply only
+        // when the retraction channel this heal depends on actually exists, and
+        // otherwise report the findings and name the explicit verb.
+        const probe = await reregisterStrandedForeignVaultsFlow({
+          registryDb,
+          mode: "dry-run",
+        });
+        if (probe.federationLedgerPresent) {
+          await reregisterStrandedForeignVaultsFlow({ registryDb, mode: "apply" });
+        } else if (probe.stranded.length > 0) {
+          // eslint-disable-next-line no-console
+          console.error(
+            `lyt reindex: found ${probe.stranded.length} unregistered vault ` +
+              `director${probe.stranded.length === 1 ? "y" : "ies"} under the owner-bucket ` +
+              `trees, but this pod has no @FED_VAULT ledger, so a forgotten vault cannot be ` +
+              `told apart from a stranded one and nothing was registered. Run ` +
+              `'lyt repair --apply' to register them explicitly.`,
+          );
+        }
+      } catch {
+        // best-effort — same dangling-txn defense as the catch below (this
+        // flow also runs a per-vault BEGIN/COMMIT on the SHARED connection).
+        try {
+          await registryDb.execute("ROLLBACK");
+        } catch {
+          /* no active transaction to clear — expected on a clean connection */
+        }
+      }
       try {
         await repairForeignHomingFlow({ registryDb });
       } catch {

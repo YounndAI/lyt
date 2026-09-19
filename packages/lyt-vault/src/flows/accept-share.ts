@@ -20,7 +20,9 @@ import { GhAccessProvider } from "../access/gh-access-provider.js";
 import type { AccessProvider, Invitation } from "../access/access-provider.js";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByRid } from "../registry/repo.js";
-import { vaultLeaf } from "../registry/vault-addressing.js";
+import { gitUrlToCoordinate, vaultLeaf } from "../registry/vault-addressing.js";
+import { appendSubscriptionActive } from "../yon/subscription-ledger-write.js";
+import { observedMaxSubscriptionHlc } from "../yon/subscription-ledger-read.js";
 import { bucketMeshName, bucketVaultRelDir, entryModeForSource } from "../util/bucket-mesh.js";
 import {
   isReservedFederationRepoName,
@@ -156,11 +158,16 @@ export class AcceptShareCloneFailedError extends Error {
   override readonly cause: unknown;
   constructor(cloneUrl: string, cause: unknown) {
     const detail = cause instanceof Error ? cause.message : String(cause);
+    const repository = gitUrlToCoordinate(cloneUrl)?.replace(/^github\.com\//, "") ?? cloneUrl;
     super(
       `Accepted the GitHub invitation, but cloning the shared vault then failed: ${detail}. ` +
         `The invitation is now CONSUMED (re-running accept-share will report the invite as not ` +
         `found), but the private repo is already accessible to your gh account. Retry the receive ` +
-        `directly with 'lyt vault clone ${cloneUrl}' (or 'lyt mesh subscribe' for a public vault).`,
+        `with 'lyt mesh subscribe --vault ${repository} ` +
+        `--from-mesh <your-owned-mesh>'. Select an existing mesh from 'lyt mesh list'. ` +
+        `This receive path probes repository visibility, preserves private shared provenance, ` +
+        `and records the subscription needed for sync. Do not use generic vault clone as ` +
+        `a shared-vault recovery step.`,
     );
     this.name = "AcceptShareCloneFailedError";
     this.cloneUrl = cloneUrl;
@@ -173,7 +180,9 @@ export class AcceptShareCloneFailedError extends Error {
 // identity + a clean tracked tree) + autoRegisterExternalMesh (the owner-bucket
 // is a system mesh record, main NULL) + foreignSource='shared'. autoIndex is NOT
 // set here — acceptShareFlow reflects the index itself so it can surface the stats.
-const defaultCloneFn: SubscribeCloneFn = async (args: SubscribeCloneArgs): Promise<SubscribeCloneResult> => {
+const defaultCloneFn: SubscribeCloneFn = async (
+  args: SubscribeCloneArgs,
+): Promise<SubscribeCloneResult> => {
   const clone = await cloneVaultFlow({
     url: args.cloneUrl,
     name: args.vaultName,
@@ -304,6 +313,14 @@ export async function acceptShareFlow(args: AcceptShareArgs): Promise<AcceptShar
           `but the vault is not in the registry (defensive).`,
       );
     }
+    const coordinate = gitUrlToCoordinate(cloneUrl);
+    if (coordinate === null) throw new Error("accept-share: received origin has no coordinate.");
+    appendSubscriptionActive({
+      coordinate: `lyt:vault:${coordinate}`,
+      rid: cloneResult.vaultRidHex,
+      entryMode: "shared",
+      observedMaxHlc: observedMaxSubscriptionHlc(),
+    });
     const indexed = await reflectInboundIndex(vault.name, vault.path);
 
     return {

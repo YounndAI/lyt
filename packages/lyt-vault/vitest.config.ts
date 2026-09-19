@@ -111,7 +111,31 @@ const EMBEDDINGS_PROGRESS_ISOLATED = ["tests/util/embeddings-download-progress.t
 // as ACCESS_ISOLATED / EMBEDDINGS_PROGRESS_ISOLATED — carve it into its own
 // project with isolate:true so its mock can never be stripped. Passes in isolation;
 // only failed in the full single-fork run.
-const FED_OBSERVABLE_ISOLATED = ["tests/federation/r1-observable-degrade.red-prove.test.ts"];
+//
+// M3 (release review, vault-visibility) — the visibility verb's @FED_VAULT
+// append-failure branch hoists the SAME author mock for the same reason, and
+// exhibited the pollution in the OTHER direction: run alongside its sibling
+// vault-visibility.test.ts under the shared graph, ITS mock stayed live for the
+// sibling and turned every real append into a failure. Same fix, same list.
+//
+// Final-review item 8b (release review, forget-tombstone) — `lyt vault forget`'s
+// @FED_VAULT tombstone-append-failure branch hoists a vi.mock on
+// federation-vault-ledger-write.js's appendFedVaultTombstone for the same
+// reason: forget.ts imports it as a static (non-injectable) module binding.
+// Confirmed failure mode: running
+// `d147-foreign-reregister.test.ts tests/flows/forget-tombstone-failure.test.ts`
+// in one invocation, d147 imports federation-vault-ledger-write.js (via the
+// registry/flows it exercises) BEFORE this file's hoisted mock factory runs;
+// under the shared single-fork module graph the real module is already
+// cached, so the mock never replaces appendFedVaultTombstone, the append
+// succeeds for real, and the expected non-fatal warning is never emitted —
+// same shared-state-pollution class as the two entries above. Same fix, same
+// list.
+const FED_OBSERVABLE_ISOLATED = [
+  "tests/federation/r1-observable-degrade.red-prove.test.ts",
+  "tests/flows/vault-visibility-ledger-failure.test.ts",
+  "tests/flows/forget-tombstone-failure.test.ts",
+];
 
 export default defineConfig({
   test: {
