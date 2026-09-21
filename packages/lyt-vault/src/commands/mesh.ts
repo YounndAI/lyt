@@ -446,7 +446,9 @@ function buildMeshInitSubcommand(dependencies: MeshCommandDependencies): Command
                 local: creationLocalMutationCount(m),
                 code: partial ? "checkpoint-failed" : undefined,
                 summary: partial ? "Local checkpoint failed after mesh creation." : undefined,
-                next: partial ? `lyt sync --vault ${result.mainVault.name}` : undefined,
+                next: partial
+                  ? result.checkpoint.failure?.recoveryAction ?? `lyt sync --vault ${result.mainVault.name}`
+                  : undefined,
                 nextCode: partial ? "complete-local-checkpoint" : undefined,
                 mutations: m,
                 commit: result.checkpoint.commitSha,

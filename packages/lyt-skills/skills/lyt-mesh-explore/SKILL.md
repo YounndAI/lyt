@@ -1,7 +1,7 @@
 ---
 name: lyt-mesh-explore
 description: >
-  Drill into one exactly named Lyt mesh — surface mesh metadata, destination policy, and member home-vault destinations. Trigger when the user runs /lyt-mesh-explore <mesh>, or says "show me the X mesh", "what's in mesh X", "drill into X mesh", or similar mesh-scoped browsing. Wraps `lyt mesh info <mesh> [--remote] --json`. Read-only; never resolves by prefix.
+  Inspect one exactly named Lyt mesh when the user runs /lyt-mesh-explore or asks about that mesh's metadata and members. For pod-wide inventory use /lyt-pod; for content use /lyt-search.
 visibility: public
 skill-version: 1.0.0
 requires-lyt: ">=0.20.0 <0.22.0"

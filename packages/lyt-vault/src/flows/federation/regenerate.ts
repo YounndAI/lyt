@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 
 import type { Client } from "@libsql/client";
+import { readObservedDestinationPolicyWinnersReadOnly } from "./destination-policy-ledger.js";
 
 import { listFederationStates, readFederationState } from "../../registry/federation-state.js";
 import { listMeshes, type MeshRow } from "../../registry/meshes-repo.js";
@@ -95,6 +96,7 @@ export interface DerivePodManifestOptions {
   // A sync is a re-FOLD, never an event-author. Migration (pod.yon → ledger seed)
   // still runs either way — it is idempotent + convergent by construction.
   reconcile?: boolean;
+  creationAdditions?: { meshRids: readonly string[]; vaultRids: readonly string[] };
 }
 
 // Inc-2 Phase 0 — the pod manifest is now DERIVED from the
@@ -153,7 +155,7 @@ export async function derivePodManifestDoc(
 
   // Step 1 — migrate the single-file pod.yon into the ledger on first run
   // (idempotent + convergent; runs on both the lifecycle and the sync path).
-  migrateSingleFilePodYonToLedgerIfEmpty(opts.handle);
+  if (opts.creationAdditions === undefined) migrateSingleFilePodYonToLedgerIfEmpty(opts.handle);
 
   // Step 2 — reconcile the live registry into the ledger (append-only), UNLESS
   // this is the sync-reconstitution path (reconcile === false; see the option
@@ -163,21 +165,50 @@ export async function derivePodManifestDoc(
   const destinationPolicies = await loadDestinationPolicyContext(db);
   if (opts.reconcile !== false) {
     const registryVaults = (await listVaults(db)).filter((v) => v.status !== "tombstoned");
-    reconcileVaultsIntoLedger(registryVaults);
-    reconcileMeshesIntoLedger(registryMeshes, state.fedRidHex, destinationPolicies);
+    reconcileVaultsIntoLedger(opts.creationAdditions === undefined ? registryVaults : registryVaults.filter((v) => opts.creationAdditions!.vaultRids.includes(v.ridHex)));
+    reconcileMeshesIntoLedger(opts.creationAdditions === undefined ? registryMeshes : registryMeshes.filter((m) => opts.creationAdditions!.meshRids.includes(m.ridHex)), state.fedRidHex, destinationPolicies);
   }
+
+  return projectPodManifestFromCurrentFold(state.fedRidHex, registryMeshes, destinationPolicies, opts);
+}
+
+/** No migration, reconciliation, observation advancement, or filesystem writes. */
+export async function projectPodManifestReadOnly(
+  db: Pick<Client, "execute">,
+  opts: DerivePodManifestOptions,
+  podRoot: string,
+): Promise<FederationDoc> {
+  const state = await readFederationState(db, opts.handle);
+  if (state === null) throw new Error("Creation cannot verify the current pod identity.");
+  const meshes = await listMeshes(db);
+  const policies: DestinationPolicyContext = {
+    podRid: state.fedRidHex,
+    podIdentityStatus: "resolved",
+    podRoot,
+    winners: readObservedDestinationPolicyWinnersReadOnly(state.fedRidHex, podRoot),
+  };
+  return projectPodManifestFromCurrentFold(state.fedRidHex, meshes, policies, opts, podRoot);
+}
+
+function projectPodManifestFromCurrentFold(
+  fedRidHex: string,
+  registryMeshes: readonly MeshRow[],
+  destinationPolicies: DestinationPolicyContext,
+  opts: DerivePodManifestOptions,
+  podRoot?: string,
+): FederationDoc {
 
   // Step 3 — fold the ledger shards → the live vault/mesh set. The fold already
   // EXCLUDES tombstoned winners (the drop-retracted filter, now on `state`).
   const registryMeshByRid = new Map(registryMeshes.map((mesh) => [mesh.ridHex, mesh]));
-  const fedMeshes: FedMeshRecord[] = liveFedMeshes().map((m) => {
+  const fedMeshes: FedMeshRecord[] = liveFedMeshes(podRoot).map((m) => {
     const localMesh = registryMeshByRid.get(m.meshRid);
     const canonical =
       localMesh?.ownCreated === true
         ? legacyMeshTopologyProjection(localMesh, destinationPolicies)
         : { pushTarget: m.pushTarget, pushKind: m.pushKind };
     return {
-      fedRidHex: m.fedRidHex.length > 0 ? m.fedRidHex : state.fedRidHex,
+      fedRidHex: m.fedRidHex.length > 0 ? m.fedRidHex : fedRidHex,
       meshRidHex: m.meshRid,
       meshName: m.meshName,
       pushTarget: canonical.pushTarget,
@@ -187,7 +218,7 @@ export async function derivePodManifestDoc(
     };
   });
 
-  const fedVaults: FedVaultRecord[] = liveFedVaults().map((v) => ({
+  const fedVaults: FedVaultRecord[] = liveFedVaults(podRoot).map((v) => ({
     vaultRidHex: v.vaultRid,
     vaultName: v.vaultName,
     homeMeshRidHex: v.homeMeshRidHex,
@@ -199,7 +230,7 @@ export async function derivePodManifestDoc(
 
   return {
     federation: {
-      fedRidHex: state.fedRidHex,
+      fedRidHex,
       handle: opts.handle,
       visibility: opts.visibility,
       createdAt: opts.createdAt,
@@ -563,6 +594,9 @@ export interface RegeneratePodManifestOptions {
   // The sync-reconstitution caller (rebuildFederationCacheFlow) passes FALSE so a
   // sync is a pure re-fold, never a ledger-event author. See DerivePodManifestOptions.
   reconcile?: boolean;
+  /** Creation-only optimistic revalidation after awaited derivation, before replacement. */
+  creationPreWriteGuard?: (doc: FederationDoc) => void;
+  creationAdditions?: { meshRids: readonly string[]; vaultRids: readonly string[] };
 }
 
 export interface RegeneratePodManifestResult {
@@ -633,10 +667,14 @@ export async function regeneratePodManifestFlow(
     createdAt,
     nowIso,
     ...(opts.reconcile !== undefined ? { reconcile: opts.reconcile } : {}),
+    ...(opts.creationAdditions === undefined ? {} : { creationAdditions: opts.creationAdditions }),
   });
 
   const changed = existingDoc === null || !podManifestDocsEqualIgnoringStamp(existingDoc, doc);
 
+  // No await separates this guard from replacement. This closes the async
+  // derivation gap, but is not an exclusion lock against external writers.
+  opts.creationPreWriteGuard?.(doc);
   mkdirSync(dirname(podYonPath), { recursive: true });
   writeFileSync(podYonPath, renderFederationYon(doc), "utf8");
 
@@ -645,7 +683,7 @@ export async function regeneratePodManifestFlow(
   // derived from the registry, so the legacy file holds no unique truth.
   let legacyRemoved = false;
   const legacyPath = join(getFederationRoot(), "federation.yon");
-  if (legacyPath !== podYonPath && existsSync(legacyPath)) {
+  if (opts.creationPreWriteGuard === undefined && legacyPath !== podYonPath && existsSync(legacyPath)) {
     try {
       rmSync(legacyPath, { force: true });
       legacyRemoved = true;
@@ -685,6 +723,9 @@ export async function regeneratePodManifestNonFatal(
     // Forwarded to derivePodManifestDoc. FALSE on the sync-reconstitution path so
     // a sync is a pure re-fold, never a ledger-event author (see DerivePodManifestOptions).
     reconcile?: boolean | undefined;
+    /** Guarded creation must propagate failure rather than claim regeneration succeeded. */
+    creationPreWriteGuard?: ((doc: FederationDoc) => void) | undefined;
+    creationAdditions?: { meshRids: readonly string[]; vaultRids: readonly string[] };
   } = {},
 ): Promise<void> {
   try {
@@ -701,8 +742,11 @@ export async function regeneratePodManifestNonFatal(
       handle,
       ...(opts.nowIso !== undefined ? { nowIso: opts.nowIso } : {}),
       ...(opts.reconcile !== undefined ? { reconcile: opts.reconcile } : {}),
+      ...(opts.creationPreWriteGuard === undefined ? {} : { creationPreWriteGuard: opts.creationPreWriteGuard }),
+      ...(opts.creationAdditions === undefined ? {} : { creationAdditions: opts.creationAdditions }),
     });
   } catch (err) {
+    if (opts.creationPreWriteGuard !== undefined) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     // eslint-disable-next-line no-console
     console.error(`pod manifest regen skipped non-fatally — ${msg}`);

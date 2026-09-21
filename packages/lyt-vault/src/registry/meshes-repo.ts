@@ -200,7 +200,7 @@ export async function getMeshByName(db: Client, name: string): Promise<MeshRow |
   return rowToMesh(r.rows[0] as unknown as Record<string, unknown>);
 }
 
-export async function listMeshes(db: Client): Promise<MeshRow[]> {
+export async function listMeshes(db: Pick<Client, "execute">): Promise<MeshRow[]> {
   const r = await db.execute("SELECT * FROM meshes ORDER BY name ASC");
   return r.rows.map((row) => rowToMesh(row as unknown as Record<string, unknown>));
 }

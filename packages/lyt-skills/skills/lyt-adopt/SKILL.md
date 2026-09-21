@@ -1,7 +1,7 @@
 ---
 name: lyt-adopt
 description: >
-  Guided adopt of an existing editor-neutral markdown directory into a Lyt pod. Trigger when the user runs /lyt-adopt, or says "adopt this vault", "bring this folder into Lyt", or similar phrasing on an existing local directory. Additive-only: it creates `.lyt/` and NEVER touches the user's `.md` files. Brand-new vaults route to /lyt-create.
+  Adopt an existing Markdown directory into Lyt when the user runs /lyt-adopt or asks to bring a folder into Lyt. Additive-only; it never edits existing Markdown. New vaults use /lyt-create.
 visibility: public
 skill-version: 1.0.0
 requires-lyt: ">=0.20.0 <0.22.0"

@@ -58,6 +58,7 @@ import {
 } from "../op/receipt-v1.js";
 import {
   CreationMutationFailure,
+  creationLocalMutationCount,
   type CreationCheckpointEvidence,
 } from "../op/creation-mutation-journal.js";
 import { plannedInitialScaffoldPaths, plannedObsidianScaffoldPaths } from "../scaffold/init.js";
@@ -385,15 +386,7 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
                 checkpointRepositories: local.checkpointRepositories,
                 checkpointPaths: local.checkpointPaths,
               };
-        const hasMutation =
-          evidence !== undefined &&
-          (evidence.registryRows ?? 0) +
-            (evidence.topologyBindings ?? 0) +
-            (evidence.localDatabases ?? 0) +
-            (evidence.destinationPolicyRecords ?? 0) +
-            (evidence.checkpointCommits ?? 0) +
-            (evidence.checkpointPaths?.length ?? 0) >
-            0;
+        const hasMutation = local !== undefined && creationLocalMutationCount(local) > 0;
         const code =
           mutationFailure?.code ??
           (typeof err === "object" &&
@@ -404,7 +397,9 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
             : "vault-init-failed");
         const retryable = mutationFailure?.retryable ?? false;
         const summary = receiptSafeErrorSummary(err, safeInitFailureDiagnostic(code));
-        emitInitDiagnostic(safeInitFailureDiagnostic(code));
+        // Preserve the bounded, sanitized cause even if receipt construction fails.
+        // Keep diagnostics on stderr so stdout remains Receipt V1 only.
+        emitInitDiagnostic(summary);
         const receipt = makeCreationCommandReceipt({
           operation: "vault-init",
           operationId,
@@ -485,6 +480,9 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
       const checkpointFailed = result.creation.checkpoints.some(
         (checkpoint) => checkpoint.status === "failed" || checkpoint.status === "partial",
       );
+      const checkpointRecovery = result.creation.checkpoints.find(
+        (checkpoint) => checkpoint.failure?.recoveryAction !== undefined,
+      )?.failure?.recoveryAction;
       const checkpointCommit =
         result.creation.checkpoints.find((checkpoint) => checkpoint.commitSha)?.commitSha ?? null;
       const destination =
@@ -523,7 +521,7 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
                 },
                 next: {
                   code: "complete-local-checkpoint",
-                  summary: `Run ${publishNext.command} to recover the checkpoint.`,
+                  summary: checkpointRecovery ?? `Run ${publishNext.command} to recover the checkpoint.`,
                 },
                 exitCode: 2,
               }

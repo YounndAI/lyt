@@ -1,7 +1,7 @@
 ---
 name: lyt-alias
 description: >
-  Manage pod-local vault aliases — bind a short handler-chosen name to a vault (alias → rid; survives rename + move), list the bindings, re-point one, or remove one. Trigger when the user runs /lyt-alias, or says "alias this vault as X", "give <vault> a short name", "what aliases do I have", "list my aliases", "rename my alias", "re-point alias X", "remove alias X", "drop the alias for X". Wraps `lyt alias <name> <target>` / `lyt alias --list` / `lyt alias --remove <name>` (all `--json`). Aliases are pod-local: synced across your own pod's machines, never to subscribers. Read-only on the target — works on a subscribed/read-only vault. Pairs with /lyt-pod and /lyt-search (which resolve `@alias` addresses).
+  Manage a Handler-chosen pod-local vault alias when the user runs /lyt-alias or asks to set, list, re-point, or remove one. Aliases survive rename and move; they are not shared with subscribers.
 visibility: public
 skill-version: 1.0.0
 requires-lyt: ">=0.20.0 <0.22.0"

@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.1] — 2026-09-21
+
+### Changed
+
+- Local creation accepts verified generated pod manifests while preserving prior records and unrelated Git changes; arbitrary manifest edits still refuse safely.
+- Agent installation now supplies a compact routing spine with detailed guidance loaded only for Lyt tasks.
+- Cross-machine collaboration validation remains a separate release gate.
+
+---
+
 ## [0.21.0] — 2026-09-20
 
 ### Added

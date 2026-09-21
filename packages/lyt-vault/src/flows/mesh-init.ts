@@ -64,6 +64,7 @@ import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { recordInitFailure } from "../util/failure-log.js";
 import { federationInitFlow } from "./federation/init.js";
 import { LEDGER_REGISTRY } from "../registry/ledger-registry.js";
+import { assertExistingPodBoundaryUnchanged, captureExistingPodBoundary, deferredPodCheckpoint, type ExistingPodBoundary } from "./creation-pod-boundary.js";
 import {
   CreationMutationJournal,
   asCreationMutationFailure,
@@ -158,7 +159,7 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
   if (!validCreationPlan(creationPlan, destinationRequest, attemptId, expectedRepositoryName)) {
     throw new Error("Mesh creation plan does not match this local, not-published mesh creation.");
   }
-  const podCheckpointBoundary = capturePodCheckpointBoundary(creationPlan, opts.noGit === true);
+  const podCheckpointBoundary = await capturePodCheckpointBoundary(creationPlan, opts.noGit === true, opts.registryPath);
   const preflight = await inspectMeshInitPreflight({
     name: opts.name,
     parent: opts.parent,
@@ -417,8 +418,20 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
     // after every registry/topology mutation has landed and before the final
     // exact-path checkpoint/receipt is computed. The lifecycle helper is
     // deliberately non-fatal and performs no remote action.
-    await regeneratePodManifestNonFatal(db);
-    mutationJournal.record({ filesystemWrites: 1 });
+    // A composing vault flow owns the final manifest after its own topology
+    // writes; do not rewrite it halfway through the parent operation.
+    if (opts.checkpointMode !== "deferred") {
+      if (podCheckpointBoundary.existing !== undefined) {
+        assertExistingPodBoundaryUnchanged(podCheckpointBoundary.existing);
+      }
+      const existingBoundary = podCheckpointBoundary.existing;
+      await regeneratePodManifestNonFatal(db, existingBoundary === undefined ? {} : {
+        creationPreWriteGuard: (doc) => assertExistingPodBoundaryUnchanged(existingBoundary, doc),
+        ...(existingBoundary.generatedDoc === null ? {} : { creationAdditions: existingBoundary.additions }),
+      });
+      mutationJournal.record({ filesystemWrites: 1 });
+    }
+    let podCheckpointIncomplete = false;
     if (plannedPodRoot !== null && opts.checkpointMode !== "deferred" && opts.noGit !== true) {
       const podCheckpoint = finalizePlannedPodCheckpoint(
         creationPlan,
@@ -426,6 +439,7 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
         podCheckpointBoundary,
         opts.checkpointGitRunner,
       );
+      podCheckpointIncomplete = podCheckpoint.status !== "committed" && podCheckpoint.status !== "skipped";
       mutationJournal.record({
         checkpointPaths: podCheckpoint.paths,
         checkpointCommits: podCheckpoint.status === "committed" ? 1 : 0,
@@ -476,7 +490,9 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
       pushKind: pushPlan.kind,
       pushed: false,
       creationPlan,
-      checkpoint,
+      checkpoint: podCheckpointIncomplete
+        ? { ...checkpoint, status: "partial", failure: deferredPodCheckpoint([]).failure! }
+        : checkpoint,
       checkpointContext: scaffoldResult.checkpointContext,
       mutations: mutationJournal.snapshot(),
       mainVault: {
@@ -548,6 +564,7 @@ function finalizePlannedPodCheckpoint(
   if (intended === undefined) {
     throw new Error("Mesh creation plan is missing its exact pod checkpoint.");
   }
+  if (boundary.deferCheckpoint) return deferredPodCheckpoint(intended.exact_paths);
   const binding = bindOperationPodCheckpoint(intended.exact_paths, boundary);
   const checkpoint = finalizeInitialCheckpoint(
     createInitialCheckpointContext(podRoot, binding.paths, binding.contentDigests),
@@ -563,9 +580,11 @@ interface PodCheckpointBoundary {
   podRoot: string;
   preexistingPaths: ReadonlySet<string>;
   contentDigests: ReadonlyMap<string, string>;
+  deferCheckpoint?: boolean;
+  existing?: ExistingPodBoundary;
 }
 
-function capturePodCheckpointBoundary(plan: CreationPlanV1, noGit: boolean): PodCheckpointBoundary {
+async function capturePodCheckpointBoundary(plan: CreationPlanV1, noGit: boolean, registryPath?: string): Promise<PodCheckpointBoundary> {
   const identity = plan.intended_effects.identity;
   const podRoot =
     identity.kind === "create"
@@ -587,11 +606,18 @@ function capturePodCheckpointBoundary(plan: CreationPlanV1, noGit: boolean): Pod
   if (!existsSync(podRoot)) {
     return { podRoot, preexistingPaths: new Set(), contentDigests };
   }
+  // --no-git suppresses checkpoint writes, not preservation preflight. An
+  // existing pod without inspectable Git state must fail closed too.
+  const existing = identity.kind === "create"
+    ? null
+    : await captureExistingPodBoundary(podRoot, intended.exact_paths, plan.intended_effects, registryPath);
   if (noGit) {
     return {
       podRoot,
       preexistingPaths: new Set(contentDigests.keys()),
       contentDigests,
+      deferCheckpoint: existing?.dirty === true,
+      ...(existing === null ? {} : { existing }),
     };
   }
   const output = execFileSync(
@@ -605,21 +631,22 @@ function capturePodCheckpointBoundary(plan: CreationPlanV1, noGit: boolean): Pod
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (dirty.length !== 0) {
-    if (identity.kind !== "create") {
-      throw new Error("Mesh creation refuses a dirty pod repository before mutation.");
-    }
-    const allowed = new Set(intended.exact_paths);
-    for (const entry of dirty.split("\0").filter((value) => value.length > 0)) {
-      const status = entry.slice(0, 2);
-      const path = entry.slice(3).replaceAll("\\", "/");
-      if (entry.length < 4 || status !== "??" || !allowed.has(path)) {
-        throw new Error("Mesh creation refuses unplanned dirt in a fresh pod repository.");
+    if (identity.kind === "create") {
+      const allowed = new Set(intended.exact_paths);
+      for (const entry of dirty.split("\0").filter((value) => value.length > 0)) {
+        const status = entry.slice(0, 2);
+        const path = entry.slice(3).replaceAll("\\", "/");
+        if (entry.length < 4 || status !== "??" || !allowed.has(path)) {
+          throw new Error("Mesh creation refuses unplanned dirt in a fresh pod repository.");
+        }
       }
     }
   }
   const freshDeferredPod = identity.kind === "create";
   return {
     podRoot,
+    deferCheckpoint: existing?.dirty === true,
+    ...(existing === null ? {} : { existing }),
     // A fresh federation forge owns its exact plan-bound untracked files. They
     // are not pre-existing collisions and remain part of the later checkpoint.
     preexistingPaths: freshDeferredPod

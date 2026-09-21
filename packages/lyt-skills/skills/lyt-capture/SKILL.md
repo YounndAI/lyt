@@ -1,7 +1,7 @@
 ---
 name: lyt-capture
 description: >
-  Capture a Figment (a markdown note) into a Lyt vault under the 8-field frontmatter contract. Trigger when the user runs /lyt-capture, or says "save this", "capture this", "add to my vault", "remember this in Lyt", or similar phrasing on content they want kept in their Lyt vault. Writes an Obsidian-flavored markdown file under <vault>/notes/ with frontmatter (title, created, modified, tags, purpose, topic, mesh-visibility, weight, meta) per yai.lyt v1. Wraps `lyt pattern run knowledge-capture capture` under the hood. Companion to lyt-recall.
+  Capture a durable Markdown Figment when the user runs /lyt-capture or asks to save content in Lyt. Uses the required frontmatter contract; retrieval uses /lyt-recall or /lyt-search.
 visibility: public
 skill-version: 1.0.0
 requires-lyt: ">=0.20.0 <0.22.0"

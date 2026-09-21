@@ -1,7 +1,7 @@
 ---
 name: lyt-sync
 description: >
-  Sync one exact registered Lyt vault through `lyt sync --vault <qualified-vault> --json`. Lyt owns local reconciliation, first private publication through a trusted mesh target, remote validation, and truthful outcomes. Trigger when the user runs /lyt-sync, or asks to sync, pull, push, or publish one vault. Genuine local/no-target, read-only, subscriber, and offline vaults remain non-publishing. Pairs with /lyt-capture.
+  Sync one exact registered Lyt vault when the user runs /lyt-sync or asks to pull, push, or publish it. Lyt owns reconciliation and publication gates; local-only or read-only vaults do not publish.
 visibility: public
 skill-version: 1.0.0
 requires-lyt: ">=0.20.0 <0.22.0"

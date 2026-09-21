@@ -1,7 +1,7 @@
 ---
 name: lyt-create
 description: >
-  Create a new Lyt mesh or vault through the supported CLI and report its Receipt V1. Trigger when the Handler says "create a mesh", "create a vault", "start a local vault", or names a GitHub destination for a new mesh or vault. Existing directories route to /lyt-adopt; durable notes route to /lyt-capture. Creation checkpoints exact local files but never publishes or invents an alias.
+  Create a new Lyt mesh or vault when the Handler asks to create one or names its destination. Existing directories use /lyt-adopt; durable notes use /lyt-capture. Creation reports its Receipt and does not publish.
 visibility: public
 skill-version: 1.0.0
 requires-lyt: ">=0.20.0 <0.22.0"

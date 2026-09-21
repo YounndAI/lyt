@@ -29,7 +29,7 @@ export type ManagedManualMarkerInspection =
       reason: "duplicate" | "reversed" | "version-mismatch";
     }>;
 
-export const AGENT_MANUAL_MAX_WORDS = 2_500;
+export const AGENT_MANUAL_MAX_WORDS = 200;
 
 /** Canonical budget counter for the generated managed manual body. */
 export function countGuidanceWords(content: string): number {

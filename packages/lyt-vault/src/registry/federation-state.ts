@@ -49,7 +49,7 @@ function rowToState(row: Record<string, unknown>): FederationStateRow {
 }
 
 export async function readFederationState(
-  db: Client,
+  db: Pick<Client, "execute">,
   handle: string,
 ): Promise<FederationStateRow | null> {
   const r = await db.execute({

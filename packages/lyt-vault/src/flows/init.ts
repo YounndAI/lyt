@@ -50,6 +50,7 @@ import { VOICE } from "../voice.js";
 import { federationInitFlow } from "./federation/init.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { meshInitFlow } from "./mesh-init.js";
+import { assertExistingPodBoundaryUnchanged, captureExistingPodBoundary, deferredPodCheckpoint, type ExistingPodBoundary } from "./creation-pod-boundary.js";
 import type { FederationGhClient, FederationRepoVisibility } from "../util/gh-federation.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import { registerVaultFromYon } from "./register.js";
@@ -299,6 +300,17 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
   assertVaultCreationBinding(creationPreflight, creationBinding);
   assertVaultInitWriteTarget(creationPreflight, creationBinding);
   const freshPodBoundary = captureFreshPodMutationBoundary(creationBinding.creationPlan);
+  const existingPodRoot = creationPreflight.podIdentity.state === "present"
+    ? creationPreflight.podIdentity.repositoryRoot : null;
+  const existingPodBoundary = existingPodRoot !== null
+    ? await captureExistingPodBoundary(
+        existingPodRoot,
+        creationBinding.creationPlan.intended_effects.checkpoints.find(
+          (entry) => entry.repository_root === existingPodRoot,
+        )?.exact_paths ?? [],
+        creationBinding.creationPlan.intended_effects,
+      )
+    : null;
 
   // v1.A.1b: open the registry ONCE up-front (v1.A.1a fold #4 extended) so
   // we can (a) resolve --parent <name> → parentVaultRid bytes before the
@@ -509,9 +521,16 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
     // the vault + mesh + federation_state rows have landed. Non-fatal + skipped
     // when the pod isn't initialised (no federation_state yet). Reuses the open
     // registry (open-once).
+    if (existingPodBoundary !== null) assertExistingPodBoundaryUnchanged(existingPodBoundary);
     await regeneratePodManifestNonFatal(
       db,
-      federationSelfHealed !== null ? { handle: federationSelfHealed.handle } : {},
+      {
+        ...(federationSelfHealed === null ? {} : { handle: federationSelfHealed.handle }),
+        ...(existingPodBoundary === null ? {} : {
+          creationPreWriteGuard: (doc) => assertExistingPodBoundaryUnchanged(existingPodBoundary, doc),
+          ...(existingPodBoundary.generatedDoc === null ? {} : { creationAdditions: existingPodBoundary.additions }),
+        }),
+      },
     );
     mutationJournal.record({ filesystemWrites: 1 });
 
@@ -523,6 +542,7 @@ export async function initVaultFlow(opts: InitFlowOptions): Promise<InitFlowResu
           ? getFederationRepoDir(creationBinding.creationPlan.intended_effects.identity.handle)
           : null,
       freshPodBoundary,
+      existingPodBoundary,
       writerId,
       opts.checkpointGitRunner,
     );
@@ -741,6 +761,7 @@ function finalizePlannedPodCheckpoint(
   plan: CreationPlanV1,
   podRoot: string | null,
   freshBoundary: FreshPodMutationBoundary | null,
+  existingBoundary: ExistingPodBoundary | null,
   writerId: string | null,
   runGit: Parameters<typeof finalizeInitialCheckpoint>[1] | undefined,
 ): LocalCheckpointResult | null {
@@ -751,6 +772,7 @@ function finalizePlannedPodCheckpoint(
   if (intended === undefined) {
     throw new Error("First-vault creation plan is missing its exact pod checkpoint.");
   }
+  if (existingBoundary?.dirty === true) return deferredPodCheckpoint(intended.exact_paths);
   const paths =
     plan.intended_effects.identity.kind === "create"
       ? freshPodMutationPaths(plan, podRoot, intended.exact_paths, freshBoundary, writerId)
