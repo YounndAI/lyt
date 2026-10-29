@@ -18,18 +18,14 @@ import type { Client } from "@libsql/client";
 import { dirname, join } from "node:path";
 
 import { closeRegistry, getRegistryPath, openRegistry } from "../registry/client.js";
-import { listFederationStates, upsertFederationState } from "../registry/federation-state.js";
+import { listFederationStates } from "../registry/federation-state.js";
 import { getMeshByName } from "../registry/meshes-repo.js";
 import { getVaultByExactName } from "../registry/repo.js";
 import { assertSafeCloneName, getFederationRoot, vaultRepoName } from "../util/federation-paths.js";
 import { getHandleFromIdentity } from "../util/identity.js";
 import { resolveVaultPath } from "../util/paths.js";
-import {
-  hexToUuid7Bytes,
-  newUuidv7Bytes,
-  uuid7BytesToDashedString,
-  uuid7BytesToHex,
-} from "../util/uuid7.js";
+import { plannedInitialLocalWritePaths, plannedInitialScaffoldPaths } from "../scaffold/init.js";
+import { newUuidv7Bytes, uuid7BytesToDashedString, uuid7BytesToHex } from "../util/uuid7.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import type { GhExecutor } from "../util/gh-discover.js";
 import { observeActiveActor, type ActiveActorObservation } from "../op/active-actor-observation.js";
@@ -41,7 +37,11 @@ import type { MeshPushKind } from "../yon/mesh-write.js";
 import { cloneVaultFlow } from "./clone.js";
 import { discoverFlow, UNCLUSTERED_MESH_NAME, type Cluster } from "./discover.js";
 import { meshInitFlow, type MeshInitOptions } from "./mesh-init.js";
-import { derivePlannedCreationRid, resolveCreationPlanV1 } from "./creation-plan.js";
+import {
+  derivePlannedCreationRid,
+  plannedMeshPodEffectPathsV1,
+  resolveCreationPlanV1,
+} from "./creation-plan.js";
 
 // v1.C.3 — `lyt mesh adopt --cluster <name>`.
 //
@@ -439,7 +439,16 @@ export async function meshAdoptClusterFlow(args: AdoptClusterArgs): Promise<Adop
     }
     const mainVaultName = `${args.clusterName}/main`;
     const mainVaultPath = resolveVaultPath(mainVaultName);
+    const mainCheckpointPaths = [
+      ...plannedInitialScaffoldPaths({ name: mainVaultName }),
+      ".lyt/mesh.yon",
+    ];
+    const mainWritePaths = [
+      ...plannedInitialLocalWritePaths({ name: mainVaultName }),
+      ".lyt/mesh.yon",
+    ];
     const podHandle = podIdentities[0]?.handle ?? getHandleFromIdentity();
+    const podPaths = plannedMeshPodEffectPathsV1(podIdentities.length === 0);
     const podRid =
       podIdentities[0]?.fedRidHex ?? derivePlannedCreationRid(operationId, `pod:${podHandle}`);
     const meshRid = derivePlannedCreationRid(operationId, `mesh:${args.clusterName}`);
@@ -473,10 +482,7 @@ export async function meshAdoptClusterFlow(args: AdoptClusterArgs): Promise<Adop
         local_writes: [
           {
             root: mainVaultPath,
-            exact_paths: [
-              join(mainVaultPath, ".lyt", "vault.yon"),
-              join(mainVaultPath, ".lyt", "mesh.yon"),
-            ],
+            exact_paths: mainWritePaths.map((path) => join(mainVaultPath, path)),
             bounded_path_classes: ["vault-scaffold", "git-metadata"],
           },
           {
@@ -486,8 +492,13 @@ export async function meshAdoptClusterFlow(args: AdoptClusterArgs): Promise<Adop
           },
           {
             root: getFederationRoot(),
-            exact_paths: [],
-            bounded_path_classes: ["destination-policy-ledger"],
+            exact_paths: podPaths.map((path) => join(getFederationRoot(), path)),
+            bounded_path_classes: [
+              "vault-scaffold",
+              "destination-policy-ledger",
+              "federation-manifest-ledger",
+              "git-metadata",
+            ],
           },
         ],
         registry_rows: [
@@ -500,21 +511,16 @@ export async function meshAdoptClusterFlow(args: AdoptClusterArgs): Promise<Adop
         ],
         topology_bindings: [{ mesh_rid: meshRid, vault_rid: vaultRid, role: "main" }],
         checkpoints: [
-          { repository_root: mainVaultPath, exact_paths: [".lyt/mesh.yon", ".lyt/vault.yon"] },
+          { repository_root: mainVaultPath, exact_paths: mainCheckpointPaths },
+          { repository_root: getFederationRoot(), exact_paths: podPaths },
         ],
         remote_effects: [],
       },
     });
     if (planned.kind === "refusal") throw new Error(planned.message);
 
-    // Planning and all refusal gates above are read-only. Only now establish
-    // the local pod identity required by mesh destination-policy creation.
-    // Reuse an adopted identity when present; when absent, bind the canonical
-    // ambient local identity. Never derive the pod identity from the cluster
-    // owner and never create a second federation row.
-    if (podIdentities.length === 0) {
-      await upsertFederationState(db, { handle: podHandle, fedRidBytes: hexToUuid7Bytes(podRid) });
-    }
+    // Mesh initialization owns the planned fresh-pod forge and reuses an
+    // existing identity. Do not pre-insert a row before its preflight.
     const meshInitOpts: MeshInitOptions = {
       name: args.clusterName,
       noPush: true,

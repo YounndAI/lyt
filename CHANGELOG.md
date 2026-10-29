@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.2] — 2026-10-29
+
+### Fixed
+
+- Mesh adoption now plans the pod and main-vault checkpoints and lets mesh initialization forge a fresh pod, preserving existing-pod safeguards.
+- The attended alpha publisher obtains fresh authentication per pending dependency wave and re-observes the wave before publishing.
+
+---
+
 ## [0.21.1] — 2026-09-21
 
 ### Changed
