@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, posix, relative, sep } from "node:path";
 
 import { closeRegistry, openRegistry } from "../registry/client.js";
@@ -22,7 +22,7 @@ import { getVaultByName } from "../registry/repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
 import { getIdentity } from "../util/identity.js";
 import { resolveCaptureDir } from "../util/paths.js";
-import { getUserPatternsDir } from "../util/pattern-paths.js";
+import { getBundledPatternsDir, getUserPatternsDir } from "../util/pattern-paths.js";
 import { isIndexablePath } from "../util/indexable.js";
 import { parsePatternYon, type VerbRecord } from "../yon/pattern.js";
 import { captureIndexFlow } from "./capture-index.js";
@@ -135,7 +135,21 @@ const TOKEN_RE = /<([a-zA-Z][a-zA-Z0-9_-]*)>/g;
 // Do not re-define them here.
 
 export async function patternRunFlow(args: PatternRunArgs): Promise<PatternRunResult> {
-  const patternDir = join(getUserPatternsDir(), args.patternName);
+  let patternDir = join(getUserPatternsDir(), args.patternName);
+  // Fresh pods created without the interactive bootstrap may not have a pod
+  // copy. Read the shipped capture template directly, without installing or
+  // modifying anything in the pod. An existing (even broken) override remains
+  // authoritative and must not be silently bypassed.
+  if (args.patternName === "knowledge-capture" && args.verbId === "capture") {
+    let absent = false;
+    try {
+      lstatSync(patternDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      absent = true;
+    }
+    if (absent) patternDir = join(getBundledPatternsDir(), "knowledge-capture");
+  }
   const yonPath = join(patternDir, "pattern.yon");
   if (!existsSync(yonPath)) {
     throw new Error(`pattern run: pattern '${args.patternName}' not installed.`);

@@ -1398,11 +1398,12 @@ async function syncOneVault(
       cwd: vault.path,
       allowFailure: true,
     });
-    if (ab.code === 0) {
-      const parts = ab.stdout.trim().split(/\s+/);
-      ahead = Number(parts[0]) || 0;
-      behind = Number(parts[1]) || 0;
+    const counts = /^(\d+)\s+(\d+)$/u.exec(ab.stdout.trim());
+    if (ab.code !== 0 || counts === null) {
+      return { ...base, status: "error", message: "Lyt could not compare this vault with its online copy.", errorOutput: ab.stderr };
     }
+    ahead = Number(counts[1]);
+    behind = Number(counts[2]);
   }
 
   // hardening pass (Cohort-1 fix-pass) — PURE-SUBSCRIBER READ-ONLY vault: PULL-ONLY.
@@ -1457,6 +1458,18 @@ async function syncOneVault(
             })
           : refetched;
       if (pulled.code === 0) {
+        const terminal = await runGit(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], {
+          cwd: vault.path,
+          allowFailure: true,
+        });
+        const counts = /^(\d+)\s+(\d+)$/u.exec(terminal.stdout.trim());
+        if (terminal.code !== 0 || counts === null) {
+          return { ...base, status: "error", message: "Lyt could not verify this vault's final online state.", errorOutput: terminal.stderr };
+        }
+        ahead = Number(counts[1]);
+        if (ahead !== 0 || Number(counts[2]) !== 0) {
+          return { ...base, status: "error", message: "This vault and its online copy have not converged.", ahead, behind: Number(counts[2]), dirtyCount };
+        }
         // Edge: `--autostash` COMPLETES the pull (exit 0, upstream received) yet
         // can leave the tree with an UNRESOLVED autostash-pop conflict when the
         // local edit overlaps an incoming change on the same lines — git prints
@@ -1701,6 +1714,10 @@ async function syncOneVault(
     };
   }
 
+  // Keep the pre-reconciliation movement counts for the human narrative.
+  // The structured counts returned at the end describe the terminal state.
+  const observedAhead = ahead;
+  const observedBehind = behind;
   let meshContextResolved = false;
   // 0.12.0 Phase D · A1 — set when a concurrent-write conflict was resolved via
   // the plain keep-mine/theirs/both choice, so the final report carries it.
@@ -2036,27 +2053,49 @@ async function syncOneVault(
     }
   }
 
+  // A successful push has already been checked against the live destination.
+  // Otherwise compare with the exact fetched ref after any pull: a successful
+  // pull alone is not proof that the histories actually converged.
+  if (syncOp !== null) {
+    ahead = 0;
+    behind = 0;
+  } else {
+    const terminal = await runGit(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], {
+      cwd: vault.path,
+      allowFailure: true,
+    });
+    const counts = /^(\d+)\s+(\d+)$/u.exec(terminal.stdout.trim());
+    if (terminal.code !== 0 || counts === null) {
+      return { ...base, status: "error", message: "Lyt could not verify this vault's final online state.", errorOutput: terminal.stderr };
+    }
+    ahead = Number(counts[1]);
+    behind = Number(counts[2]);
+    if (ahead !== 0 || behind !== 0) {
+      return { ...base, status: "error", message: "This vault and its online copy have not converged.", ahead, behind, dirtyCount };
+    }
+  }
+
   // firewall-C1 fix-pass — plain success wording (no git noun): "Brought in" for
   // incoming updates, "saved … online" for outgoing changes. The machine `status`
   // enum (pushed/pulled/diverged-synced) is unchanged (a stable machine label);
   // only the human `message` is narrated.
   let finalStatus: VaultSyncStatus = "clean";
   let message = "Up to date.";
-  if (committed && behind > 0) {
+  if (committed && observedBehind > 0) {
     finalStatus = "diverged-synced";
-    message = `Brought in ${behind} update(s) and saved ${ahead} of your change(s) online.`;
+    message = `Brought in ${observedBehind} update(s) and saved ${observedAhead} of your change(s) online.`;
   } else if (committed) {
     finalStatus = "pushed";
     message = `Saved ${dirtyCount} change(s) online.`;
-  } else if (ahead > 0 && behind > 0) {
+  } else if (observedAhead > 0 && observedBehind > 0) {
     finalStatus = "diverged-synced";
-    message = `Brought in ${behind} update(s) and saved ${ahead} of your change(s) online.`;
-  } else if (ahead > 0) {
+    message = `Brought in ${observedBehind} update(s) and saved ${observedAhead} of your change(s) online.`;
+  } else if (observedAhead > 0) {
     finalStatus = "pushed";
-    message = `Saved ${ahead} of your change(s) online.`;
-  } else if (behind > 0) {
+    message = `Saved ${observedAhead} of your change(s) online.`;
+  } else if (observedBehind > 0) {
     finalStatus = "pulled";
-    message = `Brought in ${behind} update(s) from your online copy.`;
+    message = `Brought in ${observedBehind} update(s) from your online copy.`;
   }
   // 0.12.0 Phase D · A1 — when a concurrent-write conflict was just resolved via
   // keep-mine/keep-theirs, override the message with plain confirmation of which

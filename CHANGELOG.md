@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.4] — 2026-10-30
+
+### Fixed
+
+- Use the bundled knowledge-capture template when it is absent from a fresh pod, while preserving installed overrides and write-permission checks.
+- Report verified terminal sync divergence counts so successful received-vault pulls are not marked incomplete.
+
+---
+
 ## [0.21.3] — 2026-10-30
 
 ### Fixed

@@ -662,7 +662,8 @@ export async function materializeScopedVaultAfterSync(args: {
           args.report.status,
         ) &&
         !args.report.readonlyDiverged &&
-        (args.report.behind ?? 0) === 0;
+        (args.report.behind ?? 0) === 0 &&
+        (args.report.ahead ?? 0) === 0;
       return {
         vaultName: vault.name,
         status: complete ? "already-online" : "sync-incomplete",
