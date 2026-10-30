@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.3] — 2026-10-30
+
+### Fixed
+
+- Checkpoint creation-owned pod ledger writes when creating a vault in an existing clean pod, so subsequent vault creation can proceed without leaving those writes uncheckpointed.
+
+---
+
 ## [0.21.2] — 2026-10-29
 
 ### Fixed

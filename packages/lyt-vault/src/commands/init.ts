@@ -25,6 +25,7 @@ import {
   creationPlanChildV1,
   deriveCreationOperationIdV1,
   mergeCreationIntendedEffectsV1,
+  plannedMeshPodEffectPathsV1,
   plannedSingleVaultEffectsV1,
   resolveCreationPlanV1,
   withCreationRepositoryEffectsV1,
@@ -625,7 +626,12 @@ async function planInitCreation(
         vaultRoot: resolveVaultPath(`${meshName}/main`),
       }),
       preflight.podIdentity.state === "present"
-        ? [{ repositoryRoot: preflight.podIdentity.repositoryRoot, exactPaths: ["pod.yon"] }]
+        ? [
+            {
+              repositoryRoot: preflight.podIdentity.repositoryRoot,
+              exactPaths: plannedMeshPodEffectPathsV1(false),
+            },
+          ]
         : [],
     );
     const meshPlan = resolveCreationPlanV1({
@@ -656,7 +662,12 @@ async function planInitCreation(
     }),
     [
       ...(preflight.podIdentity.state === "present"
-        ? [{ repositoryRoot: preflight.podIdentity.repositoryRoot, exactPaths: ["pod.yon"] }]
+        ? [
+            {
+              repositoryRoot: preflight.podIdentity.repositoryRoot,
+              exactPaths: plannedMeshPodEffectPathsV1(false, preflight.mesh === null),
+            },
+          ]
         : []),
       ...(preflight.mesh !== null && preflight.mesh.mainVaultPath.length > 0
         ? [{ repositoryRoot: preflight.mesh.mainVaultPath, exactPaths: [".lyt/mesh.yon"] }]
