@@ -616,7 +616,6 @@ async function capturePodCheckpointBoundary(plan: CreationPlanV1, noGit: boolean
       podRoot,
       preexistingPaths: new Set(contentDigests.keys()),
       contentDigests,
-      deferCheckpoint: existing?.dirty === true,
       ...(existing === null ? {} : { existing }),
     };
   }
@@ -645,7 +644,6 @@ async function capturePodCheckpointBoundary(plan: CreationPlanV1, noGit: boolean
   const freshDeferredPod = identity.kind === "create";
   return {
     podRoot,
-    deferCheckpoint: existing?.dirty === true,
     ...(existing === null ? {} : { existing }),
     // A fresh federation forge owns its exact plan-bound untracked files. They
     // are not pre-existing collisions and remain part of the later checkpoint.
@@ -666,7 +664,7 @@ function bindOperationPodCheckpoint(
   boundary: PodCheckpointBoundary,
 ): { paths: string[]; contentDigests: ReadonlyMap<string, string> } {
   const allowed = new Set(requiredPaths);
-  const output = execFileSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
+  const output = execFileSync("git", ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...requiredPaths], {
     cwd: boundary.podRoot,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],

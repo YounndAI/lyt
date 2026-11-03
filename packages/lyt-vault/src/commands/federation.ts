@@ -15,7 +15,11 @@
  */
 
 import { Command, Option } from "commander";
+import { createHash } from "node:crypto";
+import { v7 as uuidv7 } from "uuid";
 
+import { applyPodCheckpoint, previewPodCheckpoint } from "../flows/federation/checkpoint.js";
+import { parseReceiptV1ForEmission, receiptSafeErrorSummary } from "../op/receipt-v1.js";
 import { generateFederationCanvasFlow } from "../flows/canvas-federation.js";
 import { federationInitFlow } from "../flows/federation/init.js";
 import { federationListFlow } from "../flows/federation/list.js";
@@ -60,7 +64,62 @@ export function buildFederationCommand(): Command {
   cmd.addCommand(buildRebuildSubcommand());
   cmd.addCommand(buildCanvasSubcommand());
   cmd.addCommand(buildAliasSubcommand());
+  cmd.addCommand(buildCheckpointSubcommand());
   return cmd;
+}
+
+function buildCheckpointSubcommand(): Command {
+  return new Command("checkpoint")
+    .description("Review or commit a local pod baseline. No sync or remote operation is performed.")
+    .option("--preview", "Inspect current exact candidate files and their digest")
+    .option("--apply <digest>", "Commit the exact reviewed preview digest locally")
+    .option("--json", "Emit the preview or receipt as JSON")
+    .action(async (opts: { preview?: boolean; apply?: string; json?: boolean }) => {
+      const started = new Date().toISOString();
+      const operationId = uuidv7();
+      const attemptId = uuidv7();
+      let applyReturned = false;
+      try {
+        if (opts.json !== true || (opts.preview === true) === (opts.apply !== undefined)) throw new Error("Choose exactly one of --preview or --apply <digest>, with --json.");
+        if (opts.preview === true) {
+          const preview = await previewPodCheckpoint();
+          console.log(JSON.stringify({ status: "preview", baseline: preview, validation: "Selected ledger framing and fields plus canonical local projection; not provenance or a historical operation." }, null, 2));
+          return;
+        }
+        const result = await applyPodCheckpoint(opts.apply!);
+        applyReturned = true;
+        const success = result.checkpoint.status === "committed" || result.checkpoint.status === "skipped";
+        const committed = result.checkpoint.status === "committed";
+        const receipt = parseReceiptV1ForEmission({
+          schema_id: "lyt.receipt", schema_version: { major: 1, minor: 0 }, operation_id: operationId, attempt_id: attemptId,
+          operation: "pod-checkpoint", scope: { kind: "system" }, timestamps: { started_at: started, finished_at: new Date().toISOString() },
+          replay: { disposition: "new", key_digest: result.boundary.digest },
+          status: success ? (committed ? "success" : "no-op") : "partial", exit_code: success ? 0 : 2,
+          mutations: { local: committed || !success ? 1 : 0, remote: 0 },
+          evidence: { before: [{ kind: "reviewed-baseline", subject: "Exact preview boundary", digest: result.boundary.digest, count: result.boundary.paths.length }],
+            after: committed ? [{ kind: "local-commit", subject: result.checkpoint.commitSha!, count: result.boundary.paths.length }] : [] },
+          error: success ? null : { code: "checkpoint-incomplete", summary: "Checkpoint did not finish cleanly; its index or commit may have changed.", retryable: false },
+          next_action: success ? null : { code: "inspect-local-state", summary: "Inspect the exact pod paths and local commit state before retrying." },
+        });
+        console.log(JSON.stringify({ receipt, repository: result.boundary.repository, beforeHead: result.boundary.beforeHead, paths: result.boundary.paths, commitSha: result.checkpoint.commitSha ?? null, checkpoint: result.checkpoint }, null, 2));
+        if (!success) process.exitCode = 2;
+      } catch (error) {
+        const message = receiptSafeErrorSummary(error, "Pod checkpoint could not be verified.");
+        if (opts.apply !== undefined) {
+          const digest = /^[a-f0-9]{64}$/u.test(opts.apply) ? opts.apply : createHash("sha256").update(opts.apply).digest("hex");
+          const receipt = parseReceiptV1ForEmission({
+            schema_id: "lyt.receipt", schema_version: { major: 1, minor: 0 }, operation_id: operationId, attempt_id: attemptId,
+            operation: "pod-checkpoint", scope: { kind: "system" }, timestamps: { started_at: started, finished_at: new Date().toISOString() },
+            replay: { disposition: applyReturned ? "new" : "rejected", key_digest: digest },
+            status: applyReturned ? "partial" : "refused", exit_code: 2, mutations: { local: applyReturned ? 1 : 0, remote: 0 }, evidence: { before: [], after: [] },
+            error: { code: applyReturned ? "checkpoint-incomplete" : "pod-checkpoint-refused", summary: message, retryable: false },
+            next_action: { code: "inspect-local-state", summary: "Inspect the local pod state and obtain a fresh preview before retrying." },
+          });
+          console.error(JSON.stringify({ receipt }));
+        } else console.error(JSON.stringify({ status: "refused", error: "pod-checkpoint-refused", message }));
+        process.exitCode = 2;
+      }
+    });
 }
 
 function buildAliasSubcommand(): Command {

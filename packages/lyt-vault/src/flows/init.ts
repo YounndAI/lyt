@@ -50,7 +50,7 @@ import { VOICE } from "../voice.js";
 import { federationInitFlow } from "./federation/init.js";
 import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
 import { meshInitFlow } from "./mesh-init.js";
-import { assertExistingPodBoundaryUnchanged, captureExistingPodBoundary, deferredPodCheckpoint, type ExistingPodBoundary } from "./creation-pod-boundary.js";
+import { assertExistingPodBoundaryUnchanged, captureExistingPodBoundary, type ExistingPodBoundary } from "./creation-pod-boundary.js";
 import type { FederationGhClient, FederationRepoVisibility } from "../util/gh-federation.js";
 import type { MeshGhClient } from "../util/gh-mesh.js";
 import { registerVaultFromYon } from "./register.js";
@@ -761,7 +761,7 @@ function finalizePlannedPodCheckpoint(
   plan: CreationPlanV1,
   podRoot: string | null,
   freshBoundary: FreshPodMutationBoundary | null,
-  existingBoundary: ExistingPodBoundary | null,
+  _existingBoundary: ExistingPodBoundary | null,
   writerId: string | null,
   runGit: Parameters<typeof finalizeInitialCheckpoint>[1] | undefined,
 ): LocalCheckpointResult | null {
@@ -772,7 +772,8 @@ function finalizePlannedPodCheckpoint(
   if (intended === undefined) {
     throw new Error("First-vault creation plan is missing its exact pod checkpoint.");
   }
-  if (existingBoundary?.dirty === true) return deferredPodCheckpoint(intended.exact_paths);
+  // Existing-pod preflight refused every owned-path overlap. Disjoint work
+  // must not prevent an exact-path checkpoint or be included in that commit.
   const paths =
     plan.intended_effects.identity.kind === "create"
       ? freshPodMutationPaths(plan, podRoot, intended.exact_paths, freshBoundary, writerId)

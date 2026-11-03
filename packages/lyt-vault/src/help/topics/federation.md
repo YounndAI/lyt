@@ -47,6 +47,22 @@ hand-edited as truth (edits are overwritten on the next regen):
 
 ## Verbs
 
+### `lyt federation checkpoint --preview --json` / `--apply <digest> --json`
+
+Review a local baseline for pending pod manifest and known ledger shard files. Preview
+reports the repository, HEAD, exact selected bytes, hashes, index boundary, diffs, and
+digest. Inspect the bytes and diff before applying that exact digest. Apply rechecks
+the boundary and commits only the selected paths; unrelated staged and working files
+are left alone. A clean candidate set is a no-op. The baseline records the current
+reviewed state, not the origin of the files or a reconstruction of an older operation.
+
+The command checks the manifest against the local read-only projection and checks
+selected ledger framing and essential fields. It does not prove historical provenance
+or protect against arbitrary concurrent writers. Unsupported, ignored, deleted,
+renamed, or ambiguous candidate files must be resolved separately. The command makes
+no remote calls; ordinary local Git hooks and signing configuration remain in effect.
+No registry rebuild, manifest regeneration, alias authoring, or sync is performed.
+
 ### `lyt federation init [--handle <h>] [--public|--private] [--no-push] [--description <text>] [--json]`
 
 **Forges Your Pod.** Three branches:

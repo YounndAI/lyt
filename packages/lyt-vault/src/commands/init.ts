@@ -21,6 +21,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { initVaultFlow, type InitFlowResult } from "../flows/init.js";
+import { CreationPodOverlapRefusal } from "../flows/creation-pod-boundary.js";
 import {
   creationPlanChildV1,
   deriveCreationOperationIdV1,
@@ -348,7 +349,7 @@ export function buildInitCommand(dependencies: InitCommandDependencies = {}): Co
           },
         });
       } catch (err) {
-        if (err instanceof CreationPlanRefusal) {
+        if (err instanceof CreationPlanRefusal || err instanceof CreationPodOverlapRefusal) {
           emitInitDiagnostic(err.message);
           const receipt = makeCreationCommandReceipt({
             operation: "vault-init",
@@ -791,7 +792,7 @@ function hasExactPodLedgerProjection(plan: CreationPlanV1): boolean {
   if (plan.intended_effects.mesh.kind === "none") return true;
   const checkpoint = plan.intended_effects.checkpoints.find(
     (entry) =>
-      entry.exact_paths.some((path) => path.startsWith("ledger/meshes/")) &&
+      entry.exact_paths.includes("pod.yon") &&
       entry.exact_paths.some((path) => path.startsWith("ledger/vaults/")),
   );
   if (checkpoint === undefined) return false;
@@ -934,11 +935,15 @@ function hasExactRegistryMeshMainReplay(
   try {
     const main = opened.database.queryOne<{
       rid: string;
+      name: string;
       path: string;
+      memscope_rid: string;
       home_mesh_rid: string;
     }>(
       `SELECT lower(hex(v.rid)) AS rid,
+                v.name AS name,
                 v.path AS path,
+                lower(hex(v.memscope_rid)) AS memscope_rid,
                 lower(hex(v.home_mesh_rid)) AS home_mesh_rid
            FROM meshes m
            JOIN vaults v ON v.rid = m.main_vault_rid
@@ -946,15 +951,26 @@ function hasExactRegistryMeshMainReplay(
           LIMIT 1`,
       [meshRid],
     );
+    if (main === undefined) return false;
+    const plannedMain = plan.intended_effects.vaults.find((vault) => vault.rid === main.rid);
+    const parsedMain = parseVaultYon(readFileSync(join(main.path, ".lyt", "vault.yon"), "utf8"));
+    // A child creation references an existing mesh main; it does not recreate
+    // that vault or promise it among the new vault effects. Still bind its
+    // persisted scaffold to the exact registry identity and home mesh.
+    const exactMain = plannedMain === undefined
+      ? plan.intended_effects.mesh.kind === "existing" &&
+        main.name === `${plan.intended_effects.mesh.name}/main` &&
+        normalizeRid(parsedMain.rid) === main.rid && parsedMain.name === main.name &&
+        parsedMain.memscopeRid !== null && normalizeRid(parsedMain.memscopeRid) === main.memscope_rid &&
+        parsedMain.homeMesh !== null && normalizeRid(parsedMain.homeMesh.meshRid) === meshRid &&
+        normalizeRid(parsedMain.homeMesh.vaultRid) === main.rid &&
+        parsedMain.homeMesh.meshName === plan.intended_effects.mesh.name
+      : normalizeFilesystemPath(plannedMain.root) === normalizeFilesystemPath(main.path) &&
+        hasExactPlannedVaultIdentity(plan, plannedMain);
     return (
       main !== undefined &&
       main.home_mesh_rid === meshRid &&
-      plan.intended_effects.vaults.some(
-        (vault) =>
-          vault.rid === main.rid &&
-          normalizeFilesystemPath(vault.root) === normalizeFilesystemPath(main.path) &&
-          hasExactPlannedVaultIdentity(plan, vault),
-      ) &&
+      exactMain &&
       (!requireGit || isCleanTrackedVaultIdentity(main.path))
     );
   } catch {
@@ -968,7 +984,7 @@ function isCleanTrackedVaultIdentity(root: string): boolean {
   try {
     const status = execFileSync(
       "git",
-      ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".lyt/vault.yon"],
       { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
     if (status.length !== 0) return false;
@@ -1099,7 +1115,7 @@ function isExactCleanCheckpoint(
 ): boolean {
   try {
     if (!hasExactPlannedScaffoldPaths(plan, repositoryRoot, exactPaths)) return false;
-    const all = execFileSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
+    const all = execFileSync("git", ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...exactPaths], {
       cwd: repositoryRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

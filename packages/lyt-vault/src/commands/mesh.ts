@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 
 import { generateMeshCanvasFlow } from "../flows/canvas-mesh.js";
 import { meshInitFlow } from "../flows/mesh-init.js";
+import { CreationPodOverlapRefusal } from "../flows/creation-pod-boundary.js";
 import {
   deriveCreationOperationIdV1,
   derivePlannedCreationRid,
@@ -467,6 +468,7 @@ function buildMeshInitSubcommand(dependencies: MeshCommandDependencies): Command
         }
       } catch (err) {
         const mutationFailure = err instanceof CreationMutationFailure ? err : null;
+        const overlap = err instanceof CreationPodOverlapRefusal ? err : null;
         const mutations = mutationFailure?.mutations;
         const local = mutations === undefined ? 0 : creationLocalMutationCount(mutations);
         const summary = receiptSafeErrorSummary(err, "Mesh creation failed.");
@@ -475,13 +477,13 @@ function buildMeshInitSubcommand(dependencies: MeshCommandDependencies): Command
           attemptId,
           startedAt,
           logicalKey,
-          status: local > 0 ? "partial" : "failed",
+          status: overlap !== null ? "refused" : local > 0 ? "partial" : "failed",
           ...(receiptMeshId === undefined ? {} : { meshId: receiptMeshId }),
           local,
-          code: mutationFailure?.code ?? "mesh-init-failed",
+          code: overlap?.errorCode ?? mutationFailure?.code ?? "mesh-init-failed",
           summary,
           next:
-            mutationFailure?.nextAction.summary ??
+            overlap?.nextAction ?? mutationFailure?.nextAction.summary ??
             "Inspect the local mesh state before retrying creation.",
           nextCode: mutationFailure?.nextAction.code ?? "inspect-local-creation",
           // Unknown failures are not declared retryable. Only a classified

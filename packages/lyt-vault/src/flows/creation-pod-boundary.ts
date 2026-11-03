@@ -20,11 +20,22 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { LocalCheckpointResult } from "../scaffold/local-checkpoint.js";
-import { openRegistryReadOnly } from "../registry/read-only-client.js";
-import { parseFederationYon } from "../yon/federation-read.js";
-import { renderFederationYon, type FederationDoc } from "../yon/federation-write.js";
-import { projectPodManifestReadOnly, podManifestDocsEqualIgnoringStamp } from "./federation/regenerate.js";
+import type { FederationDoc } from "../yon/federation-write.js";
+import { podManifestDocsEqualIgnoringStamp } from "./federation/regenerate.js";
 import type { CreationIntendedEffectsV1 } from "./creation-plan.js";
+
+export class CreationPodOverlapRefusal extends Error {
+  readonly errorCode = "creation-pod-overlap";
+  readonly nextAction: string;
+
+  constructor(path: string) {
+    const nextAction = `Preserve and resolve the existing changes at ${path}, then retry creation. ` +
+      "Do not reset, stash, or commit unrelated pod changes. Lyt-generated changes also require separate resolution.";
+    super(`Creation overlaps pre-existing pod changes at ${path}. No creation changes were applied. ${nextAction}`);
+    this.name = "CreationPodOverlapRefusal";
+    this.nextAction = nextAction;
+  }
+}
 
 /** Existing work is never implicitly included in a creation checkpoint. */
 export interface ExistingPodBoundary {
@@ -43,7 +54,7 @@ export async function captureExistingPodBoundary(
   repositoryRoot: string,
   plannedPaths: readonly string[],
   effects: CreationIntendedEffectsV1,
-  registryPath?: string,
+  _registryPath?: string,
 ): Promise<ExistingPodBoundary> {
   if (!plannedPaths.includes("pod.yon")) {
     throw new Error("Creation plan is missing the existing pod manifest boundary.");
@@ -61,7 +72,7 @@ export async function captureExistingPodBoundary(
   }
   const entries = execFileSync(
     "git",
-    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"],
     {
       cwd: repositoryRoot,
       encoding: "utf8",
@@ -70,7 +81,6 @@ export async function captureExistingPodBoundary(
     },
   ).split("\0").filter(Boolean);
   const planned = new Set(plannedPaths);
-  let dirtyManifest = false;
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i]!;
     if (entry.length < 4) throw new Error("Creation cannot inspect the pod worktree safely.");
@@ -83,60 +93,19 @@ export async function captureExistingPodBoundary(
     }
     for (const affected of [path, ...(source === undefined ? [] : [source])]) {
       if (!planned.has(affected)) continue;
-      if (affected === "pod.yon") {
-        if (status === " M") {
-          dirtyManifest = true;
-          continue;
-        }
-        throw new Error(
-          "Creation would overwrite pre-existing changes in pod.yon. " +
-          "No creation changes were applied. Preserve and resolve that exact overlap before retrying; " +
-          "do not reset, stash, or commit unrelated pod changes.",
-        );
-      }
-      // Ledger writers append to their own shards. Never append through an
-      // index/worktree disagreement, removal, rename, or merge conflict.
-      if (!affected.startsWith("ledger/") || (status !== " M" && status !== "??")) {
-        throw new Error(`Creation overlaps pre-existing pod changes at ${affected}; resolve that exact path before retrying.`);
-      }
+      // Whole-file checkpoints cannot separate earlier generated records from
+      // this creation's records. Refuse even canonical/appended overlap before
+      // any creation effects rather than stranding an applied partial creation.
+      throw new CreationPodOverlapRefusal(affected);
     }
   }
   const manifestDigest = digestManifest(repositoryRoot);
-  let generatedDoc: FederationDoc | null = null;
-  if (dirtyManifest) {
-    const bytes = readFileSync(join(repositoryRoot, "pod.yon"));
-    const doc = parseFederationYon(bytes.toString("utf8"));
-    if (!Buffer.from(renderFederationYon(doc), "utf8").equals(bytes)) {
-      throw new Error("Creation refuses noncanonical pod.yon changes; the exact existing bytes were preserved. No creation changes were applied.");
-    }
-    const indexed = parseFederationYon(readGit(repositoryRoot, ["show", ":pod.yon"]));
-    if (JSON.stringify(indexed.federation) !== JSON.stringify(doc.federation)) {
-      throw new Error("Creation refuses uncheckpointed pod identity/visibility metadata changes; preserve and resolve them first.");
-    }
-    const opened = openRegistryReadOnly(registryPath === undefined ? undefined : { path: registryPath });
-    if (opened.kind === "missing") throw new Error("Creation cannot verify generated pod.yon without its existing registry.");
-    try {
-      const projected = await projectPodManifestReadOnly(opened.client, {
-        handle: doc.federation.handle,
-        visibility: doc.federation.visibility,
-        createdAt: doc.federation.createdAt,
-        nowIso: doc.lastSyncedAt,
-      }, repositoryRoot);
-      if (!podManifestDocsEqualIgnoringStamp(doc, projected) || doc.federation.fedRidHex !== effects.identity.rid) {
-        throw new Error("Creation refuses pod.yon changes that differ from the current canonical fold; existing bytes were preserved. No creation changes were applied.");
-      }
-      generatedDoc = doc;
-    } finally {
-      opened.close();
-    }
-    if (digestManifest(repositoryRoot) !== manifestDigest) throw new Error("pod.yon changed during creation preflight; retry after resolving concurrent activity.");
-  }
   return {
     repositoryRoot,
     dirty: entries.length > 0,
     manifestDigest,
     manifestStatus: readGit(repositoryRoot, ["status", "--porcelain=v1", "-z", "--", "pod.yon"]),
-    generatedDoc,
+    generatedDoc: null,
     additions: {
       meshRids: effects.mesh.kind === "create" ? [effects.mesh.rid] : [],
       vaultRids: effects.vaults.map((vault) => vault.rid),
