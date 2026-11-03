@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-import { existsSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { stripNestedReparsePoints } from "../util/reparse-safe.js";
+import { assertSafeWritePath } from "../util/write-path-guard.js";
 
 export interface DeleteScaffoldResult {
   removedLytDir: boolean;
@@ -51,10 +52,13 @@ export async function deleteVaultDerivedState(
   opts: DeleteVaultDerivedStateOptions = {},
 ): Promise<DeleteScaffoldResult> {
   const lytDir = join(vaultPath, ".lyt");
+  // The root and its ancestors must be checked without following redirects;
+  // the descendant enumerator cannot protect a junction at the root itself.
+  assertSafeWritePath(lytDir);
   if (!existsSync(lytDir)) {
     return { removedLytDir: false, lytDirPath: lytDir };
   }
-  const stat = statSync(lytDir);
+  const stat = lstatSync(lytDir);
   if (!stat.isDirectory()) {
     throw new Error(`.lyt at ${lytDir} is not a directory; refusing to delete`);
   }

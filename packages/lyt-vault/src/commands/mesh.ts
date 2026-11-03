@@ -73,6 +73,8 @@ import { buildMeshAddEdgeSubcommand } from "./add-mesh-edge.js";
 import { buildMeshAdoptSubcommand } from "./mesh-adopt.js";
 import { buildMeshInfoSubcommand } from "./mesh-info.js";
 import { buildMeshSubscribeSubcommand } from "./subscribe.js";
+import { buildMeshUnsubscribeSubcommand } from "./unsubscribe.js";
+import { buildResumeVaultRetractionCommand } from "./resume-vault-retraction.js";
 import { buildMeshValidateSubcommand } from "./mesh-validate.js";
 import { buildMeshRebuildRollupCommand } from "./mesh-rebuild-rollup.js";
 import { buildRebuildMeshRegistryCommand } from "./rebuild-mesh-registry.js";
@@ -107,6 +109,8 @@ export function buildMeshCommand(dependencies: MeshCommandDependencies = {}): Co
   cmd.addCommand(buildMeshAddEdgeSubcommand());
   cmd.addCommand(buildMeshValidateSubcommand());
   cmd.addCommand(buildMeshSubscribeSubcommand());
+  cmd.addCommand(buildMeshUnsubscribeSubcommand());
+  cmd.addCommand(buildResumeVaultRetractionCommand());
   cmd.addCommand(buildMeshAdoptSubcommand());
   cmd.addCommand(buildMeshPruneSubcommand());
   return cmd;

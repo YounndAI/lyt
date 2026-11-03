@@ -13,47 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 import { Command } from "commander";
-
-import { abandonVaultFlow } from "../flows/abandon.js";
+import { deleteWithReceipt } from "../flows/vault-delete-receipt.js";
 
 export function buildAbandonCommand(): Command {
-  const cmd = new Command("abandon");
-  cmd
-    .description(
-      "Leave LYT cleanly — remove only the local .lyt/ adoption (the inverse of `adopt`); " +
-        "your markdown and GitHub repo are untouched. Requires --yes.",
-    )
-    .argument("<name>", "Registered vault name")
+  return new Command("abandon")
+    .description("Remove only local .lyt adoption state. Markdown and remote are untouched. Requires --yes.")
+    .argument("[name]", "Registered vault name")
+    .option("--resume <operation-id>", "Inspect an interrupted receipt-bound abandon")
     .option("--yes", "Confirm abandoning the vault")
-    .option("--json", "Emit machine-readable JSON")
-    .action(async (name: string, opts: { yes?: boolean; json?: boolean }) => {
-      try {
-        const result = await abandonVaultFlow(name, { confirmed: opts.yes === true });
-        if (opts.json) {
-          // eslint-disable-next-line no-console
-          console.log(JSON.stringify(result, null, 2));
-          return;
-        }
-        // eslint-disable-next-line no-console
-        console.log(`Abandoned vault '${result.vault.name}' (${result.vault.ridHex}).`);
-        // eslint-disable-next-line no-console
-        console.log(`  ${result.removedLytDir ? "removed" : "skipped"}: ${result.lytDirPath}`);
-        // eslint-disable-next-line no-console
-        console.log(`  .md files at ${result.vault.path} were NOT touched.`);
-        // eslint-disable-next-line no-console
-        console.log(`  your GitHub repo was NOT touched.`);
-        if (result.removedKnownPath) {
-          // eslint-disable-next-line no-console
-          console.log(`  removed from ~/lyt/known-paths.txt`);
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // eslint-disable-next-line no-console
-        console.error(msg);
-        process.exitCode = 1;
-      }
+    .option("--json", "Emit Receipt V1 JSON")
+    .action(async (name: string | undefined, opts: { resume?: string; yes?: boolean; json?: boolean }) => {
+      const result = await deleteWithReceipt({ action: "abandon", confirmed: opts.yes === true, ...(name === undefined ? {} : { name }),
+        ...(opts.resume === undefined ? {} : { resume: opts.resume }), onPlan: (id) => console.error(`Abandon operation ${id}`) });
+      console.log(opts.json ? JSON.stringify(result) : `${result.status}: operation ${result.operation_id}. Markdown and remote untouched.${result.next_action ? ` ${result.next_action.summary}` : ""}`);
+      process.exitCode = result.exit_code;
     });
-  return cmd;
 }

@@ -13,46 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 import { Command } from "commander";
-
-import { forgetVaultFlow } from "../flows/forget.js";
+import { forgetWithReceipt } from "../flows/vault-forget-receipt.js";
 
 export function buildForgetCommand(): Command {
-  const cmd = new Command("forget");
-  cmd
-    .description(
-      "Remove a vault from the registry. Files are untouched; the vault can be re-joined later. Pass --tombstone to leave a 'closed path' marker row instead.",
-    )
-    .argument("<name>", "Registered vault name")
-    .option("--tombstone", "Leave a tombstoned row in the registry instead of removing it")
-    .action(async (name: string, opts: { tombstone?: boolean }) => {
-      const tombstone = opts.tombstone === true;
-      const result = await forgetVaultFlow(name, { tombstone });
-      // Phase E item 1 (#9) — surface the orphaned-then-dropped pod-local
-      // aliases (forget has no interactive gate; reported with the outcome).
-      if (result.orphanedAliases.length > 0) {
-        const list = result.orphanedAliases.map((a) => `@${a}`).join(", ");
-        // eslint-disable-next-line no-console
-        console.log(
-          `  dropped ${result.orphanedAliases.length} pod-local alias(es) that pointed here: ${list}`,
-        );
-      }
-      if (result.tombstoned) {
-        // eslint-disable-next-line no-console
-        console.log(
-          `Vault '${result.vault.name}' (${result.vault.ridHex}) tombstoned. Files at ${result.vault.path} were NOT touched.`,
-        );
-        return;
-      }
-      // eslint-disable-next-line no-console
-      console.log(`Forgot vault '${result.vault.name}' (${result.vault.ridHex}).`);
-      // eslint-disable-next-line no-console
-      console.log(`  files at ${result.vault.path} were NOT touched.`);
-      if (result.removedKnownPath) {
-        // eslint-disable-next-line no-console
-        console.log(`  removed from ~/lyt/known-paths.txt`);
-      }
+  return new Command("forget")
+    .description("Remove a local registry binding without touching vault files or the remote.")
+    .argument("[name]", "Registered vault name")
+    .option("--tombstone", "Leave a tombstoned registry row")
+    .option("--resume <operation-id>", "Resume an interrupted, receipt-bound forget")
+    .option("--json", "Emit Receipt V1 JSON")
+    .action(async (name: string | undefined, opts: { tombstone?: boolean; resume?: string; json?: boolean }) => {
+      const result = await forgetWithReceipt({ ...(name === undefined ? {} : { name }), ...(opts.tombstone === undefined ? {} : { tombstone: opts.tombstone }), ...(opts.resume === undefined ? {} : { resume: opts.resume }),
+        onPlan: (id) => { console.error(`Forget operation ${id}`); } });
+      if (opts.json) console.log(JSON.stringify(result));
+      else console.log(`${result.status}: operation ${result.operation_id}. Vault files and remote were not touched.${result.next_action ? ` ${result.next_action.summary}` : ""}`);
+      process.exitCode = result.exit_code;
     });
-  return cmd;
 }

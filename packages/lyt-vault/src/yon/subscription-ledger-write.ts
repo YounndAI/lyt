@@ -67,6 +67,8 @@ export interface AppendSubscriptionArgs {
   /** Greatest HLC already observed across every locally present shard. */
   observedMaxHlc?: Hlc | null;
   seq?: number;
+  /** Optional lifecycle attempt identity for crash readback, not a merge key. */
+  operationId?: string;
   // AUDIT ONLY. Defaults to now. The fold IGNORES this for identity, sort, and
   // merge resolution. Legacy rows alone retain their historical add-wins fold.
   addedAt?: string;
@@ -119,6 +121,7 @@ export function appendSubscriptionRecord(
       ["seq", seq],
       ["added_at", addedAt],
       ["state", args.state],
+      ...(args.operationId === undefined ? [] : [["operation_id", args.operationId] as const]),
     ],
     stampSrc: "flows/subscribe",
     // The @STAMP ts is the record's audit ts too; keep them aligned so a

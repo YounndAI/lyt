@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.5] — 2026-11-03
+
+### Fixed
+
+- Preserve vault retractions and unrelated dirty state during local cleanup. Receipt-bound recovery resumes supported stages and requires an audit when a destructive stage has an ambiguous outcome.
+- Retract an unregistered subscription by its exact coordinate and vault identity without deleting local files or remote repositories.
+
+---
+
 ## [0.21.4] — 2026-10-30
 
 ### Fixed

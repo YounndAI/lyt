@@ -51,6 +51,7 @@ export interface SubscriptionRecord {
   /** True only when an HLC field was present but malformed; never a legacy floor event. */
   hlcMalformed?: boolean;
   seq: number;
+  operationId?: string;
   // The shard (writerId) the record came from. Useful for provenance + tests.
   writerId: string;
 }
@@ -117,6 +118,7 @@ function toSubscriptionRecord(rec: LedgerRecord, writerId: string): Subscription
     hlc,
     hlcMalformed: rawHlc !== undefined && hlc === null,
     seq: parseSeq(rec.fields.get("seq")),
+    ...(rec.fields.get("operation_id") === undefined ? {} : { operationId: rec.fields.get("operation_id")! }),
     writerId,
   };
 }

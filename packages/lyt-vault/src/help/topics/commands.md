@@ -96,7 +96,7 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   its computed `{mesh}/{vault}` name follows automatically.
 - `lyt vault rename <name> <new-leaf>` — rename a vault's leaf (the main vault of a
   mesh is immutable).
-- `lyt vault forget <name> [--tombstone]` — remove from registry; files untouched.
+- `lyt vault forget <name> [--tombstone]` — retract the vault ledger record and remove or tombstone the registry row; files untouched. A dirty or inconsistent pod projection is preserved and reported as pending with a nonzero exit.
 - `lyt vault disconnect <name>` — stop syncing; local copy preserved.
 - `lyt vault delete <name> [--no-tombstone] --yes` — confirm and wipe `.lyt/` derived state;
   `.md` files and the GitHub repo untouched.
@@ -170,6 +170,8 @@ vaults. Run `lyt help <topic>` for any group below in depth.
 See `lyt help mesh` and `lyt help federation`. In brief:
 
 - `lyt mesh init|join|list|info|subscribe|add-edge|validate|adopt|rebuild-registry`
+- `lyt mesh unsubscribe --coordinate <coordinate> --rid <rid> --yes [--json]` — retract one exact orphan GitHub subscription; requires an expected RID and refuses registered vaults. Does not delete files, revoke access, or delete the remote repository.
+- `lyt mesh resume-vault-retraction --rid <rid> --yes [--json]` — resume only the clean, RID-scoped pod projection update after resolving a pending retraction. It does not remove files or publish.
 - `lyt mesh status|clone-all|rebuild-rollup`
 - `lyt mesh prune <name> --yes` — destructive. Retract and remove an EMPTY / ORPHAN mesh (no
   homed vaults) from the registry — the lingering empty rows a junction-safe pod

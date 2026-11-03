@@ -14,24 +14,34 @@
  * limitations under the License.
  */
 
+import { resolve } from "node:path";
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { removeKnownPath } from "../registry/known-paths.js";
-import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
-import { canonicalizeCoordinate, vaultOriginCoordinate } from "../registry/vault-addressing.js";
-import { entryModeForSource } from "../util/bucket-mesh.js";
+import { readKnownPaths, removeKnownPath } from "../registry/known-paths.js";
+import { deleteVault, getVaultByName, getVaultByRid, tombstoneVault, type VaultRow } from "../registry/repo.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
-import { vaultRepoName } from "../util/federation-paths.js";
-import { appendFedVaultTombstone } from "../yon/federation-vault-ledger-write.js";
-import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
-import { appendSubscriptionTombstone } from "../yon/subscription-ledger-write.js";
-import { liveSubscriptions, observedMaxSubscriptionHlc } from "../yon/subscription-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
-import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
+import { ensureVaultRetraction } from "./vault-retraction.js";
+import { readAllFedVaultRecords } from "../yon/federation-vault-ledger-read.js";
+import { refreshScopedVaultProjection } from "./scoped-vault-projection.js";
+import { retractScopedMeshHome } from "./scoped-mesh-home.js";
+import { assertNoTargetPublication, retractTargetDestination } from "./lifecycle-preflight.js";
+import { applyVaultSubscriptionRetraction, planVaultSubscriptionRetraction } from "./vault-subscription-retraction.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
 import { assertNotMeshMainVault } from "./main-vault-removal-guard.js";
 
 export interface ForgetFlowOptions {
   tombstone?: boolean;
+  expectedRid?: string;
+  expectedPath?: string;
+  expectedHomeMeshRid?: string | null;
+  expectedSource?: VaultRow["source"];
+  expectedGitUrl?: string | null;
+  operationId?: string;
+  writerId?: string;
+  /** A receipt-bound immutable preimage for recovery after registry removal. */
+  recoveryVault?: VaultRow;
+  onMutation?: () => void;
+  afterStage?: (stage: string) => void;
 }
 
 export interface ForgetFlowResult {
@@ -39,6 +49,8 @@ export interface ForgetFlowResult {
   tombstoned: boolean;
   removedKnownPath: boolean;
   subscriptionLedgerTombstoned: boolean;
+  projectionPending: boolean;
+  projectionNote?: string;
   // Phase E item 1 (#9) — pod-local alias names that POINTED at this vault
   // and were dropped (tombstoned) because forget (the vault-unsubscribe path)
   // orphans them. Empty when the vault had no aliases. forget has no interactive
@@ -52,119 +64,93 @@ export async function forgetVaultFlow(
 ): Promise<ForgetFlowResult> {
   const tombstone = opts.tombstone === true;
   const db = await openRegistry();
+  let retracted = false;
   try {
-    const vault = await getVaultByName(db, name);
+    const current = await getVaultByName(db, name);
+    const vault = current ?? opts.recoveryVault;
     if (!vault) {
       throw new Error(`No vault registered with name '${name}'.`);
     }
-    if (vault.status === "tombstoned") {
+    if (current === null || current.status === "tombstoned") {
+      const prior = opts.recoveryVault;
+      if (prior === undefined || opts.operationId === undefined || opts.writerId === undefined ||
+          !readAllFedVaultRecords().some((r) => r.vaultRid.replace(/-/g, "").toLowerCase() === prior.ridHex.toLowerCase() && r.operationId === opts.operationId && r.writerId === opts.writerId && r.state === "tombstoned")) {
+        throw new Error("Registry removal is not bound to this lifecycle operation; refusing recovery.");
+      }
+      const byRid = await getVaultByRid(db, prior.rid);
+      if (byRid !== null && (byRid.name !== prior.name || byRid.status !== "tombstoned")) throw new Error("Vault identity was reused; refusing recovery.");
+    }
+    if (opts.expectedRid !== undefined && vault.ridHex !== opts.expectedRid) throw new Error("Vault identity changed; refusing lifecycle replay.");
+    if ((opts.expectedPath !== undefined && vault.path !== opts.expectedPath) ||
+        (opts.expectedHomeMeshRid !== undefined && vault.homeMeshRidHex !== opts.expectedHomeMeshRid) ||
+        (opts.expectedSource !== undefined && vault.source !== opts.expectedSource) ||
+        (opts.expectedGitUrl !== undefined && vault.gitUrl !== opts.expectedGitUrl)) {
+      throw new Error("Vault binding changed; refusing lifecycle replay.");
+    }
+    if (vault.status === "tombstoned" && opts.recoveryVault === undefined) {
       throw new Error(
         `Vault '${name}' is already tombstoned. Use a fresh 'lyt vault init' at a new path if you want to start over.`,
       );
     }
-    await assertNotMeshMainVault(db, vault, "forget");
+    if (current !== null && current.status !== "tombstoned") await assertNotMeshMainVault(db, vault, "forget");
     await enforceNotFrozen(vault.path, vault.name);
-    // Phase E item 1 (#9 — warn-then-drop). Snapshot the pod-local aliases
-    // this forget would ORPHAN before mutating the registry; drop them after on
-    // the confirmed path. (See flows/delete.ts for the symmetric wiring.)
+    assertNoTargetPublication(vault);
+    // Snapshot aliases before registry mutation; retract them while the row is
+    // still addressable so a failed operation can be retried.
     const orphanedAliases = liveAliasNamesForTargetRid(vault.ridHex);
-    let subscriptionLedgerTombstoned = false;
-    const coordinate = vaultOriginCoordinate(vault);
-    const liveSubscription = coordinate === null
-      ? undefined
-      : liveSubscriptions().find(
-          (subscription) => subscription.coordinate === canonicalizeCoordinate(coordinate),
-        );
-    if (vault.source === "shared" || vault.source === "subscribed" || liveSubscription !== undefined) {
-      if (coordinate === null) {
-        throw new Error(
-          `Cannot forget foreign vault '${vault.name}': its durable subscription identity ` +
-            `cannot be derived because the registered git origin is missing or invalid.`,
-        );
-      }
-      // The subscription ledger is the durable desired-state authority over
-      // every locally present shard. Cross-machine convergence remains a later
-      // multi-machine claim; this path only guarantees the local fold/rebuild.
-      // its tombstone before removing the local registry row so a failed append
-      // cannot leave an apparently-forgotten vault that later resurrects.
-      appendSubscriptionTombstone({
-        coordinate,
-        rid: vault.ridHex,
-        entryMode:
-          vault.source === "shared" || vault.source === "subscribed"
-              ? entryModeForSource(vault.source)
-            : liveSubscription?.entryMode === "shared"
-              ? "shared"
-              : "subscribe",
-        observedMaxHlc: observedMaxSubscriptionHlc(),
-      });
-      subscriptionLedgerTombstoned = true;
-    }
+    const subscription = planVaultSubscriptionRetraction(vault);
+    if (ensureVaultRetraction(vault, opts.operationId, opts.writerId)) opts.onMutation?.();
+    retracted = true;
+    opts.afterStage?.("vault-ledger");
+    if (await retractTargetDestination(db, vault)) opts.onMutation?.();
+    opts.afterStage?.("destination");
+    const subscriptionLedgerTombstoned = applyVaultSubscriptionRetraction(subscription);
+    if (subscriptionLedgerTombstoned) opts.onMutation?.();
+    opts.afterStage?.("subscription");
+    if (await retractScopedMeshHome(db, vault)) opts.onMutation?.();
+    opts.afterStage?.("mesh-home");
+    // Retain the registry row until alias retractions have completed so a
+    // failed intermediate step can be retried by the same vault name.
+    if (orphanedAliases.length > 0) { await dropAliasesForTargetRid(vault.ridHex, db); opts.onMutation?.(); }
+    opts.afterStage?.("aliases");
     let result: ForgetFlowResult;
     if (tombstone) {
-      await tombstoneVault(db, vault.rid);
+      if (current !== null && current.status !== "tombstoned") { await tombstoneVault(db, vault.rid); opts.onMutation?.(); }
       result = {
         vault: { ...vault, status: "tombstoned" },
         tombstoned: true,
         removedKnownPath: false,
         subscriptionLedgerTombstoned,
+        projectionPending: false,
         orphanedAliases,
       };
     } else {
-      await deleteVault(db, vault.rid);
       let removedKnownPath = false;
-      if (!isUnderDefaultVaultsRoot(vault.path)) {
+      if (current !== null && !isUnderDefaultVaultsRoot(vault.path) && readKnownPaths().includes(resolve(vault.path))) {
         removeKnownPath(vault.path);
         removedKnownPath = true;
+        opts.onMutation?.();
       }
+      if (current !== null) { await deleteVault(db, vault.rid); opts.onMutation?.(); }
       result = {
         vault,
         tombstoned: false,
         removedKnownPath,
         subscriptionLedgerTombstoned,
+        projectionPending: false,
         orphanedAliases,
       };
     }
-    // Drop the orphaned aliases on the confirmed path — tombstone each via the
-    // existing removeAliasFlow / appendAliasTombstone path. Reuses the open db.
-    if (orphanedAliases.length > 0) {
-      await dropAliasesForTargetRid(vault.ridHex, db);
-    }
-    // Inc-2 Phase 0 — the CRDT delete channel (see flows/delete.ts for
-    // the full rationale). forget is a manifest retraction too: append an
-    // explicit `state=tombstoned` @FED_VAULT event on this writer's own shard so
-    // the removed vault drops out of the folded pod.yon and stays dropped
-    // cross-machine. Non-fatal.
-    try {
-      appendFedVaultTombstone({
-        vaultRid: vault.ridHex,
-        vaultName: vault.name,
-        homeMeshRidHex: vault.homeMeshRidHex,
-        repo: vaultRepoName(vault.name),
-        visibility: "private",
-        status: "active",
-        observedMaxHlc: observedMaxFedVaultHlc(),
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Final review (item 8b) — NAME THE CONSEQUENCE. The tombstone is the only
-      // durable record that this removal was deliberate; the directory stays on
-      // disk and is byte-identical to a stranded vault. Without the record, the
-      // from-disk heal re-registers it and the vault comes back.
-      // eslint-disable-next-line no-console
-      console.error(
-        `@FED_VAULT tombstone skipped non-fatally on forget — ${msg}. The registry row is ` +
-          `gone but the removal was NOT recorded in the manifest, so a later ` +
-          `'lyt reindex --all' / 'lyt repair --apply' may re-register '${vault.name}' from ` +
-          `its directory on disk. Re-run 'lyt vault forget ${vault.name}' once the ledger is ` +
-          `writable, or delete the directory yourself.`,
-      );
-    }
-    // (Brief A) — forget mutates the registry's vault set; regenerate the
-    // derived pod manifest so the removed vault drops out of pod.yon. Non-fatal;
-    // reuses the open registry.
-    await regeneratePodManifestNonFatal(db);
+    opts.afterStage?.("registry");
+    const projection = await refreshScopedVaultProjection(db, vault.ridHex);
+    if (projection.changed === true) opts.onMutation?.();
+    result.projectionPending = projection.pending;
+    if (projection.reason !== undefined) result.projectionNote = projection.reason;
+    opts.afterStage?.("projection");
     return result;
+  } catch (error) {
+    if (retracted) throw new Error(`Partial forget of '${name}': a vault-ledger tombstone was verified; later local steps may be incomplete. Inspect registry, subscriptions and aliases before recovery. ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    throw error;
   } finally {
     await closeRegistry(db);
   }

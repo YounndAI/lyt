@@ -14,21 +14,33 @@
  * limitations under the License.
  */
 
+import { resolve } from "node:path";
 import { closeRegistry, openRegistry } from "../registry/client.js";
-import { removeKnownPath } from "../registry/known-paths.js";
+import { readKnownPaths, removeKnownPath } from "../registry/known-paths.js";
 import { deleteVault, getVaultByName, tombstoneVault, type VaultRow } from "../registry/repo.js";
 import { deleteVaultDerivedState } from "../scaffold/delete.js";
 import { enforceNotFrozen } from "../util/freeze-check.js";
-import { vaultRepoName } from "../util/federation-paths.js";
-import { appendFedVaultTombstone } from "../yon/federation-vault-ledger-write.js";
-import { observedMaxFedVaultHlc } from "../yon/federation-vault-ledger-read.js";
 import { dropAliasesForTargetRid, liveAliasNamesForTargetRid } from "./alias.js";
-import { regeneratePodManifestNonFatal } from "./federation/regenerate.js";
+import { ensureVaultRetraction } from "./vault-retraction.js";
+import { refreshScopedVaultProjection } from "./scoped-vault-projection.js";
+import { retractScopedMeshHome } from "./scoped-mesh-home.js";
+import { assertNoTargetPublication, retractTargetDestination } from "./lifecycle-preflight.js";
+import { applyVaultSubscriptionRetraction, planVaultSubscriptionRetraction } from "./vault-subscription-retraction.js";
 import { isUnderDefaultVaultsRoot } from "./register.js";
 import { assertNotMeshMainVault } from "./main-vault-removal-guard.js";
 
 export interface DeleteFlowOptions {
   noTombstone?: boolean;
+  expectedRid?: string;
+  expectedPath?: string;
+  expectedHomeMeshRid?: string | null;
+  expectedSource?: VaultRow["source"];
+  expectedGitUrl?: string | null;
+  operationId?: string;
+  writerId?: string;
+  afterStage?: (stage: string) => void;
+  beforeFilesystem?: () => Promise<void>;
+  onMutation?: () => void;
 }
 
 export interface DeleteFlowResult {
@@ -37,6 +49,8 @@ export interface DeleteFlowResult {
   lytDirPath: string;
   tombstoned: boolean;
   removedKnownPath: boolean;
+  projectionPending: boolean;
+  projectionNote?: string;
   // Phase E item 1 (#9) — pod-local alias names that POINTED at this vault
   // and were dropped (tombstoned) because the delete orphans them. Empty when
   // the vault had no aliases. The CLI surfaces this as the pre-warning + outcome
@@ -51,85 +65,87 @@ export async function deleteVaultFlow(
 ): Promise<DeleteFlowResult> {
   const noTombstone = opts.noTombstone === true;
   const db = await openRegistry();
+  let retracted = false;
   try {
     const vault = await getVaultByName(db, name);
     if (!vault) {
       throw new Error(`No vault registered with name '${name}'.`);
     }
+    if ((opts.expectedRid !== undefined && vault.ridHex !== opts.expectedRid) ||
+        (opts.expectedPath !== undefined && vault.path !== opts.expectedPath) ||
+        (opts.expectedHomeMeshRid !== undefined && vault.homeMeshRidHex !== opts.expectedHomeMeshRid) ||
+        (opts.expectedSource !== undefined && vault.source !== opts.expectedSource) ||
+        (opts.expectedGitUrl !== undefined && vault.gitUrl !== opts.expectedGitUrl)) throw new Error("Vault binding changed; refusing lifecycle replay.");
     if (vault.status === "tombstoned") {
       throw new Error(`Vault '${name}' is already tombstoned.`);
     }
     await assertNotMeshMainVault(db, vault, "delete");
     await enforceNotFrozen(vault.path, vault.name);
-    // Phase E item 1 (#9 — warn-then-drop). Discover the pod-local aliases
-    // this delete would ORPHAN (live aliases whose target is this vault's rid)
-    // BEFORE the destructive registry mutation, so the outcome carries the
-    // warning list. The actual drop happens AFTER the vault is removed (the
-    // confirmed path); discovery here just snapshots the affected names.
+    assertNoTargetPublication(vault);
+    const subscription = planVaultSubscriptionRetraction(vault);
+    if (ensureVaultRetraction(vault, opts.operationId, opts.writerId)) opts.onMutation?.();
+    retracted = true;
+    opts.afterStage?.("vault-ledger");
+    if (await retractTargetDestination(db, vault)) opts.onMutation?.();
+    opts.afterStage?.("destination");
+    if (applyVaultSubscriptionRetraction(subscription)) opts.onMutation?.();
+    opts.afterStage?.("subscription");
+    if (await retractScopedMeshHome(db, vault)) opts.onMutation?.();
+    opts.afterStage?.("mesh-home");
+    // Snapshot aliases before registry mutation; retract them while the row is
+    // still addressable so a failed operation can be retried.
     const orphanedAliases = liveAliasNamesForTargetRid(vault.ridHex);
+    opts.afterStage?.("before-filesystem");
+    await opts.beforeFilesystem?.();
     const { removedLytDir, lytDirPath } = await deleteVaultDerivedState(vault.path);
+    if (removedLytDir) opts.onMutation?.();
+    opts.afterStage?.("filesystem");
+    // Keep the row until alias retractions are complete so an interrupted
+    // operation remains addressable by name on retry.
+    if (orphanedAliases.length > 0) { await dropAliasesForTargetRid(vault.ridHex, db); opts.onMutation?.(); }
+    opts.afterStage?.("aliases");
     let result: DeleteFlowResult;
     if (noTombstone) {
-      await deleteVault(db, vault.rid);
       let removedKnownPath = false;
-      if (!isUnderDefaultVaultsRoot(vault.path)) {
+      if (!isUnderDefaultVaultsRoot(vault.path) && readKnownPaths().includes(resolve(vault.path))) {
         removeKnownPath(vault.path);
         removedKnownPath = true;
+        opts.onMutation?.();
       }
+      await deleteVault(db, vault.rid);
+      opts.onMutation?.();
       result = {
         vault,
         removedLytDir,
         lytDirPath,
         tombstoned: false,
         removedKnownPath,
+        projectionPending: false,
         orphanedAliases,
       };
     } else {
       await tombstoneVault(db, vault.rid);
+      opts.onMutation?.();
       result = {
         vault: { ...vault, status: "tombstoned" },
         removedLytDir,
         lytDirPath,
         tombstoned: true,
         removedKnownPath: false,
+        projectionPending: false,
         orphanedAliases,
       };
     }
-    // Drop the orphaned aliases on the confirmed path — tombstone each via the
-    // existing removeAliasFlow / appendAliasTombstone path (HLC-stamped, own
-    // shard, idempotent). Reuses the open registry client.
-    if (orphanedAliases.length > 0) {
-      await dropAliasesForTargetRid(vault.ridHex, db);
-    }
-    // Inc-2 Phase 0 — the CRDT delete channel. A vault delete is an
-    // explicit `state=tombstoned` @FED_VAULT ledger event on THIS writer's own
-    // shard. This is the ONLY manifest retraction path (the reconcile in
-    // derivePodManifestDoc deliberately never tombstones-from-absence — that
-    // would reintroduce the B1 partial-registry clobber). Its fresh monotone hlc
-    // (seeded above every observed remote via the receive rule) makes the
-    // register fold pick this tombstone as the winner for vault_rid, retracting
-    // it cross-machine — the C-1 fix. Non-fatal: a manifest-ledger failure must
-    // never fail the delete (the vault is already gone from the registry).
-    try {
-      appendFedVaultTombstone({
-        vaultRid: vault.ridHex,
-        vaultName: vault.name,
-        homeMeshRidHex: vault.homeMeshRidHex,
-        repo: vaultRepoName(vault.name),
-        visibility: "private",
-        status: "active",
-        observedMaxHlc: observedMaxFedVaultHlc(),
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // eslint-disable-next-line no-console
-      console.error(`@FED_VAULT tombstone skipped non-fatally on delete — ${msg}`);
-    }
-    // (Brief A) — delete mutates the registry's vault set; regenerate the
-    // derived pod manifest so pod.yon reflects the removal. Non-fatal; reuses
-    // the open registry.
-    await regeneratePodManifestNonFatal(db);
+    opts.afterStage?.("registry");
+    const projection = await refreshScopedVaultProjection(db, vault.ridHex);
+    if (projection.changed === true) opts.onMutation?.();
+    result.projectionPending = projection.pending;
+    if (projection.reason !== undefined) result.projectionNote = projection.reason;
+    opts.afterStage?.("projection");
     return result;
+  } catch (error) {
+    if (retracted) throw new Error(`Partial delete of '${name}': a vault-ledger tombstone was verified; local state or aliases may be incomplete. Inspect before recovery. ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    throw error;
   } finally {
     await closeRegistry(db);
   }

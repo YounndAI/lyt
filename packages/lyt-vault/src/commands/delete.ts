@@ -13,51 +13,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 import { Command } from "commander";
-
-import { deleteVaultFlow } from "../flows/delete.js";
+import type { deleteVaultFlow } from "../flows/delete.js";
+import { deleteWithReceipt } from "../flows/vault-delete-receipt.js";
 
 export function buildDeleteCommand(dependencies: { deleteVaultFlow?: typeof deleteVaultFlow } = {}): Command {
-  const cmd = new Command("delete");
-  cmd
-    .description(
-      "Remove a vault's .lyt/ derived state. .md files are NEVER touched. By default leaves a tombstone in the registry (a 'closed path' marker); pass --no-tombstone to fully remove the row. Requires --yes.",
-    )
-    .argument("<name>", "Registered vault name")
-    .option("--no-tombstone", "Fully remove the registry row instead of tombstoning")
-    .option("--yes", "Confirm deleting the vault's Lyt state")
-    .action(async (name: string, opts: { tombstone?: boolean; yes?: boolean }) => {
-      if (opts.yes !== true) {
-        throw new Error(
-          `Refusing to delete '${name}' without explicit confirmation. Pass --yes to proceed.`,
-        );
+  return new Command("delete")
+    .description("Remove local .lyt state. Markdown and remote are untouched. Requires --yes.")
+    .argument("[name]", "Registered vault name")
+    .option("--no-tombstone", "Remove the registry row instead of tombstoning it")
+    .option("--resume <operation-id>", "Inspect an interrupted receipt-bound delete")
+    .option("--yes", "Confirm deleting local Lyt state")
+    .option("--json", "Emit Receipt V1 JSON")
+    .action(async (name: string | undefined, opts: { tombstone?: boolean; resume?: string; yes?: boolean; json?: boolean }) => {
+      if (opts.yes !== true) throw new Error(`Refusing to delete '${name ?? "vault"}' without explicit confirmation. Pass --yes to proceed.`);
+      if (opts.resume !== undefined && opts.tombstone === false) throw new Error("Resume cannot change the tombstone choice.");
+      if (dependencies.deleteVaultFlow !== undefined) {
+        if (!name) throw new Error("A vault name is required.");
+        await dependencies.deleteVaultFlow(name, { noTombstone: opts.tombstone === false });
+        return;
       }
-      const noTombstone = opts.tombstone === false;
-      const result = await (dependencies.deleteVaultFlow ?? deleteVaultFlow)(name, { noTombstone });
-      // Phase E item 1 (#9) — surface the orphaned-then-dropped pod-local
-      // aliases. delete has no interactive gate, so the warning is reported with
-      // the outcome rather than before a prompt.
-      if (result.orphanedAliases.length > 0) {
-        const list = result.orphanedAliases.map((a) => `@${a}`).join(", ");
-        // eslint-disable-next-line no-console
-        console.log(
-          `  dropped ${result.orphanedAliases.length} pod-local alias(es) that pointed here: ${list}`,
-        );
-      }
-      // eslint-disable-next-line no-console
-      console.log(`Deleted vault '${result.vault.name}' (${result.vault.ridHex}).`);
-      // eslint-disable-next-line no-console
-      console.log(`  ${result.removedLytDir ? "removed" : "skipped"}: ${result.lytDirPath}`);
-      // eslint-disable-next-line no-console
-      console.log(`  .md files at ${result.vault.path} were NOT touched.`);
-      if (result.tombstoned) {
-        // eslint-disable-next-line no-console
-        console.log(`  registry row tombstoned (use --no-tombstone next time to fully remove)`);
-      } else if (result.removedKnownPath) {
-        // eslint-disable-next-line no-console
-        console.log(`  removed from ~/lyt/known-paths.txt`);
-      }
+      const result = await deleteWithReceipt({ action: "delete", confirmed: true, ...(name === undefined ? {} : { name }),
+        ...(opts.resume === undefined ? { noTombstone: opts.tombstone === false } : { resume: opts.resume }),
+        onPlan: (id) => console.error(`Delete operation ${id}`) });
+      console.log(opts.json ? JSON.stringify(result) : `${result.status}: operation ${result.operation_id}. Markdown and remote untouched.${result.next_action ? ` ${result.next_action.summary}` : ""}`);
+      process.exitCode = result.exit_code;
     });
-  return cmd;
 }

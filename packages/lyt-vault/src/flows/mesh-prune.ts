@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 import type { Client } from "@libsql/client";
@@ -40,12 +40,16 @@ import { getDefaultVaultsRoot } from "../util/paths.js";
 import { hexToUuid7Bytes, ridsEqual } from "../util/uuid7.js";
 import { liveFedMeshes, observedMaxFedMeshHlc } from "../yon/federation-mesh-ledger-read.js";
 import { appendFedMeshTombstone } from "../yon/federation-mesh-ledger-write.js";
+import { foldFedVaultWinners, readAllFedVaultRecords } from "../yon/federation-vault-ledger-read.js";
+import { parseVaultYon } from "../yon/parse.js";
+import { assertSafeWritePath } from "../util/write-path-guard.js";
 import {
   liveSubscriptions,
   type LiveSubscription,
 } from "../yon/subscription-ledger-read.js";
 import { coordinateOwner } from "./federation/rebuildFederationCacheFlow.js";
 import { foreignVaultOwner, listBucketVaultDirs } from "./repair-foreign-homing.js";
+import { refreshScopedMeshProjection } from "./scoped-vault-projection.js";
 
 // Inc-2 Phase C (#6) — `lyt mesh prune <name>`.
 //
@@ -227,6 +231,9 @@ export async function meshPruneFlow(
         observedMaxHlc: observedMaxFedMeshHlc(opts.podRoot),
         podRoot: opts.podRoot,
       });
+      if (liveFedMeshes(opts.podRoot).some((candidate) => fedMeshRidMatches(candidate.meshRid, mesh))) {
+        throw new Error(`Mesh '${name}' tombstone was appended but retraction could not be verified; registry row retained.`);
+      }
       meshLedgerRetracted = true;
     }
     if (ledgerBacking?.kind === "bucket") {
@@ -238,6 +245,11 @@ export async function meshPruneFlow(
           `relocate that directory first. Pruning the cache row now would be undone on the next ` +
           `sync/rebuild/reindex.`,
       );
+    }
+
+    const projection = await refreshScopedMeshProjection(db, mesh.ridHex, opts.podRoot);
+    if (projection.pending) {
+      throw new Error(`Partial prune of mesh '${name}': the ledger may be retracted but the registry row is retained because the pod projection is pending (${projection.reason ?? "unverified"}). Resolve the cause and retry.`);
     }
 
     // Empty/orphan → registry-row-only removal. The `mesh_vaults.mesh_rid` FK is
@@ -319,8 +331,15 @@ async function detectLedgerBacking(
     //       scan REUSES the exported `listBucketVaultDirs` — the same anti-drift
     //       discipline the file's comment above already imposes on
     //       `foreignVaultOwner`: one enumerator, two callers, no drift.
-    const diskDir = bucketVaultDirBacking(mesh.name, vaultsRoot);
-    return diskDir === null ? null : { kind: "bucket", diskDir };
+    const diskDir = bucketVaultDirBacking(mesh.name, vaultsRoot, podRoot);
+    if (diskDir !== null) return { kind: "bucket", diskDir };
+    // Bucket records can also be present in the pod mesh ledger. Retract the
+    // exact matching identity before deleting the cache row, or recovery from
+    // a regenerated manifest can restore it.
+    const meshLedger = liveFedMeshes(podRoot).some(
+      (lm) => fedMeshRidMatches(lm.meshRid, mesh) || lm.meshName === mesh.name,
+    );
+    return meshLedger ? { kind: "own" } : null;
   }
   // OWN: ledger-backed iff a LIVE (active, add-wins) @FED_MESH record exists for
   // it — matched by rid (preferred; rid-stable across renames) then by name.
@@ -336,12 +355,25 @@ async function detectLedgerBacking(
 // anything) and its vaults-root-relative path parses to THIS bucket name through
 // `parseBucketRelDir` — so the guard and the heal agree, byte-for-byte, on which
 // directories back a bucket.
-function bucketVaultDirBacking(meshName: string, vaultsRootOpt: string | undefined): string | null {
+function bucketVaultDirBacking(meshName: string, vaultsRootOpt: string | undefined, podRoot?: string): string | null {
   const vaultsRoot = resolve(vaultsRootOpt ?? getDefaultVaultsRoot());
+  const winners = foldFedVaultWinners(readAllFedVaultRecords(podRoot));
   for (const dir of listBucketVaultDirs(vaultsRoot)) {
-    if (!existsSync(join(dir, ".lyt", "vault.yon"))) continue;
     const coords = parseBucketRelDir(relative(vaultsRoot, dir));
-    if (coords !== null && coords.bucketMesh === meshName) return dir;
+    if (coords === null || coords.bucketMesh !== meshName) continue;
+    const path = join(dir, ".lyt", "vault.yon");
+    try {
+      assertSafeWritePath(path);
+      if (!existsSync(path)) continue;
+      if (!lstatSync(path).isFile()) return dir;
+      const rid = parseVaultYon(readFileSync(path, "utf8")).rid.replace(/-/g, "").toLowerCase();
+      const matches = [...winners.values()].filter((r) => r.vaultRid.replace(/-/g, "").toLowerCase() === rid);
+      if (matches.length === 1 && matches[0]?.state === "tombstoned") continue;
+    } catch {
+      // Unreadable, malformed or redirected metadata is never evidence that a
+      // retained directory cannot be re-registered.
+    }
+    return dir;
   }
   return null;
 }

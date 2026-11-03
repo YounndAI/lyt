@@ -35,11 +35,9 @@ export interface AbandonVaultOpts {
   confirmed: boolean;
 }
 
-// The abandon result is delete's result, re-shaped with an explicit
-// `status: "abandoned"` tag so callers see the anti-lock-in framing while the
-// underlying fields stay identical to the delegated delete.
+// The status distinguishes local completion from a pending pod projection.
 export interface AbandonFlowResult extends DeleteFlowResult {
-  status: "abandoned";
+  status: "abandoned" | "projection-pending";
 }
 
 export async function abandonVaultFlow(
@@ -61,5 +59,5 @@ export async function abandonVaultFlow(
     );
   }
   const result = await deleteVaultFlow(name, { noTombstone: true });
-  return { ...result, status: "abandoned" };
+  return { ...result, status: result.projectionPending ? "projection-pending" : "abandoned" };
 }

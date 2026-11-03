@@ -99,6 +99,8 @@ export interface AppendFedVaultArgs {
   // The per-writer monotonic seq tiebreaker. Supplied explicitly only by tests
   // that pin a clock AND want a controlled seq; otherwise stampNext mints it.
   seq?: number;
+  /** Optional lifecycle operation identity; never part of the merge key. */
+  operationId?: string;
   // AUDIT ONLY. Defaults to now. The fold IGNORES this for the register key,
   // sort, and merge (the `hlc` field is the merge authority now).
   registeredAt?: string;
@@ -186,6 +188,7 @@ export function appendFedVaultRecord(args: AppendFedVaultArgs): AppendLedgerReco
       ["seq", seq],
       ["registered_at", registeredAt],
       ["state", args.state],
+      ...(args.operationId === undefined ? [] : [["operation_id", args.operationId] as const]),
     ],
     stampSrc: "flows/federation/manifest",
     ts: registeredAt,

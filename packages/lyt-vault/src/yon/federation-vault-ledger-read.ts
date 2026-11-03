@@ -77,6 +77,7 @@ export interface FedVaultLedgerRecord {
   // The shard (writerId) the record came from — provenance + the total-order
   // tiebreak (compareHlcStamped breaks an exact hlc tie by writerId).
   writerId: string;
+  operationId?: string;
 }
 
 // The live materialized VALUE bundle of a winning `active` record — the shape
@@ -177,6 +178,7 @@ function toFedVaultLedgerRecord(rec: LedgerRecord, writerId: string): FedVaultLe
     registeredAt: rec.fields.get("registered_at") ?? "",
     state,
     writerId,
+    ...(rec.fields.get("operation_id") === undefined ? {} : { operationId: rec.fields.get("operation_id")! }),
   };
 }
 
