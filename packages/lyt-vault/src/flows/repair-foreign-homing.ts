@@ -36,7 +36,6 @@ import {
 import {
   canonicalizeCoordinate,
   gitUrlToCoordinate,
-  vaultLeaf,
   vaultOriginCoordinate,
 } from "../registry/vault-addressing.js";
 import {
@@ -220,9 +219,14 @@ export async function repairForeignHomingFlow(
         continue;
       }
 
-      const relDir = bucketVaultRelDir(source, owner, vaultLeaf(vault.name));
-      const expectedAbs = resolve(join(vaultsRoot, relDir));
       const currentAbs = resolve(vault.path);
+      const existingBucket = parseBucketRelDir(relative(vaultsRoot, currentAbs));
+      if (existingBucket !== null && existingBucket.source === source && existingBucket.owner === owner) {
+        skipped.push({ name: vault.name, reason: "already-homed" });
+        continue;
+      }
+      const relDir = bucketVaultRelDir(source, owner, vault.name);
+      const expectedAbs = resolve(join(vaultsRoot, relDir));
 
       // IDEMPOTENT — already correctly homed (registry points at the bucket tree).
       if (canonicalizeVaultPath(currentAbs) === canonicalizeVaultPath(expectedAbs)) {
@@ -456,7 +460,26 @@ export function listBucketVaultDirs(vaultsRoot: string): string[] {
       }
       for (const leafEntry of leafEntries) {
         if (leafEntry.isSymbolicLink() || !leafEntry.isDirectory()) continue;
-        out.push(resolve(join(ownerDir, leafEntry.name)));
+        const candidate = resolve(join(ownerDir, leafEntry.name));
+        out.push(candidate);
+        try {
+          const lyt = lstatSync(join(candidate, ".lyt"));
+          const marker = lstatSync(join(candidate, ".lyt", "vault.yon"));
+          if (lyt.isDirectory() && !lyt.isSymbolicLink() && marker.isFile() && !marker.isSymbolicLink()) continue;
+        } catch {
+          // Not a recognized legacy vault; inspect the next bounded level.
+        }
+        let vaultEntries;
+        try {
+          vaultEntries = readdirSync(candidate, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const vaultEntry of vaultEntries) {
+          if (!vaultEntry.isSymbolicLink() && vaultEntry.isDirectory()) {
+            out.push(resolve(join(candidate, vaultEntry.name)));
+          }
+        }
       }
     }
   }

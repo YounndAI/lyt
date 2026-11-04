@@ -39,7 +39,7 @@
 // mesh directly via registry insertMesh (which bypasses validateMeshName), so
 // the reserved-name guard blocks user occupation WITHOUT blocking this path.
 
-import { slugifyHandle } from "./federation-paths.js";
+import { assertSafeCloneName, slugifyHandle } from "./federation-paths.js";
 
 export const SUBSCRIPTION_BUCKET_MESH = "subscriptions";
 export const SHARED_BUCKET_MESH = "shared";
@@ -84,17 +84,22 @@ export function entryModeForSource(source: "shared" | "subscribed"): "shared" | 
 }
 
 // the vault-root-RELATIVE on-disk directory a foreign vault homes into:
-//   subscribed → `subscriptions/{owner}/{leaf}`
-//   shared     → `shared/{owner}/{leaf}`
+//   subscribed → `subscriptions/{owner}/{mesh}/{leaf}`
+//   shared     → `shared/{owner}/{mesh}/{leaf}`
 // This is the on-disk sibling of bucketMeshName (the home MESH name is the
-// `{bucket}/{owner}` prefix; the on-disk dir appends the vault leaf). Used by the
+// `{bucket}/{owner}` prefix; the on-disk dir appends the publisher's mesh/name). Used by the
 // live receive path AND the lazy repair so both compute the identical target.
 export function bucketVaultRelDir(
   source: "shared" | "subscribed",
   owner: string,
-  leaf: string,
+  vaultName: string,
 ): string {
-  return `${bucketMeshName(entryModeForSource(source), owner)}/${leaf}`;
+  const segments = vaultName.split("/");
+  if (segments.length !== 2 || segments.some((s) => !s || s === "." || s === ".." || s.includes("\\"))) {
+    throw new Error(`Foreign vault name must be a mesh/vault pair: ${vaultName}`);
+  }
+  assertSafeCloneName(vaultName);
+  return `${bucketMeshName(entryModeForSource(source), owner)}/${vaultName}`;
 }
 
 // the INVERSE of `bucketVaultRelDir`. Given a vaults-root-RELATIVE
@@ -114,11 +119,9 @@ export function bucketVaultRelDir(
 // LOCATION is the receiver-owned fact that survives — it is exactly the tree the
 // receive path chose — so it is the reconstruction source.
 //
-// Shape (mirrors bucketVaultRelDir byte-for-byte): `<prefix>/<owner>/<leaf>`,
-// EXACTLY three segments. Anything shorter (the bucket root, an owner dir with
-// no vault) or longer (a nested dir INSIDE a foreign vault) is NOT a bucket
-// vault location and returns null — deliberately strict so a subdirectory of a
-// foreign vault can never be mistaken for a second vault.
+// Accept the current `<prefix>/<owner>/<mesh>/<leaf>` shape and the earlier
+// `<prefix>/<owner>/<leaf>` shape, so existing checkouts remain reconstructible.
+// Scanners stop at a recognized legacy vault before considering another level.
 export interface ParsedBucketRelDir {
   // The STORED provenance implied by the bucket prefix.
   source: "shared" | "subscribed";
@@ -135,8 +138,9 @@ export function parseBucketRelDir(relDir: string): ParsedBucketRelDir | null {
   // Accept BOTH separators: the caller may hand us a POSIX-joined relative path
   // or a Windows `path.relative()` result.
   const segs = relDir.split(/[\\/]+/).filter((s) => s.length > 0);
-  if (segs.length !== 3) return null;
-  const [prefix, owner, leaf] = segs as [string, string, string];
+  if (segs.length !== 3 && segs.length !== 4) return null;
+  const [prefix, owner] = segs as [string, string];
+  const leaf = segs[segs.length - 1]!;
   // fix-pass (cold review) — FAIL CLOSED on a prefix that is not BYTE-EQUAL
   // to a reserved bucket prefix. The prefixes are minted here (lowercase, by
   // `bucketMeshName`) and never by a user, so `Shared/` is NOT our tree: on a
@@ -146,7 +150,7 @@ export function parseBucketRelDir(relDir: string): ParsedBucketRelDir | null {
   // an OWN vault foreign. (Was `prefixRaw.toLowerCase()`.)
   if (prefix !== SUBSCRIPTION_BUCKET_MESH && prefix !== SHARED_BUCKET_MESH) return null;
   if (owner.length === 0 || leaf.length === 0) return null;
-  if (owner === "." || owner === ".." || leaf === "." || leaf === "..") return null;
+  if (segs.some((segment) => segment === "." || segment === "..")) return null;
   // fix-pass (cold review) — the OWNER segment must be BYTE-EQUAL to its own
   // slug. The receive path writes the bucket dir as `slugifyHandle(owner)`
   // (clone / subscribe / accept-share, and `foreignVaultOwner` in

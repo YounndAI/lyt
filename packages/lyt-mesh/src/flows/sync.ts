@@ -279,6 +279,8 @@ export interface SyncFlowArgs {
   onlineAuthorityByVaultRid?: Readonly<Record<string, SyncOnlineVaultAuthority>>;
   permissionObserver?: PublicationPermissionObserver;
   permissionAttemptId?: string;
+  /** Test seam for the observed GitHub visibility; failures must reject. */
+  publicVisibilityResolver?: (repository: string) => Promise<"public" | "private">;
 }
 
 export interface SyncPublicationAuthority {
@@ -368,6 +370,14 @@ interface ProvenanceBridge {
 }
 
 const provenance = lytVaultSourceBridge as typeof lytVaultSourceBridge & ProvenanceBridge;
+const publicPrivacy = lytVaultSourceBridge as typeof lytVaultSourceBridge & {
+  assertPublicVaultHistorySafe(args: { cwd: string; git: GitRunner; remoteUrl?: string }): Promise<void>;
+  isPrivateVaultMetadataPath(path: string): boolean;
+  realGhClient: { getRepo(owner: string, name: string): Promise<{ visibility?: string }> };
+  readAllFedVaultRecords(podRoot?: string): unknown[];
+  foldFedVaults(records: unknown[]): Array<{ vaultRid: string; visibility: "public" | "private" }>;
+  resolveConfig(): { defaultRepoVisibility: "public" | "private" };
+};
 
 export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult> {
   const runGit = args.runGit ?? defaultRunGit;
@@ -473,6 +483,37 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
     const onlineAuthority = authorityForVault(args, v);
     const vaultNetworkMode =
       networkMode === "online" && onlineAuthority !== undefined ? "online" : "local-only";
+    let publicVault: boolean;
+    const observePublic = async (): Promise<boolean> => {
+      const repository = onlineAuthority!.publication.repository;
+      if ((args.gh !== undefined || args.runGit !== undefined) && args.publicVisibilityResolver === undefined) {
+        throw new Error("injected transport has no visibility observer");
+      }
+      const observed = args.publicVisibilityResolver !== undefined
+        ? await args.publicVisibilityResolver(repository)
+        : await (async () => {
+            const [owner, name] = repository.split("/");
+            if (!owner || !name) throw new Error("invalid repository coordinate");
+            const info = await publicPrivacy.realGhClient.getRepo(owner, name);
+            if (info.visibility !== "public" && info.visibility !== "private")
+              throw new Error("repository visibility was not reported");
+            return info.visibility;
+          })();
+      if (observed === "public") publicVault = true;
+      return observed === "public";
+    };
+    try {
+      const manifest = publicPrivacy.foldFedVaults(publicPrivacy.readAllFedVaultRecords(podRoot ?? undefined))
+        .find((entry) => entry.vaultRid === ridHex);
+      publicVault = (manifest?.visibility ?? publicPrivacy.resolveConfig().defaultRepoVisibility) === "public";
+      if (vaultNetworkMode === "online" && !readOnlyRidHexes.has(ridHex)) {
+        publicVault = (await observePublic()) || publicVault;
+      }
+    } catch {
+      reports.push({ name: v.name, path: v.path, status: "error", staged: false,
+        message: "Sync refused: public visibility could not be verified. Verify the repository visibility and retry." });
+      continue;
+    }
     if (
       networkMode === "online" &&
       v.status === "active" &&
@@ -527,7 +568,7 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
                   ledger: "sync",
                   machineId: machine!.machineId,
                 });
-                if (vaultNetworkMode === "online") {
+                if (vaultNetworkMode === "online" && !publicVault) {
                   promotedEventIds = provenance.promotePendingSyncProvenance(
                     v.path,
                     machine!.machineId,
@@ -537,6 +578,8 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
                 provenanceWarning = `Could not prepare pending sync provenance: ${safeProvenanceError(err)}`;
               }
             },
+        publicVault,
+        vaultNetworkMode === "online" ? observePublic : undefined,
       );
     } catch (error) {
       if (machine !== null && podRid !== null) {
@@ -595,6 +638,7 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         (promotedEventIds.length === 0 &&
           !hadNonProvenanceChanges &&
           report.status === "clean" &&
+          !publicVault &&
           provenance.getSyncProvenanceStatus(v.path).latestPublishedSync !== null)
       )
     ) {
@@ -639,13 +683,13 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         report.lastSyncMachineAlias = status.latestLocalSync.alias;
         report.lastSyncAccount = status.latestLocalSync.account;
       }
-      if (status.latestPublishedSync !== null)
+      if (!publicVault && status.latestPublishedSync !== null)
         report.latestPublishedSync = status.latestPublishedSync.timestamp;
     } catch (err) {
       provenanceWarning ??= `Could not read sync provenance: ${safeProvenanceError(err)}`;
     }
     if (provenanceWarning !== undefined) report.syncProvenanceWarning = provenanceWarning;
-    if (machine !== null && vaultNetworkMode === "online" && isReachedOnlineStatus(report.status)) {
+    if (!publicVault && machine !== null && vaultNetworkMode === "online" && isReachedOnlineStatus(report.status)) {
       try {
         const bySource = new Map<
           string,
@@ -997,6 +1041,8 @@ async function syncOneVault(
   authorityHeld = false,
   publicationAttempt?: PublicationAttemptContext,
   beforeEligibleSync?: () => void | Promise<void>,
+  publicVault = false,
+  observePublic?: () => Promise<boolean>,
 ): Promise<VaultSyncReport> {
   const base: VaultSyncReport = {
     name: vault.name,
@@ -1030,6 +1076,15 @@ async function syncOneVault(
     return { ...base, status: "not-git-repo", message: "This vault isn't set up for syncing yet." };
   }
 
+  if (publicVault && !readOnly) {
+    try {
+      await publicPrivacy.assertPublicVaultHistorySafe({ cwd: vault.path, git: runGit });
+    } catch (error) {
+      return { ...base, status: "error", staged: false,
+        message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   if (networkMode === "local-only") {
     if (readOnly) {
       const statusRecords = await readPorcelainStatus(runGit, vault.path);
@@ -1044,7 +1099,7 @@ async function syncOneVault(
       };
     }
     await beforeEligibleSync?.();
-    const statusRecords = await readPorcelainStatus(runGit, vault.path);
+    const statusRecords = publicStatusRecords(await readPorcelainStatus(runGit, vault.path), publicVault);
     const dirtyCount = statusRecords.length;
     let committed = false;
     if (statusRecords.length > 0) {
@@ -1274,6 +1329,8 @@ async function syncOneVault(
               true,
               attempt,
               beforeEligibleSync,
+              publicVault,
+              observePublic,
             ),
         });
       }
@@ -1335,6 +1392,8 @@ async function syncOneVault(
             true,
             attempt,
             beforeEligibleSync,
+            publicVault,
+            observePublic,
           );
         },
       };
@@ -1388,7 +1447,7 @@ async function syncOneVault(
     }
   }
 
-  let statusRecords = await readPorcelainStatus(runGit, vault.path);
+  let statusRecords = publicStatusRecords(await readPorcelainStatus(runGit, vault.path), publicVault);
   let dirtyCount = statusRecords.length;
 
   let ahead = 0;
@@ -1638,7 +1697,7 @@ async function syncOneVault(
   }
 
   await beforeEligibleSync?.();
-  statusRecords = await readPorcelainStatus(runGit, vault.path);
+  statusRecords = publicStatusRecords(await readPorcelainStatus(runGit, vault.path), publicVault);
   dirtyCount = statusRecords.length;
 
   // v1.M.0 (P0-b) — single-reconcile guard. Each sync reconciles the .db
@@ -1922,6 +1981,21 @@ async function syncOneVault(
         dirtyCount,
       };
     }
+
+    let outwardPublic = publicVault;
+    try {
+      if (observePublic !== undefined) outwardPublic = (await observePublic()) || outwardPublic;
+    } catch {
+      return { ...base, status: "error", message: "Sync refused: public visibility could not be verified before push.", ahead, behind, dirtyCount };
+    }
+    if (outwardPublic) {
+      try {
+        await publicPrivacy.assertPublicVaultHistorySafe({ cwd: vault.path, git: runGit, remoteUrl: pushTarget.url });
+      } catch (error) {
+        return { ...base, status: "error", staged: false,
+          message: error instanceof Error ? error.message : String(error), ahead, behind, dirtyCount };
+      }
+    }
     // Emit a SyncOperation that OWNS the push through the RemoteProvider port.
     // Its horizon is READ BACK from the actual push result (pushed vs
     // committed-not-pushed) — never asserted from the verb. `lastPushResult`
@@ -2199,6 +2273,13 @@ function porcelainPaths(records: readonly PorcelainV1Record[]): string[] {
     }
   }
   return paths;
+}
+
+function publicStatusRecords(records: PorcelainV1Record[], publicVault: boolean): PorcelainV1Record[] {
+  if (!publicVault) return records;
+  return records.filter((record) =>
+    ![record.path, record.sourcePath].some((path) => path !== undefined && publicPrivacy.isPrivateVaultMetadataPath(path)),
+  );
 }
 
 async function readPorcelainStatus(runGit: GitRunner, cwd: string): Promise<PorcelainV1Record[]> {

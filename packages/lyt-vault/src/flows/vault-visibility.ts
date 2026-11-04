@@ -22,6 +22,8 @@ import { getVaultByName, type VaultRow } from "../registry/repo.js";
 import { closeVaultDb, openAuditDb } from "../registry/vault-db.js";
 import { baseTopicsForClass, PUBLIC_TOPIC } from "../scaffold/github-defaults.js";
 import { resolveConfig } from "../util/config.js";
+import { runGit } from "../util/git-run.js";
+import { assertPublicVaultHistorySafe } from "../util/public-vault-privacy.js";
 import { getFederationRoot, isReservedFederationRepoName } from "../util/federation-paths.js";
 import {
   parseOwnerRepoFromUrl,
@@ -399,6 +401,18 @@ export async function setVaultVisibilityFlow(
         writableVerdictRefresh: "not-applicable-own-vault",
         notes: [`'${row.name}' is already ${to}; nothing to do.`],
       };
+    }
+
+    // Making a private repository public exposes every advertised ref, not
+    // merely its current tree. Never rewrite the user's repository here.
+    if (to === "public" && ghVisibility !== "public") {
+      await assertPublicVaultHistorySafe({
+        cwd: row.path,
+        git: runGit,
+        ...(ownerRepo === null
+          ? {}
+          : { remoteUrl: `https://github.com/${ownerRepo.owner}/${ownerRepo.repo}.git` }),
+      });
     }
 
     const gh: VaultVisibilityGhReport = {

@@ -1063,6 +1063,8 @@ export {
 } from "./registry/mesh-edges-repo.js";
 export { deleteAllVaultsByMesh } from "./registry/mesh-vaults-repo.js";
 export type { GhClient, GhRepoInfo } from "./util/gh.js";
+export { realGhClient } from "./util/gh.js";
+export { assertPublicVaultHistorySafe, isPrivateVaultMetadataPath } from "./util/public-vault-privacy.js";
 export { parseOwnerRepoFromUrl } from "./util/gh.js";
 
 export { openRegistry, closeRegistry, getRegistryPath } from "./registry/client.js";

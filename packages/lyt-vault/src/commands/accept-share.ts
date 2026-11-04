@@ -32,7 +32,7 @@ export function buildAcceptShareCommand(): Command {
   cmd
     .description(
       "Accept a pending GitHub invitation for a privately-shared vault and receive it into " +
-        "shared/{owner} (auto-indexed). Requires --yes.",
+        "shared/{owner}/{mesh}/{vault} (auto-indexed). Requires --yes.",
     )
     .requiredOption("--invite <id>", "The gh invitation id to accept (see 'lyt vault invites')")
     .option("--yes", "Confirm the accept + clone")

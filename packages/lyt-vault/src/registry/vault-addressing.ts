@@ -21,6 +21,7 @@ import { getAliasTargetRid } from "./aliases-repo.js";
 import { getVaultByRid, listVaults } from "./repo.js";
 import type { VaultRow } from "./repo.js";
 import { resolveLeafRids, listGitUrlRids } from "./vault-index-repo.js";
+import { isForeignBucketMeshName } from "../util/bucket-mesh.js";
 
 // 0.9.4 (G — the addressing foundation). This module is the SINGLE
 // resolver chokepoint: every handle a verb can be handed — a `{mesh}/{vault}`
@@ -230,7 +231,7 @@ export async function computeDisplayName(db: Client, vault: VaultRow): Promise<s
   if (vault.homeMeshRid !== null) {
     const meshes = await listMeshes(db);
     const home = meshes.find((m) => m.ridHex === vault.homeMeshRidHex);
-    if (home !== undefined) return `${home.name}/${leaf}`;
+    if (home !== undefined) return displayInMesh(vault, home.name);
   }
   // No (resolvable) home mesh — keep the stored qualified name if any, else the
   // bare leaf. Mirrors the pre-0.9.4 surface for unaffiliated vaults.
@@ -241,29 +242,27 @@ export async function computeDisplayName(db: Client, vault: VaultRow): Promise<s
 // extra query in hot list/print loops). `meshNameByRidHex` maps a mesh
 // ridHex → its name.
 //
-// `coordinate` (federation-v2 Phase B): the vault's origin coordinate is
-// THREADED through so the owner-grouped external-display work (Phase ) can be
-// layered in at this single seam without re-touching every caller. In Phase B
-// it is accepted but does NOT change the output for own vaults — the display
-// stays `{mesh}/{leaf}` exactly as before. Owner-grouped `{bucket}/{owner}/{leaf}`
-// rendering for bucket-homed externals is Phase and is intentionally NOT
-// implemented here (behavior-preserving). Passing the coordinate now fixes the
-// signature so the two intra-`resolveVault` call sites and external callers do
-// not need a second edit when lands.
+// Own vaults display as `{mesh}/{leaf}`. A foreign bucket retains its publisher
+// mesh in the stored name and displays as `{bucket}/{owner}/{mesh}/{leaf}`.
 export function computeDisplayNameSync(
   vault: VaultRow,
   meshNameByRidHex: ReadonlyMap<string, string>,
-  // Threaded seam for Phase owner-grouped display; intentionally unused in
-  // Phase B (underscore-prefixed so `noUnusedParameters` accepts the forward
-  // seam). Callers still pass it positionally; will read it here.
+  // Retained for existing callers; the home bucket already identifies the owner.
   _coordinate?: string | null,
 ): string {
   const leaf = vaultLeaf(vault.name);
   if (vault.homeMeshRidHex !== null) {
     const meshName = meshNameByRidHex.get(vault.homeMeshRidHex);
-    if (meshName !== undefined) return `${meshName}/${leaf}`;
+    if (meshName !== undefined) return displayInMesh(vault, meshName);
   }
   return vault.name.includes("/") ? vault.name : leaf;
+}
+
+function displayInMesh(vault: VaultRow, meshName: string): string {
+  const name = vault.source !== "own" && isForeignBucketMeshName(meshName) && vault.name.includes("/")
+    ? vault.name
+    : vaultLeaf(vault.name);
+  return `${meshName}/${name}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -498,11 +497,17 @@ export async function resolveVault(db: Client, handle: string): Promise<VaultRow
     const allVaults = await listVaults(db);
     const meshes = await listMeshes(db);
     const meshNameByRidHex = new Map(meshes.map((m) => [m.ridHex, m.name] as const));
-    for (const v of allVaults) {
-      if (computeDisplayNameSync(v, meshNameByRidHex, vaultOriginCoordinate(v)) === trimmed) {
-        return v;
-      }
-    }
+    const matches = allVaults.filter((v) =>
+      computeDisplayNameSync(v, meshNameByRidHex, vaultOriginCoordinate(v)) === trimmed,
+    );
+    const live = matches.filter((v) => v.status !== "tombstoned");
+    if (live.length > 1) throw new AmbiguousVaultLeafError(trimmed, live.map((v) => v.ridHex));
+    if (live.length === 1) return live[0]!;
+    if (matches.length > 0) return matches[0]!;
+    // Reserved bucket selectors are never origin coordinates. In particular,
+    // an obsolete owner/leaf selector must not resolve some unrelated origin
+    // whose host happens to have the same spelling as a bucket prefix.
+    if (isForeignBucketMeshName(trimmed)) return null;
   }
 
   // 4. cross-pod origin coordinate. Index-backed: only the vaults carrying a

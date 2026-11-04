@@ -20,7 +20,7 @@ import { GhAccessProvider } from "../access/gh-access-provider.js";
 import type { AccessProvider, Invitation } from "../access/access-provider.js";
 import { closeRegistry, openRegistry } from "../registry/client.js";
 import { getVaultByRid } from "../registry/repo.js";
-import { gitUrlToCoordinate, vaultLeaf } from "../registry/vault-addressing.js";
+import { gitUrlToCoordinate } from "../registry/vault-addressing.js";
 import { appendSubscriptionActive } from "../yon/subscription-ledger-write.js";
 import { observedMaxSubscriptionHlc } from "../yon/subscription-ledger-read.js";
 import { bucketMeshName, bucketVaultRelDir, entryModeForSource } from "../util/bucket-mesh.js";
@@ -271,7 +271,7 @@ export async function acceptShareFlow(args: AcceptShareArgs): Promise<AcceptShar
     //    mesh segment). shared/{owner} + separated on-disk subtree.
     const bucketOwner = slugifyHandle(rawOwner);
     const homeMeshName = bucketMeshName(entryModeForSource("shared"), bucketOwner);
-    const targetSubdir = bucketVaultRelDir("shared", bucketOwner, vaultLeaf(ref.vaultName));
+    const targetSubdir = bucketVaultRelDir("shared", bucketOwner, ref.vaultName);
     // Build the clone URL from the RAW invitation repo (the ground truth), not a
     // re-derived convention name — so a non-standard repo name still clones from
     // the right place; the clone-boundary name==ref guard backstops identity.

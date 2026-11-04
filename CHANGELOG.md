@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.7] — 2026-11-04
+
+### Fixed
+
+- Preserve publisher mesh names when receiving and addressing foreign vaults, while retaining support for older checkout paths.
+- Keep public-vault sync, audit, and provenance metadata local and refuse public publication when known operational metadata is already indexed or reachable in history.
+
+---
+
 ## [0.21.6] — 2026-11-03
 
 ### Changed

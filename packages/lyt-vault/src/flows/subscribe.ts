@@ -31,7 +31,6 @@ import {
   canonicalizeCoordinate,
   resolveLiveVaultByCoordinate,
   gitUrlToCoordinate,
-  vaultLeaf,
   vaultOriginCoordinate,
 } from "../registry/vault-addressing.js";
 import { bucketMeshName, bucketVaultRelDir, entryModeForSource } from "../util/bucket-mesh.js";
@@ -554,7 +553,7 @@ export async function subscribeFlow(args: SubscribeArgs): Promise<SubscribeResul
       const foreignSource = foreignSourceForVisibility(visibility);
       const bucketOwner = slugifyHandle(remote.owner);
       const cloneHomeMesh = bucketMeshName(entryModeForSource(foreignSource), bucketOwner);
-      const cloneSubdir = bucketVaultRelDir(foreignSource, bucketOwner, vaultLeaf(ref.vaultName));
+      const cloneSubdir = bucketVaultRelDir(foreignSource, bucketOwner, ref.vaultName);
       // A0 (0.20.17) — RETAIN the clone result. It carries the vault rid, which
       // is the identity; discarding it and re-resolving `ref.vaultName` below
       // sent this continuation back through the ambiguous public name rail.

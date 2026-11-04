@@ -87,6 +87,11 @@ vaults. Run `lyt help <topic>` for any group below in depth.
   `★` prefixes roots (vaults with no `parent_vault` edge).
 - `lyt vault info <name> [--json]` — vault metadata: path, edges, memscope, status,
   computed `{mesh}/{vault}` display name, writability verdict, and origin coordinate.
+  Received public vaults use `subscriptions/{owner}/{mesh}/{vault}` as their
+  selector; received private shares use `shared/{owner}/{mesh}/{vault}`. New
+  checkouts use the corresponding path under the vaults root. Older checkouts can
+  remain at the earlier `{bucket}/{owner}/{vault}` path; they are not moved just
+  to adopt this naming, and their selector includes the publisher mesh.
 - `lyt alias <name> <target>` — bind a pod-local name to a vault (alias → rid;
   survives rename + move). `--list`, `--remove <name>`. Pod-local: synced across
   your own pod, never to subscribers. Any verb taking a vault accepts the alias,

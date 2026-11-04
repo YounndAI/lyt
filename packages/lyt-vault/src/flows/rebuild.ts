@@ -184,7 +184,20 @@ export function collectCandidatePaths(): string[] {
         }
         for (const leafEntry of leafEntries) {
           if (leafEntry.isSymbolicLink() || !leafEntry.isDirectory()) continue;
-          addCandidate(join(ownerDir, leafEntry.name));
+          const candidate = join(ownerDir, leafEntry.name);
+          addCandidate(candidate);
+          if (isRecognizedVault(candidate)) continue;
+          let vaultEntries;
+          try {
+            vaultEntries = readdirSync(candidate, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const vaultEntry of vaultEntries) {
+            if (!vaultEntry.isSymbolicLink() && vaultEntry.isDirectory()) {
+              addCandidate(join(candidate, vaultEntry.name));
+            }
+          }
         }
       }
     }

@@ -774,7 +774,7 @@ export async function recoverVaultsFromPodManifest(
         skipped.push({ vaultName: v.vaultName, reason: "already-registered" });
         continue;
       }
-      const targetPath =
+      let targetPath =
         bucketRecovery === undefined
           ? resolveVaultPath(v.vaultName)
           : join(
@@ -782,9 +782,33 @@ export async function recoverVaultsFromPodManifest(
               bucketVaultRelDir(
                 bucketRecovery.entryMode === "shared" ? "shared" : "subscribed",
                 bucketRecovery.owner,
-                v.vaultName.split("/").at(-1)!,
+                v.vaultName,
               ),
             );
+      // Preserve an existing legacy bucket checkout only when its own metadata
+      // identifies this exact vault. A same-leaf checkout from another mesh is
+      // not a match and must not be reused.
+      if (bucketRecovery !== undefined) {
+        const legacyPath = join(
+          getDefaultVaultsRoot(),
+          bucketMeshName(bucketRecovery.entryMode, bucketRecovery.owner),
+          v.vaultName.split("/").at(-1)!,
+        );
+        assertNoSymlinkOnWritePath(getDefaultVaultsRoot(), legacyPath);
+        const legacyYon = join(legacyPath, ".lyt", "vault.yon");
+        if (existsSync(legacyYon)) {
+          assertNoSymlinkOnWritePath(legacyPath, legacyYon);
+          try {
+            const legacy = parseVaultYon(readFileSync(legacyYon, "utf8"));
+            if (legacy.name === v.vaultName &&
+                uuid7BytesToHex(hexToUuid7Bytes(legacy.rid)) === uuid7BytesToHex(ridBytes)) {
+              targetPath = legacyPath;
+            }
+          } catch {
+            // An unreadable or mismatched legacy checkout is never reused.
+          }
+        }
+      }
       // Guard the target leaf and every parent before even probing for an
       // existing vault.yon: a leaf junction can make that read, DB init, and
       // registration operate on an external tree without ever cloning.

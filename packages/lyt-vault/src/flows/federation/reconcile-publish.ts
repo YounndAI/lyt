@@ -27,6 +27,7 @@ import type { AccessProvider } from "../../access/access-provider.js";
 import { GhAccessProvider } from "../../access/gh-access-provider.js";
 import type { GhExecutor } from "../../util/gh-discover.js";
 import { resolveConfig } from "../../util/config.js";
+import { assertPublicVaultHistorySafe, observePublicVaultVisibility } from "../../util/public-vault-privacy.js";
 import { getFederationRepoDir, getFederationYonPath } from "../../util/federation-paths.js";
 import { listMeshes } from "../../registry/meshes-repo.js";
 import { ridsEqual } from "../../util/uuid7.js";
@@ -135,6 +136,7 @@ export interface ReconcilePublishArgs {
   // `conflict` (surface-and-halt) — the locked posture.
   pull?: boolean | undefined;
   ghClient?: FederationGhClient | undefined;
+  visibilityObserver?: ((owner: string, repo: string) => Promise<boolean>) | undefined;
   runGit?: GitRunner | undefined;
   registryDb?: Client | undefined; // open-once seam
   outboxPath?: string | undefined; // test seam
@@ -477,6 +479,9 @@ export async function reconcilePublishFlow(
           repoName: manifestByVaultRid.get(vault.ridHex)!.repoName,
           gh,
           git,
+          visibilityObserver: args.visibilityObserver ?? (args.ghClient === undefined && args.runGit === undefined
+            ? observePublicVaultVisibility
+            : async () => { throw new Error("Public publication refused: injected client has no visibility observer."); }),
           permissionObserver: args.permissionObserver ?? observePublicationPermission,
           authority: publicationAuthorityByVaultRid.get(vault.ridHex)!,
           podRid: policyContext.podRid!,
@@ -613,6 +618,7 @@ interface PublishOneVaultOpts {
   visibility: ReturnType<typeof resolveConfig>["defaultRepoVisibility"];
   gh: FederationGhClient;
   git: GitRunner;
+  visibilityObserver: (owner: string, repo: string) => Promise<boolean>;
   permissionObserver: PublicationPermissionObserver;
   authority: CanonicalVaultPublicationAuthority;
   podRid: string;
@@ -729,6 +735,14 @@ async function publishOneVault(
     }
 
     // 3. Push to the same immutable coordinate used by the fetch above.
+    try {
+      const livePublic = await opts.visibilityObserver(opts.repoOwner, repoName);
+      if (opts.visibility === "public" || livePublic) {
+        await assertPublicVaultHistorySafe({ cwd, git: opts.git, remoteUrl: canonicalUrl });
+      }
+    } catch (error) {
+      return { ...base, status: "failed", message: errMsg(error) };
+    }
     const pushed = await attempt.runOutwardChild(() =>
       opts.git(["push", canonicalUrl, "HEAD:refs/heads/main"], {
         cwd,

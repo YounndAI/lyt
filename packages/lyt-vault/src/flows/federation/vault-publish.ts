@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import type { Client } from "@libsql/client";
 
 import { resolveConfig } from "../../util/config.js";
+import { assertPublicVaultHistorySafe, observePublicVaultVisibility } from "../../util/public-vault-privacy.js";
 import { resolveRemoteUrl } from "../../util/remote-url.js";
 import { isValidGhHandle } from "../../util/identity.js";
 import {
@@ -149,6 +150,7 @@ export interface MaterializeVaultOptions {
   // flip overrides this; never defaults public.
   visibility?: FederationRepoVisibility | undefined;
   ghClient?: FederationGhClient | undefined;
+  visibilityObserver?: ((owner: string, repo: string) => Promise<boolean>) | undefined;
   runGit?: GitRunner | undefined;
   permissionObserver?: PublicationPermissionObserver | undefined;
   /** One id binds every fresh observation to this materialization attempt. */
@@ -393,7 +395,18 @@ export async function materializeVaultPublishable(
     allowFailure: true,
   });
   if (hasHead.code !== 0) {
-    await git(["add", "-A"], { cwd: vault.path });
+    if (visibility === "public") {
+      await assertPublicVaultHistorySafe({ cwd: vault.path, git });
+      await git([
+        "add", "-A", "--", ".",
+        ":(exclude).lyt/ledgers/sync", ":(exclude).lyt/ledgers/sync.yon",
+        ":(exclude).lyt/ledgers/audit", ":(exclude).lyt/ledgers/audit.yon",
+        ":(exclude).lyt/ledgers/provenance", ":(exclude).lyt/ledgers/provenance.yon",
+        ":(exclude).lyt/sync-provenance-pending",
+      ], { cwd: vault.path });
+    } else {
+      await git(["add", "-A"], { cwd: vault.path });
+    }
     await git(["commit", "--allow-empty", "-m", `chore(lyt): initialize vault ${vault.name}`], {
       cwd: vault.path,
     });
@@ -492,6 +505,13 @@ export async function materializeVaultPublishable(
       };
     }
     result.remoteCoordinate = currentCoordinate;
+    const visibilityObserver = opts.visibilityObserver ?? (opts.ghClient === undefined && opts.runGit === undefined
+      ? observePublicVaultVisibility
+      : async () => { throw new Error("Public publication refused: injected client has no visibility observer."); });
+    const livePublic = await visibilityObserver(repoOwner, repoName);
+    if (visibility === "public" || livePublic) {
+      await assertPublicVaultHistorySafe({ cwd: vault.path, git, remoteUrl: canonicalPushUrl });
+    }
     try {
       const pushed = await authorized("repository-push", (attempt) =>
         attempt.runOutwardChild(() =>

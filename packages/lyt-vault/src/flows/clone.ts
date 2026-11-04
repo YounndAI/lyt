@@ -31,7 +31,7 @@ import {
   type ForeignVaultSource,
   type VaultRow,
 } from "../registry/repo.js";
-import { gitUrlToCoordinate, vaultLeaf } from "../registry/vault-addressing.js";
+import { gitUrlToCoordinate } from "../registry/vault-addressing.js";
 import { resolveEffectiveOwnedMeshDestination } from "../registry/destination-policy.js";
 import { appendMeshHomeToFile } from "../registry/vault-home-mesh-helpers.js";
 import { newUuidv7Bytes, ridsEqual, uuid7BytesToDashedString } from "../util/uuid7.js";
@@ -359,7 +359,7 @@ export async function resolveEffectiveCloneOptions(opts: CloneOptions): Promise<
   // default), and auto-index on arrival.
   const foreignSource: ForeignVaultSource = "subscribed";
   const bucketMesh = bucketMeshName(entryModeForSource(foreignSource), owner);
-  const targetSubdir = bucketVaultRelDir(foreignSource, owner, vaultLeaf(canonicalName));
+  const targetSubdir = bucketVaultRelDir(foreignSource, owner, canonicalName);
   return {
     ...opts,
     name: canonicalName,
