@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.8] — 2026-11-05
+
+### Fixed
+
+- Read-only sync reports a completed pull when local edits are preserved, distinguishes conflicts from failed pulls, and excludes generated indexes and audit records from edited-file counts.
+- Overlapping read-only updates preserve recovery copies of supported tracked edits and leave conflicts visible instead of resetting the checkout.
+- Scoped first publication of a new private vault verifies destination visibility before sending content. Local-only pod creation no longer labels an unverified account as authenticated.
+
+---
+
 ## [0.21.7] — 2026-11-04
 
 ### Fixed

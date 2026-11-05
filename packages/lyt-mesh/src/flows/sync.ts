@@ -15,8 +15,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import * as lytVaultSourceBridge from "@younndai/lyt-vault";
 import {
@@ -105,7 +106,7 @@ export type VaultSyncStatus =
   // (read-only vaults stay fresh) but skips BOTH commit and push, so a stray
   // local change never becomes an unpushable outbox op. Mirrors skipped-frozen:
   // sync makes no write claim on the vault. The recovery rider surfaces
-  // `readonlyDiverged` + a reset-to-origin remedy when the vault already
+  // `readonlyDiverged` + a preserve-work remedy when the vault already
   // carries an unpushable local commit (the live-tester wedged state).
   | "skipped-readonly"
   | "skipped-tombstoned"
@@ -177,9 +178,13 @@ export interface VaultSyncReport {
   // vault that ALREADY carries a local commit ahead of (or divergent from) its
   // upstream that can never be pushed (the live-tester wedged state, created by
   // the pre-fix hardening pass stray write + hardening pass commit). The `message` then names the
-  // reset-to-origin remedy so the user can un-jam it. Additive; absent when the
+  // preserve-work guidance so the user can resolve it. Additive; absent when the
   // read-only vault is clean (the common case).
   readonlyDiverged?: boolean;
+  /** Local receive needs manual conflict recovery. */
+  readonlyNeedsAttention?: boolean;
+  /** Private, byte-verified copies made before an overlapping receive. */
+  readonlyRecoveryPath?: string;
   // Increment 1 · Phase A.4 — the safe-write spine's honest horizon, emitted by
   // the SyncOperation and READ BACK from the actual push result (never asserted
   // from the verb). `horizon` = where the effects reached (`pushed` = on the
@@ -507,7 +512,26 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         .find((entry) => entry.vaultRid === ridHex);
       publicVault = (manifest?.visibility ?? publicPrivacy.resolveConfig().defaultRepoVisibility) === "public";
       if (vaultNetworkMode === "online" && !readOnlyRidHexes.has(ridHex)) {
-        publicVault = (await observePublic()) || publicVault;
+        // A new owned vault may not have a repository to inspect yet. Only
+        // defer the observation when Git confirms there is no origin at all;
+        // syncOneVault still validates upstream bindings before returning the
+        // first-publication signal. The materializer must inspect the actual
+        // destination after creation and before any push.
+        let firstPublicationCandidate = false;
+        if (!publicVault && v.source === "own" && v.status === "active" && v.gitUrl === null &&
+            args.vaultRids?.length === 1 && args.vaultRids[0] === ridHex &&
+            onlineAuthority?.publication.policy != null) {
+          const remotes = await runGit(["remote"], { cwd: v.path, allowFailure: true });
+          if (remotes.code === 0 && remotes.stdout.trim() === "") {
+            const branch = await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: v.path, allowFailure: true });
+            const branchName = branch.stdout.trim();
+            if (branch.code === 0 && branchName.length > 0 && !/[\0\r\n]/u.test(branchName)) {
+              const binding = await runGit(["config", "--get", `branch.${branchName}.remote`], { cwd: v.path, allowFailure: true });
+              firstPublicationCandidate = binding.code === 1 && binding.stdout.trim() === "";
+            }
+          }
+        }
+        if (!firstPublicationCandidate) publicVault = (await observePublic()) || publicVault;
       }
     } catch {
       reports.push({ name: v.name, path: v.path, status: "error", staged: false,
@@ -1447,7 +1471,8 @@ async function syncOneVault(
     }
   }
 
-  let statusRecords = publicStatusRecords(await readPorcelainStatus(runGit, vault.path), publicVault);
+  let allStatusRecords = await readPorcelainStatus(runGit, vault.path);
+  let statusRecords = publicStatusRecords(allStatusRecords, publicVault);
   let dirtyCount = statusRecords.length;
 
   let ahead = 0;
@@ -1481,7 +1506,15 @@ async function syncOneVault(
   // handler's call), and — firewall-C1 fix-pass — the remedy is now plain Lyt
   // vocabulary, never a raw git command (see the reframed block below).
   if (readOnly) {
+    statusRecords = allStatusRecords.filter((record) =>
+      ![record.path, record.sourcePath].some((path) => path !== undefined && isReadonlyOperationalMetadata(path)));
+    dirtyCount = statusRecords.length;
+    if (allStatusRecords.some((record) => record.xy.includes("U") || record.xy === "AA" || record.xy === "DD")) {
+      return { ...base, status: "conflict", readonlyDiverged: true, readonlyNeedsAttention: true,
+        message: "This read-only vault already has an unresolved conflict. No changes were discarded; resolve it before syncing again.", ahead, behind, dirtyCount };
+    }
     let pulledMsg = "";
+    let completedRecoveryPath: string | undefined;
     if (hasUpstreamFlag && behind > 0 && ahead === 0) {
       // Clean fast-forwardable subscriber → pull to stay fresh, then reconcile.
       // A.4 note (release review R2-O2): this read-only pull is intentionally NOT
@@ -1505,17 +1538,26 @@ async function syncOneVault(
           dirtyCount,
         };
       }
-      const refetched = await runGit(["fetch", "--quiet", pullTarget.url, pullTarget.ref], {
+      const incoming = await runGit(["diff", "--name-only", "-z", "--no-renames", "HEAD", "FETCH_HEAD"], { cwd: vault.path, allowFailure: true });
+      if (incoming.code !== 0 || incoming.stdoutTruncated === true || (incoming.stdout.length > 0 && !incoming.stdout.endsWith("\0"))) {
+        return { ...base, status: "error", message: "Lyt could not safely compare local edits with incoming changes.", ahead, behind, dirtyCount };
+      }
+      const normalizeCase = (path: string) => process.platform === "win32" ? path.toLowerCase() : path;
+      const incomingPaths = new Set(incoming.stdout.split("\0").filter(Boolean).map(normalizeCase));
+      const overlapping = statusRecords.some((record) => record.xy !== "??" &&
+        [record.path, record.sourcePath].some((path) => path !== undefined && incomingPaths.has(normalizeCase(path))));
+      let recoveryPath: string | undefined;
+      if (overlapping) {
+        try { recoveryPath = snapshotReadonlyEdits(vault.path, statusRecords); }
+        catch (error) {
+          return { ...base, status: "error", message: `Updates were not applied: ${error instanceof Error ? error.message : String(error)}`, ahead, behind, dirtyCount };
+        }
+        completedRecoveryPath = recoveryPath;
+      }
+      const pulled = await runGit(overlapping ? ["rebase", "--autostash", "--quiet", "FETCH_HEAD"] : ["merge", "--ff-only", "--quiet", "FETCH_HEAD"], {
         cwd: vault.path,
         allowFailure: true,
       });
-      const pulled =
-        refetched.code === 0
-          ? await runGit(["rebase", "--autostash", "--quiet", "FETCH_HEAD"], {
-              cwd: vault.path,
-              allowFailure: true,
-            })
-          : refetched;
       if (pulled.code === 0) {
         const terminal = await runGit(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], {
           cwd: vault.path,
@@ -1539,89 +1581,36 @@ async function syncOneVault(
           cwd: vault.path,
           allowFailure: true,
         });
-        const popConflicted = unmerged.code === 0 && unmerged.stdout.trim().length > 0;
+        if (unmerged.code !== 0 || unmerged.stdoutTruncated === true) {
+          return { ...base, status: "error", message: `Updates arrived, but conflict state could not be verified.${recoveryPath === undefined ? "" : ` Recovery copies: ${recoveryPath}`}`, ahead, behind: 0, dirtyCount, ...(recoveryPath === undefined ? {} : { readonlyRecoveryPath: recoveryPath }) };
+        }
+        const popConflicted = unmerged.stdout.trim().length > 0 ||
+          /applying autostash resulted in conflicts|could not apply.*autostash/iu.test(`${pulled.stdout}\n${pulled.stderr}`);
         if (popConflicted) {
-          // The upstream updates DID land (HEAD moved forward); only re-applying
-          // the local edit conflicted. Git RETAINS the autostash entry in the
-          // stash on a pop conflict, so the edit is NOT lost — it lives in this
-          // vault's `git stash` (reachable there; NOT via `lyt capture`, which
-          // cannot see stash content — the pre-fix message pointed there and was
-          // a dead end). Clear the half-applied pop so this read-only copy is
-          // left genuinely CLEAN (never carrying `UU` markers, which would
-          // re-wedge the next pull). `git reset --hard HEAD` returns every
-          // tracked path to the received upstream in ALL cases — including the
-          // modify/delete edge where upstream DELETED a file the local edit
-          // modified (a plain `checkout HEAD -- .` cannot restore a path absent
-          // from HEAD, so its unmerged entry would linger and the tree would
-          // never be clean). `reset --hard` does not touch the stash, so the
-          // edit stays recoverable in every case.
-          const reset = await runGit(["reset", "--hard", "HEAD"], {
-            cwd: vault.path,
-            allowFailure: true,
-          });
-          // re-release review Major — read-only subscriber path: never rewrite the
-          // tracked `.gitignore` here (it would dirty the tree and loop a false
-          // readonlyDiverged on the next sync). Caches still reconcile.
-          await reconcileVaultCaches(vault.path, vault.name, { skipGitignoreMigration: true });
-          // VERIFY the remedy before claiming clean — never fall through to a
-          // "now matches the original" clean-claim on an unverified reset (the
-          // exact false-clean state this guard exists to prevent). Re-check for
-          // unmerged paths; report honestly if any linger or the reset failed.
-          const recheck = await runGit(["diff", "--name-only", "--diff-filter=U"], {
-            cwd: vault.path,
-            allowFailure: true,
-          });
-          const residualUnmerged = recheck.stdout
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0);
-          const treeClean = reset.code === 0 && recheck.code === 0 && residualUnmerged.length === 0;
-          const stashHint =
-            `Your edit was kept safely in this vault's git stash — view it with ` +
-            `\`git -C "${vault.path}" stash show -p\`, or bring it back with ` +
-            `\`git -C "${vault.path}" stash pop\` and copy it into a vault you own.`;
-          if (treeClean) {
-            return {
-              ...base,
-              status: "skipped-readonly",
-              readonlyDiverged: true,
-              message:
-                `Brought in ${behind} update(s) from the shared original. One of your local edits ` +
-                `overlapped an incoming change and couldn't be re-applied automatically, so this ` +
-                `shared copy now matches the original. ${stashHint}`,
-              ahead,
-              behind: 0,
-              dirtyCount: 0,
-            };
-          }
-          // Honest non-clean report — the reset did NOT fully clear the tree
-          // (reset failed, or unmerged paths remain). Do not claim clean; the
-          // edit is still preserved in the stash.
           return {
             ...base,
-            status: "skipped-readonly",
+            status: "conflict",
             readonlyDiverged: true,
-            message:
-              `Brought in ${behind} update(s) from the shared original, but one of your local ` +
-              `edits overlapped an incoming change and this shared copy could not be automatically ` +
-              `returned to a clean state (it may still carry conflict markers). ${stashHint} Run ` +
-              `\`lyt doctor\` if this keeps happening.`,
+            readonlyNeedsAttention: true,
+            ...(recoveryPath === undefined ? {} : { readonlyRecoveryPath: recoveryPath }),
+            message: `Updates arrived, but a local edit conflicts and the working tree needs attention. ${recoveryPath === undefined ? "Do not discard local work; inspect the vault before continuing." : `Verified copies of your edited files are at ${recoveryPath}. Copy them somewhere safe before resolving the conflict.`}`,
             ahead,
             behind: 0,
-            dirtyCount: residualUnmerged.length,
+            dirtyCount,
           };
         } else {
           // re-release review Major — read-only subscriber path: skip the tracked
           // `.gitignore` self-heal (dirtying it would loop a false
           // readonlyDiverged next sync). Caches still reconcile.
           await reconcileVaultCaches(vault.path, vault.name, { skipGitignoreMigration: true });
-          pulledMsg = `Brought in ${behind} update(s) from the shared original; `;
+          pulledMsg = `Brought in ${behind} update(s) from the shared original; ` +
+            (completedRecoveryPath === undefined ? "" : `verified recovery copies remain at ${completedRecoveryPath}. `);
           behind = 0;
         }
       }
-      // A pull failure on a read-only vault is non-fatal here — we still report
-      // skipped-readonly (no push is attempted regardless); the user's read-only
-      // copy just stays a few commits behind until the divergence is resolved.
+      if (pulled.code !== 0) {
+        return { ...base, status: "error", message: `Lyt could not apply the incoming updates; local work was not discarded.${recoveryPath === undefined ? "" : ` Verified recovery copies: ${recoveryPath}`}`, errorOutput: pulled.stderr, ahead, behind, dirtyCount, ...(recoveryPath === undefined ? {} : { readonlyRecoveryPath: recoveryPath }) };
+      }
     }
     // The recovery remedy branches on the ACTUAL state so the plain guidance is
     // both correct and safe (Cohort-1 fix-pass semantics, now firewall-C1 plain):
@@ -1629,7 +1618,7 @@ async function syncOneVault(
     // (a) UNTRACKED stray (dirty, NOT ahead) — a new file was written into the
     // read-only vault but never saved into history. A discard-to-original would
     // NOT remove such new files, so the remedy tells the user to MOVE them into a
-    // vault they own (and warns they're lost on the next refresh) — never a reset.
+    // vault they own without claiming that a later refresh will delete them.
     //
     // (b) SAVED local work (ahead>0) — real edits were saved only on this machine.
     // Lead non-destructive: re-save the work into a vault the handler owns FIRST;
@@ -1669,7 +1658,7 @@ async function syncOneVault(
           `back to the shared original. ` +
           (untrackedCount > 0
             ? `Move the new file(s) into one of your own vaults and re-save them there with ` +
-              `\`lyt capture\` — anything left here will be lost the next time Lyt refreshes this shared copy.`
+              `\`lyt capture\`. Lyt has not uploaded those files.`
             : `Copy those changes into one of your own vaults (save them as a note with ` +
               `\`lyt capture\`), or discard them here to match the shared original.`);
       }
@@ -1677,6 +1666,7 @@ async function syncOneVault(
         ...base,
         status: "skipped-readonly",
         readonlyDiverged: true,
+        ...(completedRecoveryPath === undefined ? {} : { readonlyRecoveryPath: completedRecoveryPath }),
         message: `${pulledMsg}${remedy}`,
         ahead,
         behind,
@@ -1686,6 +1676,7 @@ async function syncOneVault(
     return {
       ...base,
       status: "skipped-readonly",
+      ...(completedRecoveryPath === undefined ? {} : { readonlyRecoveryPath: completedRecoveryPath }),
       message:
         pulledMsg.length > 0
           ? `${pulledMsg.trimEnd()} This is a read-only shared vault — Lyt keeps it up to date but doesn't save your changes back to it.`
@@ -2280,6 +2271,72 @@ function publicStatusRecords(records: PorcelainV1Record[], publicVault: boolean)
   return records.filter((record) =>
     ![record.path, record.sourcePath].some((path) => path !== undefined && publicPrivacy.isPrivateVaultMetadataPath(path)),
   );
+}
+
+function isReadonlyOperationalMetadata(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/");
+  return publicPrivacy.isPrivateVaultMetadataPath(normalized) ||
+    normalized === ".lyt/indexes/lanes.yon" || normalized === ".lyt/indexes/arcs.yon";
+}
+
+// Only overlapping read-only receives need durable recovery copies. Refuse
+// unsupported staged/renamed/deleted paths and links rather than guessing at
+// their bytes. A 64 MiB cap bounds memory and retained private data.
+function snapshotReadonlyEdits(root: string, records: readonly PorcelainV1Record[]): string {
+  const base = resolve(root);
+  const noRedirect = (path: string) => {
+    const canonical = resolve(realpathSync.native(path));
+    const expected = resolve(path);
+    if ((process.platform === "win32" ? canonical.toLowerCase() : canonical) !==
+        (process.platform === "win32" ? expected.toLowerCase() : expected)) {
+      throw new Error("Recovery path contains a link or redirect; preserve edits manually.");
+    }
+  };
+  noRedirect(base);
+  noRedirect(tmpdir());
+  const copies: Array<{ path: string; bytes: Buffer }> = [];
+  let total = 0;
+  const maxBytes = 64 * 1024 * 1024;
+  for (const record of records) {
+    if (record.xy === "??" || isReadonlyOperationalMetadata(record.path)) continue;
+    if (record.xy[0] !== " " || record.xy[1] !== "M" || record.sourcePath !== undefined) {
+      throw new Error("Staged, renamed, deleted, or otherwise unsupported changes require manual preservation before receiving updates.");
+    }
+    const absolute = resolve(base, record.path);
+    const rel = relative(base, absolute);
+    if (!rel || rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel) || rel.split(/[\\/]/u).some((part) => part.toLowerCase() === ".git")) {
+      throw new Error("A changed path is outside the vault or inside Git metadata.");
+    }
+    let current = base;
+    for (const part of rel.split(/[\\/]/u)) {
+      current = join(current, part);
+      const info = lstatSync(current);
+      if (info.isSymbolicLink()) throw new Error("A changed path contains a link; preserve it manually before receiving updates.");
+    }
+    const info = lstatSync(absolute);
+    if (!info.isFile() || info.size > maxBytes || total + info.size > maxBytes) {
+      throw new Error("Changed files exceed the recovery-copy limit or are not regular files.");
+    }
+    const bytes = readFileSync(absolute);
+    total += bytes.length;
+    if (total > maxBytes) throw new Error("Changed files exceed the recovery-copy limit.");
+    copies.push({ path: rel, bytes });
+  }
+  if (copies.length === 0) throw new Error("No supported edited files were available for recovery.");
+  const recovery = mkdtempSync(join(tmpdir(), "lyt-readonly-recovery-"));
+  try {
+    for (const copy of copies) {
+      const destination = join(recovery, copy.path);
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(destination, copy.bytes, { flag: "wx", mode: 0o600 });
+      if (!readFileSync(destination).equals(copy.bytes) || !readFileSync(join(base, copy.path)).equals(copy.bytes)) {
+        throw new Error("Recovery copy verification failed.");
+      }
+    }
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)} Retained recovery directory: ${recovery}`);
+  }
+  return recovery;
 }
 
 async function readPorcelainStatus(runGit: GitRunner, cwd: string): Promise<PorcelainV1Record[]> {

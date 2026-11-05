@@ -661,7 +661,7 @@ export async function materializeScopedVaultAfterSync(args: {
         ["clean", "pulled", "pushed", "diverged-synced", "skipped-readonly"].includes(
           args.report.status,
         ) &&
-        !args.report.readonlyDiverged &&
+        !args.report.readonlyNeedsAttention &&
         (args.report.behind ?? 0) === 0 &&
         (args.report.ahead ?? 0) === 0;
       return {

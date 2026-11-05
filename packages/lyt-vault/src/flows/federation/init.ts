@@ -46,8 +46,11 @@ import {
   resolvePodIdentity,
   writeIdentityCache,
   writePodIdentity,
+  IDENTITY_SOURCE_PROVISIONAL,
+  IDENTITY_SOURCE_GH,
   type CachedIdentity,
 } from "../../util/identity-cache.js";
+import type { ActiveActorObservation } from "../../op/active-actor-observation.js";
 import { POD_REPO_DESCRIPTION, POD_TOPICS } from "../../scaffold/github-defaults.js";
 import { createLocalCheckpoint } from "../../scaffold/local-checkpoint.js";
 import { hexToUuid7Bytes, newUuidv7Bytes, uuid7BytesToHex } from "../../util/uuid7.js";
@@ -101,6 +104,8 @@ export interface FederationInitOptions {
   // the REAL handle. federation_state + pod.yon + identity.yon are still written
   // (the registry knows the pod), so connect can find + reconcile it.
   localOnly?: boolean | undefined;
+  /** Fresh creation's already-observed actor; never triggers an online probe. */
+  identityObservation?: ActiveActorObservation | undefined;
   description?: string | undefined;
   // Injectable seams (tests pass fakes; real CLI uses defaults).
   ghClient?: FederationGhClient | undefined;
@@ -236,7 +241,7 @@ export async function federationInitFlow(
       // existed reaches this cached branch on every re-init, so heal the missing
       // identity.yon here. Disk-present is what B.1's exit asserts; the next sync
       // commits it.
-      ensurePodIdentityWriteback(localDir, handle, now().getTime(), existingState.fedRidHex, false);
+      ensurePodIdentityWriteback(localDir, handle, now().getTime(), existingState.fedRidHex, false, localOnly, opts.identityObservation);
       registerMachineForPod(localDir, now().toISOString());
       checkpointPodRegistration(localDir);
       const stamped = await upsertFederationState(db, {
@@ -428,6 +433,8 @@ export async function federationInitFlow(
           now().getTime(),
           fedRidHex,
           branch === "fresh",
+          localOnly,
+          opts.identityObservation,
         );
       } else {
         ensurePodIdentityMetadata(localDir, fedRidHex, { freshPod: false });
@@ -554,9 +561,9 @@ function defaultIdentityProvider(): string {
 // recovery SoT). Idempotent + self-healing: writes it whenever absent,
 // regardless of init branch, so a pod forged before the write-back existed (the
 // live dogfood: `~/lyt/pod/identity.yon` missing) — or via a path that skipped
-// it — is healed on the next init. Prefers the existing local cache (so the
-// handle/verified_at are real) and falls back to a synthesized pod-writeback
-// record. Never aborts init (non-fatal).
+// it — is healed on the next init. Fresh observed actor evidence takes
+// precedence over a matching local cache; without either, a local-only
+// handle is provisional. Never aborts init (non-fatal).
 //
 // Brief F (P3) — when the pod identity ALREADY exists, this used to return
 // early, which is the drift SOURCE: the machine cache re-stamps `verified_at`
@@ -573,6 +580,8 @@ function ensurePodIdentityWriteback(
   nowMs: number,
   podRid: string,
   freshPod: boolean,
+  localOnly: boolean,
+  observation?: ActiveActorObservation,
 ): void {
   try {
     const existing = readPodIdentity(podDir);
@@ -590,11 +599,19 @@ function ensurePodIdentityWriteback(
       return;
     }
     const local = readIdentityCache();
-    const identity: CachedIdentity = local ?? {
+    const observedAt = observation?.result === "verified" ? Date.parse(observation.observed_at) : NaN;
+    const verified = observation?.result === "verified" && observation.evidence_class === "github-user-login" &&
+      observation.actor.toLowerCase() === handle.toLowerCase() && Number.isFinite(observedAt);
+    const identity: CachedIdentity = verified ? {
+      provider: "github",
+      handle,
+      verifiedAtMs: observedAt,
+      source: IDENTITY_SOURCE_GH,
+    } : local?.handle.toLowerCase() === handle.toLowerCase() ? local : {
       provider: "github",
       handle,
       verifiedAtMs: nowMs,
-      source: "pod-writeback",
+      source: localOnly ? IDENTITY_SOURCE_PROVISIONAL : "pod-writeback",
     };
     writePodIdentity(identity, podDir);
     ensurePodIdentityMetadata(podDir, podRid, { freshPod });

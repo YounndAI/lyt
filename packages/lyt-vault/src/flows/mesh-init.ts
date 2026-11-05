@@ -202,6 +202,7 @@ export async function meshInitFlow(opts: MeshInitOptions): Promise<MeshInitResul
       const pod = await federationInitFlow({
         handle: identity.handle,
         localOnly: true,
+        identityObservation: creationPlan.attempt.active_actor,
         pushToRemote: false,
         createRemoteIfMissing: false,
         checkpointMode: "deferred",

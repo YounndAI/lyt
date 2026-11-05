@@ -509,6 +509,12 @@ export async function materializeVaultPublishable(
       ? observePublicVaultVisibility
       : async () => { throw new Error("Public publication refused: injected client has no visibility observer."); });
     const livePublic = await visibilityObserver(repoOwner, repoName);
+    if (typeof livePublic !== "boolean") {
+      throw new Error("Publication refused: repository visibility could not be verified before push.");
+    }
+    if (visibility === "private" && livePublic) {
+      throw new Error("Publication refused: the destination is public but this vault is configured private. No content was pushed.");
+    }
     if (visibility === "public" || livePublic) {
       await assertPublicVaultHistorySafe({ cwd: vault.path, git, remoteUrl: canonicalPushUrl });
     }

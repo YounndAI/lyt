@@ -704,6 +704,7 @@ async function doFreshBranch(
     pushToRemote: false,
     createRemoteIfMissing: false,
     localOnly: true,
+    identityObservation: planned.plan.attempt.active_actor,
     checkpointMode: "deferred",
     ...(planned.plan.intended_effects.identity.kind === "create"
       ? { plannedFedRidBytes: hexToUuid7Bytes(planned.plan.intended_effects.identity.rid) }
