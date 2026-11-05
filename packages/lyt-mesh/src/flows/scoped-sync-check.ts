@@ -55,6 +55,7 @@ export type ScopedRemoteObservation =
   "current" | "different" | "unknown" | "not-configured" | "access-lost";
 
 export interface LocalObservation {
+  readonly confirmedReadonly?: boolean;
   readonly state: "inactive" | "missing" | "not-git-repo" | "git";
   readonly dirtyCount: number | null;
   readonly hasUpstream: boolean;
@@ -298,14 +299,8 @@ export async function collectScopedSyncCheckObservations(
     );
   }
 
-  const cached = await local(["rev-parse", "--verify", "@{u}^{commit}"], {
-    cwd: vault.path,
-    allowFailure: true,
-  });
-  const cachedHead = cached.code === 0 ? parseObjectId(cached.stdout) : null;
-  const remoteObservation: ScopedRemoteObservation =
-    cachedHead === remoteHead ? "current" : "different";
-  if (remoteObservation === "different") {
+  // Inspect the advertised commit without fetching or updating tracking refs.
+  {
     const object = await local(["cat-file", "-e", `${remoteHead}^{commit}`], {
       cwd: vault.path,
       allowFailure: true,
@@ -319,7 +314,7 @@ export async function collectScopedSyncCheckObservations(
           hasUpstream: true,
           remoteObjectPresent: false,
         }),
-        remoteObservation,
+        "different",
       );
     }
   }
@@ -336,10 +331,12 @@ export async function collectScopedSyncCheckObservations(
       dirtyCount,
       hasUpstream: true,
       remoteObjectPresent: true,
+      confirmedReadonly: readonly === "readonly",
       ahead: aheadBehind?.ahead ?? null,
       behind: aheadBehind?.behind ?? null,
     }),
-    aheadBehind === null || dirtyCount === null ? "unknown" : remoteObservation,
+    aheadBehind === null || dirtyCount === null ? "unknown" :
+      aheadBehind.ahead === 0 && aheadBehind.behind === 0 ? "current" : "different",
   );
 }
 
@@ -411,7 +408,9 @@ export function evaluateScopedSyncCheck(
   } else {
     checked = report(vault, {
       ...local,
-      status: classifyCheckStatus({
+      status: local.confirmedReadonly && !local.frozen && local.dirtyCount > 0 &&
+        local.ahead === 0 && local.behind === 0 && remote.kind === "current"
+        ? "readonly-local-edits" : classifyCheckStatus({
         ahead: local.ahead,
         behind: local.behind,
         dirtyCount: local.dirtyCount,
@@ -494,6 +493,7 @@ export async function scopedSyncCheckFlow(
 
 function localObservation(fields: Partial<LocalObservation>): LocalObservation {
   return Object.freeze({
+    confirmedReadonly: fields.confirmedReadonly === true,
     state: fields.state ?? "git",
     dirtyCount: fields.dirtyCount ?? null,
     hasUpstream: fields.hasUpstream ?? false,

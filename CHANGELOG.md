@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.10] — 2026-11-05
+
+### Fixed
+
+- When a read-only vault matches its live upstream, `sync --check` reports preserved user edits without failing or asking for another sync. A stale local tracking ref no longer makes a matching upstream appear different.
+
 ## [0.21.9] — 2026-11-05
 
 ### Fixed
