@@ -92,6 +92,7 @@ const inspectWindowsGitPath = (
 // vault so its reversibility horizon is read back from the ACTUAL push result.
 import { SyncOperation } from "../op/operations/sync-op.js";
 import { withForeignSyncAttempt, type ForeignSyncAuthority } from "./foreign-sync-authority.js";
+import { isReadonlyOperationalMetadata, observeReadonlyForCheck, readonlyUserRecords } from "./readonly-reporting.js";
 
 export type VaultSyncStatus =
   | "clean"
@@ -428,6 +429,9 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
   // subscription the user was granted write access to (verdict true) is NOT
   // read-only and syncs normally. Computed once here, keyed by rid hex.
   const readOnlyRidHexes = new Set<string>();
+  const confirmedReadOnlyRidHexes = new Set<string>();
+  const unknownReadOnlyRidHexes = new Set<string>();
+  const writableSharedRidHexes = new Set<string>();
   try {
     const all = await listVaults(db);
     const federationStates = await listFederationStates(db);
@@ -449,16 +453,30 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
       const ridHex = uuid7BytesToHex(v.rid);
       if (v.source === "subscribed") {
         readOnlyRidHexes.add(ridHex);
+        confirmedReadOnlyRidHexes.add(ridHex);
         subscribedRidHexes.add(ridHex);
         continue;
       }
       const policyOnline = networkMode === "online" && authorityForVault(args, v) !== undefined;
+      if (v.source === "shared") {
+        const observed = policyOnline
+          ? await observeReadonlyForCheck(v, args.gh === undefined ? {} : { gh: args.gh })
+          : "unknown";
+        if (observed === "readonly") confirmedReadOnlyRidHexes.add(ridHex);
+        else if (observed === "writable") writableSharedRidHexes.add(ridHex);
+        else unknownReadOnlyRidHexes.add(ridHex);
+      }
       if (!policyOnline) {
-        if (subscribedRidHexes.has(ridHex)) readOnlyRidHexes.add(ridHex);
+        if (subscribedRidHexes.has(ridHex)) {
+          readOnlyRidHexes.add(ridHex);
+          if (v.source === "shared") unknownReadOnlyRidHexes.add(ridHex);
+        }
         continue;
       }
       const gate = await deriveWriteGate(v, db, args.gh !== undefined ? { gh: args.gh } : {});
       if (gate.blocked) readOnlyRidHexes.add(ridHex);
+      if (v.source !== "shared" && gate.blocked && gate.verdict?.writable === false) confirmedReadOnlyRidHexes.add(ridHex);
+      if (v.source !== "shared" && gate.blocked && gate.verdict?.writable === "unknown") unknownReadOnlyRidHexes.add(ridHex);
     }
   } finally {
     await closeRegistry(db);
@@ -604,6 +622,7 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
             },
         publicVault,
         vaultNetworkMode === "online" ? observePublic : undefined,
+        !writableSharedRidHexes.has(ridHex),
       );
     } catch (error) {
       if (machine !== null && podRid !== null) {
@@ -629,6 +648,10 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         }
       }
       throw error;
+    }
+    if (unknownReadOnlyRidHexes.has(ridHex)) {
+      delete report.dirtyCount;
+      report.message += " Read-only permission could not be verified, so change and publication counts are unknown.";
     }
     const provenanceOnlyPublication =
       promotedEventIds.length > 0 &&
@@ -693,9 +716,10 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         provenanceWarning = `Could not queue sync provenance: ${safeProvenanceError(err)}`;
       }
     }
+    if (confirmedReadOnlyRidHexes.has(ridHex)) report.pendingPublication = 0;
     try {
       const status = provenance.getSyncProvenanceStatus(v.path);
-      report.pendingPublication = status.pendingPublication;
+      report.pendingPublication = confirmedReadOnlyRidHexes.has(ridHex) ? 0 : status.pendingPublication;
       if (status.degradedPending > 0) {
         provenanceWarning ??= `${status.degradedPending} pending sync provenance file(s) are unreadable and retained for recovery.`;
       }
@@ -711,6 +735,9 @@ export async function syncFlow(args: SyncFlowArgs = {}): Promise<SyncFlowResult>
         report.latestPublishedSync = status.latestPublishedSync.timestamp;
     } catch (err) {
       provenanceWarning ??= `Could not read sync provenance: ${safeProvenanceError(err)}`;
+    }
+    if (unknownReadOnlyRidHexes.has(ridHex)) {
+      delete report.pendingPublication;
     }
     if (provenanceWarning !== undefined) report.syncProvenanceWarning = provenanceWarning;
     if (!publicVault && machine !== null && vaultNetworkMode === "online" && isReachedOnlineStatus(report.status)) {
@@ -1067,6 +1094,7 @@ async function syncOneVault(
   beforeEligibleSync?: () => void | Promise<void>,
   publicVault = false,
   observePublic?: () => Promise<boolean>,
+  readonlyReporting = true,
 ): Promise<VaultSyncReport> {
   const base: VaultSyncReport = {
     name: vault.name,
@@ -1111,7 +1139,8 @@ async function syncOneVault(
 
   if (networkMode === "local-only") {
     if (readOnly) {
-      const statusRecords = await readPorcelainStatus(runGit, vault.path);
+      const all = await readPorcelainStatus(runGit, vault.path);
+      const statusRecords = readonlyReporting ? readonlyUserRecords(all) : all;
       const dirtyCount = statusRecords.length;
       await reconcileVaultCaches(vault.path, vault.name, { skipGitignoreMigration: true });
       return {
@@ -1355,6 +1384,7 @@ async function syncOneVault(
               beforeEligibleSync,
               publicVault,
               observePublic,
+              readonlyReporting,
             ),
         });
       }
@@ -1418,6 +1448,7 @@ async function syncOneVault(
             beforeEligibleSync,
             publicVault,
             observePublic,
+            readonlyReporting,
           );
         },
       };
@@ -1506,8 +1537,7 @@ async function syncOneVault(
   // handler's call), and — firewall-C1 fix-pass — the remedy is now plain Lyt
   // vocabulary, never a raw git command (see the reframed block below).
   if (readOnly) {
-    statusRecords = allStatusRecords.filter((record) =>
-      ![record.path, record.sourcePath].some((path) => path !== undefined && isReadonlyOperationalMetadata(path)));
+    statusRecords = readonlyReporting ? readonlyUserRecords(allStatusRecords) : allStatusRecords;
     dirtyCount = statusRecords.length;
     if (allStatusRecords.some((record) => record.xy.includes("U") || record.xy === "AA" || record.xy === "DD")) {
       return { ...base, status: "conflict", readonlyDiverged: true, readonlyNeedsAttention: true,
@@ -2271,12 +2301,6 @@ function publicStatusRecords(records: PorcelainV1Record[], publicVault: boolean)
   return records.filter((record) =>
     ![record.path, record.sourcePath].some((path) => path !== undefined && publicPrivacy.isPrivateVaultMetadataPath(path)),
   );
-}
-
-function isReadonlyOperationalMetadata(path: string): boolean {
-  const normalized = path.replaceAll("\\", "/");
-  return publicPrivacy.isPrivateVaultMetadataPath(normalized) ||
-    normalized === ".lyt/indexes/lanes.yon" || normalized === ".lyt/indexes/arcs.yon";
 }
 
 // Only overlapping read-only receives need durable recovery copies. Refuse

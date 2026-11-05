@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.9] — 2026-11-05
+
+### Fixed
+
+- On a read-only vault, `sync --check` counts edited user files the same way as `sync`, excludes generated metadata, and reports zero files pending publication without discarding local changes.
+
 ## [0.21.8] — 2026-11-05
 
 ### Fixed

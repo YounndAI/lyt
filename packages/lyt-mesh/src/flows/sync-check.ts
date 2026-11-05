@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
+import type { Client } from "@libsql/client";
 import {
-  closeRegistry,
   listVaults,
-  openRegistry,
+  openRegistryReadOnly,
   realIdentityRunner,
   runGitReadOnly,
   runGitRemoteObservation,
@@ -42,6 +42,7 @@ export interface SyncCheckArgs {
   // Skip online observation. The resulting remote state is intentionally unknown.
   noFetch?: boolean;
   ghAuthOk?: () => boolean | null;
+  resolveReadonly?: (vault: VaultSnapshot) => Promise<"readonly" | "writable" | "unknown">;
 }
 
 export interface VaultCheckReport {
@@ -49,13 +50,13 @@ export interface VaultCheckReport {
   name: string;
   path: string;
   status: string;
-  ahead: number;
-  behind: number;
-  dirtyCount: number;
+  ahead: number | null;
+  behind: number | null;
+  dirtyCount: number | null;
   /** 0.20.16 explicit units; legacy fields above remain for one release. */
-  aheadCommitCount: number;
-  behindCommitCount: number;
-  dirtyFileCount: number;
+  aheadCommitCount: number | null;
+  behindCommitCount: number | null;
+  dirtyFileCount: number | null;
   hasUpstream: boolean;
   frozen: boolean;
   frozenUntil: string | null;
@@ -87,16 +88,17 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
     args.noFetch === true ? noRemoteObservation : (args.runGit ?? runGitRemoteObservation);
   const now = args.now ?? new Date();
   const ghAuthOk = args.ghAuthOk ?? (() => realIdentityRunner.ghAuthStatus());
-  const db = await openRegistry();
+  const opened = openRegistryReadOnly();
+  if (opened.kind === "missing") return { reports: [], summary: emptySummary(), exitCode: 2 };
   let candidates: VaultRow[];
   try {
-    const all = await listVaults(db);
+    const all = await listVaults(opened.client as unknown as Client);
     candidates =
       args.vaultNames && args.vaultNames.length > 0
         ? all.filter((vault) => args.vaultNames!.includes(vault.name))
         : all;
   } finally {
-    await closeRegistry(db);
+    opened.close();
   }
 
   const reports: VaultCheckReport[] = [];
@@ -110,6 +112,8 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
       runGitRemoteObservation: remote,
       now: () => now,
       ghAuthOk,
+      ...(args.resolveReadonly !== undefined ? { resolveReadonly: args.resolveReadonly } :
+        args.noFetch === true ? { resolveReadonly: async (v: VaultSnapshot) => v.source === "own" ? "writable" as const : v.source === "subscribed" ? "readonly" as const : "unknown" as const } : {}),
     });
     const evaluated = evaluateScopedSyncCheck(vault, observed.local, observed.remote);
     const checked = evaluated.report;
@@ -118,12 +122,12 @@ export async function syncCheckFlow(args: SyncCheckArgs = {}): Promise<SyncCheck
       name: checked.name,
       path: checked.path,
       status: checked.status,
-      ahead: checked.ahead ?? 0,
-      behind: checked.behind ?? 0,
-      dirtyCount: checked.dirtyCount ?? 0,
-      aheadCommitCount: checked.aheadCommitCount ?? checked.ahead ?? 0,
-      behindCommitCount: checked.behindCommitCount ?? checked.behind ?? 0,
-      dirtyFileCount: checked.dirtyFileCount ?? checked.dirtyCount ?? 0,
+      ahead: checked.ahead,
+      behind: checked.behind,
+      dirtyCount: checked.dirtyCount,
+      aheadCommitCount: checked.aheadCommitCount,
+      behindCommitCount: checked.behindCommitCount,
+      dirtyFileCount: checked.dirtyFileCount,
       hasUpstream: checked.hasUpstream,
       frozen: checked.frozen,
       frozenUntil: checked.frozenUntil,

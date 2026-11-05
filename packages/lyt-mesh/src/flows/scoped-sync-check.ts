@@ -37,7 +37,9 @@ import {
   type VaultSnapshot,
 } from "@younndai/lyt-vault";
 
-import { classifyCheckStatus } from "./sync.js";
+import { _parsePorcelainV1Z, classifyCheckStatus } from "./sync.js";
+import { observeReadonlyForCheck, readonlyUserRecords } from "./readonly-reporting.js";
+export { observeReadonlyForCheck } from "./readonly-reporting.js";
 
 const REMOTE_OBSERVATION_TIMEOUT_MS = 10_000;
 
@@ -154,12 +156,13 @@ export interface ScopedSyncCheckDependencies {
     plan: ScopedSyncCheckPlan,
     deps?: Pick<
       ScopedSyncCheckDependencies,
-      "runGitReadOnly" | "runGitRemoteObservation" | "now" | "ghAuthOk"
+      "runGitReadOnly" | "runGitRemoteObservation" | "now" | "ghAuthOk" | "resolveReadonly"
     >,
   ) => Promise<Readonly<{ local: LocalObservation; remote: RemoteObservation }>>;
   runGitReadOnly?: LocalGitRunner;
   runGitRemoteObservation?: RemoteGitRunner;
   ghAuthOk?: () => boolean | null;
+  resolveReadonly?: (vault: VaultSnapshot) => Promise<"readonly" | "writable" | "unknown">;
   now?: () => Date;
   newReceiptId?: () => string;
 }
@@ -173,7 +176,7 @@ export async function collectScopedSyncCheckObservations(
   plan: ScopedSyncCheckPlan,
   deps: Pick<
     ScopedSyncCheckDependencies,
-    "runGitReadOnly" | "runGitRemoteObservation" | "now" | "ghAuthOk"
+    "runGitReadOnly" | "runGitRemoteObservation" | "now" | "ghAuthOk" | "resolveReadonly"
   > = {},
 ): Promise<Readonly<{ local: LocalObservation; remote: RemoteObservation }>> {
   const local = deps.runGitReadOnly ?? runGitReadOnly;
@@ -210,12 +213,16 @@ export async function collectScopedSyncCheckObservations(
     );
   }
 
+  let readonly: "readonly" | "writable" | "unknown";
+  try { readonly = await (deps.resolveReadonly ?? observeReadonlyForCheck)(vault); }
+  catch { readonly = "unknown"; }
+
   const upstream = await local(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
     cwd: vault.path,
     allowFailure: true,
   });
   if (upstream.code !== 0) {
-    const dirtyCount = await observeDirtyCount(local, vault.path);
+    const dirtyCount = await observeDirtyCount(local, vault.path, readonly);
     return observations(
       localObservation({
         ...frozenFields,
@@ -227,7 +234,7 @@ export async function collectScopedSyncCheckObservations(
     );
   }
 
-  const dirtyCount = await observeDirtyCount(local, vault.path);
+  const dirtyCount = await observeDirtyCount(local, vault.path, readonly);
   const tracking = await observeConfiguredUpstream(local, vault.path);
   if (tracking === null) {
     return observations(
@@ -364,6 +371,8 @@ export function evaluateScopedSyncCheck(
       vaultStatus: vault.status,
       remoteObservation: remote.kind,
     });
+  } else if (local.dirtyCount === null) {
+    checked = report(vault, { ...local, status: "local-unknown", vaultStatus: vault.status, remoteObservation: remote.kind });
   } else if (!local.hasUpstream || remote.kind === "not-configured") {
     checked = report(vault, {
       ...local,
@@ -440,7 +449,7 @@ export async function inspectScopedSyncCheck(
   plan: ScopedSyncCheckPlan,
   deps: Pick<
     ScopedSyncCheckDependencies,
-    "runGitReadOnly" | "runGitRemoteObservation" | "now" | "ghAuthOk"
+    "runGitReadOnly" | "runGitRemoteObservation" | "now" | "ghAuthOk" | "resolveReadonly"
   > = {},
 ): Promise<ScopedVaultCheckReport> {
   const observed = await collectScopedSyncCheckObservations(plan, deps);
@@ -528,13 +537,14 @@ function report(
   });
 }
 
-async function observeDirtyCount(run: LocalGitRunner, cwd: string): Promise<number | null> {
-  const status = await run(["status", "--porcelain"], { cwd, allowFailure: true });
-  if (status.code !== 0) return null;
-  return status.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0).length;
+async function observeDirtyCount(run: LocalGitRunner, cwd: string, readonly: "readonly" | "writable" | "unknown"): Promise<number | null> {
+  if (readonly === "unknown") return null;
+  const status = await run(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd, allowFailure: true });
+  if (status.code !== 0 || status.stdoutTruncated === true) return null;
+  try {
+    const records = _parsePorcelainV1Z(status.stdout);
+    return (readonly === "readonly" ? readonlyUserRecords(records) : records).length;
+  } catch { return null; }
 }
 
 async function observeConfiguredUpstream(
@@ -601,7 +611,7 @@ function summarize(checked: ScopedVaultCheckReport): ScopedCheckSummary {
 }
 
 function exitCodeFor(checked: ScopedVaultCheckReport): number {
-  if (checked.status === "remote-unknown" || checked.status === "access_lost") return 2;
+  if (checked.status === "remote-unknown" || checked.status === "local-unknown" || checked.status === "access_lost") return 2;
   if (
     checked.status === "dirty" ||
     checked.status === "dirty-behind" ||

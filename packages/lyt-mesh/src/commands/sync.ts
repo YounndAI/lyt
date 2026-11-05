@@ -1340,6 +1340,7 @@ const CHECK_STATUS_LABEL: Record<string, string> = {
   access_lost: "no access",
   "remote-different": "online changed",
   "remote-unknown": "online status unknown",
+  "local-unknown": "local status unknown",
 };
 
 // A status that represents pending sync work (unsaved / to send / to receive).
@@ -1401,7 +1402,10 @@ export function printCheckHuman(
   const summaryLine =
     needsSync > 0
       ? `${needsSync} vault(s) need sync (${summary.dirtyVaultCount} unsaved, ${summary.aheadVaultCount} to send, ${summary.behindVaultCount} to receive, ${summary.diverged} to send & receive)`
-      : "All vaults up to date";
+      : reports.length === 0 ? "No vaults available to check"
+      : reports.some((r) => r.status === "local-unknown" || r.status === "remote-unknown")
+        ? "Some vaults could not be checked"
+        : "All vaults up to date";
   // eslint-disable-next-line no-console
   console.log(`lyt sync --check: ${summaryLine}`);
   if (summary.frozen > 0 || summary.noUpstream > 0 || summary.skippedNonActive > 0) {
@@ -1425,8 +1429,8 @@ export function printCheckHuman(
     // receive" signal is no longer erased by the bare "dirty" label.
     if (r.status === "diverged" || r.status === "dirty-behind") {
       const io: string[] = [];
-      if (r.ahead > 0) io.push(`${r.ahead} to send`);
-      if (r.behind > 0) io.push(`${r.behind} to receive`);
+      if ((r.ahead ?? 0) > 0) io.push(`${r.ahead} to send`);
+      if ((r.behind ?? 0) > 0) io.push(`${r.behind} to receive`);
       if (io.length > 0) extras.push(io.join(" · "));
     }
     if (r.status === "dirty" || r.status === "dirty-behind")
