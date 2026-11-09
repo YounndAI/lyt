@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.12] — 2026-11-09
+
+### Fixed
+
+- First-publication results now keep the nested sync status consistent with the confirmed push, while preserving pending pod advertisement and refused-publication outcomes.
+
+---
+
 ## [0.21.11] — 2026-11-09
 
 ### Fixed

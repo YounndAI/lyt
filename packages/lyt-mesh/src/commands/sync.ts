@@ -589,6 +589,7 @@ export function reconcileScopedPublicationReport(
   if (report.status !== "no-upstream" || outcome.status !== "published" ||
       outcome.materialized?.pushed !== true) return;
   report.status = "pushed";
+  outcome.syncStatus = report.status;
   report.message = outcome.message;
   // These observations preceded materialization. Do not present them as
   // post-publication counts or manufacture a clean zero without a fresh read.
