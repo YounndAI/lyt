@@ -286,6 +286,9 @@ export function buildSyncCommand(deps: Partial<SyncFederationDeps> = {}): Comman
                   vaultName: scopedVaultName,
                   report,
                 });
+        if (report !== undefined && scopedPublish !== undefined) {
+          reconcileScopedPublicationReport(report, scopedPublish);
+        }
       }
       if (opts.json !== true && opts.quiet !== true) {
         printSyncHuman(result.reports);
@@ -566,6 +569,8 @@ export type ScopedPublishStatus =
   | "sync-incomplete";
 
 export interface ScopedPublishOutcome {
+  /** Pod discovery is separate from successful vault publication. */
+  podAdvertisement?: "complete" | "pending";
   vaultName: string;
   status: ScopedPublishStatus;
   remoteAction: "none" | "targeted";
@@ -575,6 +580,22 @@ export interface ScopedPublishOutcome {
   syncStatus: VaultSyncStatus | null;
   ok: boolean;
   message: string;
+}
+
+export function reconcileScopedPublicationReport(
+  report: VaultSyncReport,
+  outcome: ScopedPublishOutcome,
+): void {
+  if (report.status !== "no-upstream" || outcome.status !== "published" ||
+      outcome.materialized?.pushed !== true) return;
+  report.status = "pushed";
+  report.message = outcome.message;
+  // These observations preceded materialization. Do not present them as
+  // post-publication counts or manufacture a clean zero without a fresh read.
+  delete report.pendingPublication;
+  delete report.ahead;
+  delete report.behind;
+  delete report.dirtyCount;
 }
 
 function scopedPublishHeld(vaultName: string): ScopedPublishOutcome {
@@ -800,6 +821,7 @@ export async function materializeScopedVaultAfterSync(args: {
       materialized,
       syncStatus: args.report?.status ?? null,
       ok: published && !metadataPending,
+      ...(published ? { podAdvertisement: metadataPending ? "pending" as const : "complete" as const } : {}),
       message: published
         ? metadataPending
           ? `Saved this vault to its private online copy, but its pod advertisement is pending: ${materialized.warnings.join("; ")}`

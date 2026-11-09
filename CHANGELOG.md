@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.21.11] — 2026-11-09
+
+### Fixed
+
+- First publication reports a confirmed vault push instead of the stale no-upstream result. Pending pod advertisement remains explicit, and pre-publication counts are omitted rather than presented as current.
+
+---
+
 ## [0.21.10] — 2026-11-05
 
 ### Fixed
